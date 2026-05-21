@@ -1,0 +1,40 @@
+version: "3.8"
+
+# ── PRODUCTION / OFFLINE RUNTIME ─────────────────────────────────────────────
+# Uses a pre-built image. No internet access required.
+# The image must be loaded first:
+#   docker load -i watchdog.tar
+#
+# Usage:
+#   cp .env.example .env   # fill in SLACK_WEBHOOK_URL (and Splunk if needed)
+#   docker compose up -d
+#
+# To build a new image (requires internet):
+#   docker compose -f docker-compose.build.yaml build
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Watchdog Agent ──────────────────────────────────────────────────────────
+  watchdog:
+    image: watchdog:latest   # pre-built image — does not require internet or build
+    container_name: watchdog
+    restart: always          # always restart — watchdog must never stay down
+    network_mode: host       # must reach all container IPs across all Docker networks
+    env_file: .env
+    environment:
+      WATCHDOG_CONFIG: /etc/watchdog/watchdog-config.yaml
+      WATCHDOG_HOST:   cyber-controller-server   # identifies this node in alerts
+    volumes:
+      # Read Docker socket to monitor all containers on the host
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Config file (read-only mount)
+      - ./watchdog-config.yaml:/etc/watchdog/watchdog-config.yaml:ro
+      # Persistent log storage — written directly to host folder
+      - ./watchdog:/var/log/watchdog
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import docker; docker.from_env().ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

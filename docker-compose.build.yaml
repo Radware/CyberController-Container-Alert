@@ -1,0 +1,36 @@
+version: "3.8"
+
+# ── DEVELOPER / ONLINE BUILD ──────────────────────────────────────────────────
+# Use this file when you have internet access and want to build a fresh image.
+#
+# Usage:
+#   docker compose -f docker-compose.build.yaml build
+#   docker compose -f docker-compose.build.yaml up -d
+#
+# After a successful build, export the image for offline customers:
+#   docker save watchdog:latest -o watchdog.tar
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  watchdog:
+    build:
+      context: .
+    image: watchdog:latest
+    container_name: watchdog
+    restart: always
+    network_mode: host
+    env_file: .env
+    environment:
+      WATCHDOG_CONFIG: /etc/watchdog/watchdog-config.yaml
+      WATCHDOG_HOST:   cyber-controller-server
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./watchdog-config.yaml:/etc/watchdog/watchdog-config.yaml:ro
+      - ./watchdog:/var/log/watchdog
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import docker; docker.from_env().ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
