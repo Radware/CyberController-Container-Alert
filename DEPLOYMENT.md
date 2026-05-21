@@ -40,12 +40,16 @@ The watchdog monitors all Docker containers on the host and fires alerts to **Sl
 ## 2. Repository Structure
 
 ```
-Alert_Container/
-├── docker-compose.yaml        # Watchdog stack definition
-├── Dockerfile.watchdog        # Watchdog image
+Container_Alert/
+├── docker-compose.yaml        # Production stack — uses pre-built image
+├── docker-compose.build.yaml  # Developer build stack — requires internet
+├── Dockerfile                 # Watchdog image definition
 ├── requirements-watchdog.txt  # Python deps: docker, requests, PyYAML
 ├── watchdog.py                # Watchdog agent
 ├── watchdog-config.yaml       # Watchdog behaviour & channel settings
+├── install.sh                 # Install helper script
+├── uninstall.sh               # Uninstall helper script
+├── README.md                  # Quick-start reference
 └── .env.example               # Template — copy to .env and fill in
 ```
 
@@ -152,16 +156,24 @@ curl -k https://<splunk-host>:8088/services/collector/health
 
 ## 7. Step 5 — Build and Deploy
 
-### First-time deployment
+### First-time deployment (with internet / build machine)
 
 ```bash
-# From the Alert_Container/ directory
-docker compose up -d --build
+# From the Container_Alert/ directory
+# Build the image and start the watchdog
+docker compose -f docker-compose.build.yaml up -d
+```
+
+### First-time deployment (offline / pre-built image)
+
+```bash
+# Load the exported image, then start
+docker load -i watchdog.tar
+docker compose up -d
 ```
 
 This will:
-- Build the `watchdog` image
-- Start the watchdog container
+- Start the watchdog container using the pre-built `watchdog:latest` image
 
 ### Check all containers started
 
@@ -220,7 +232,7 @@ index=main sourcetype="container:alert"
 | Location | Description |
 |---|---|
 | `docker compose logs watchdog` | Live stdout logs |
-| `docker volume inspect alert_container_watchdog-logs` | Named volume path on host |
+| `./watchdog/watchdog.log` | Bind-mounted log file on the host (inside the `Container_Alert/` directory) |
 | `/var/log/watchdog/watchdog.log` | Inside the container (rotated, max 10 MB × 5 files) |
 
 To follow logs with timestamps:
@@ -266,7 +278,7 @@ docker compose restart watchdog
 | `restart_window_minutes` | `10` | Rolling window for restart counting |
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy polls before alerting |
 | `excluded_containers` | `[debug-shell, load-test]` | Containers never alerted on |
-| `log_level` | `INFO` | `DEBUG` for verbose output |
+| `log_level` | `DEBUG` | `INFO` or `DEBUG` — set to `INFO` in production |
 
 ### Identify this host in alerts
 
@@ -296,13 +308,16 @@ docker compose stop
 ### Update after code changes
 
 ```bash
-docker compose up -d --build
+# Rebuild the image, then redeploy
+docker compose -f docker-compose.build.yaml build
+docker compose up -d
 ```
 
 ### Update only the watchdog
 
 ```bash
-docker compose up -d --build watchdog
+docker compose -f docker-compose.build.yaml build watchdog
+docker compose up -d watchdog
 ```
 
 ---
