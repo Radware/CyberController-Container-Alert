@@ -11,13 +11,14 @@
 #   sudo bash uninstall.sh [OPTIONS]
 #
 # Options:
-#   --keep-logs     Keep log files (container + image removed only)
-#   --remove-all    Full removal including log files
+#   --keep-image    Preserve the watchdog:latest Docker image (skip image removal)
+#   --keep-logs     Preserve log files (default behaviour)
+#   --remove-all    Full removal: container + image + log files
 #   --force         Skip confirmation prompts
 #   -h, --help      Show this help
 ################################################################################
 
-set -e
+# Errors are handled explicitly throughout this script
 
 # ── Detect color support ──────────────────────────────────────────────────────
 if [ "${FORCE_COLOR:-0}" = "1" ] || ([ -t 1 ] && command -v tput &>/dev/null && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]); then
@@ -36,11 +37,16 @@ INSTALL_DIR="$SCRIPT_DIR"
 CONTAINER_NAME="watchdog"
 IMAGE_NAME="watchdog:latest"
 VERSION="1.0.0"
+DC=""  # compose command — detected at runtime
 
 # ── Flags ─────────────────────────────────────────────────────────────────────
+KEEP_IMAGE=false
 KEEP_LOGS=false
 REMOVE_ALL=false
 FORCE=false
+
+# ── Runtime state (set during removal operations, read by summary) ─────────────
+IMAGE_KEPT=false
 
 ################################################################################
 # Helper Functions
@@ -72,17 +78,21 @@ usage() {
     echo "Uninstall the CyberController Container Watchdog."
     echo ""
     echo "OPTIONS:"
-    echo "    --keep-logs     Remove container and image only; preserve log files"
-    echo "    --remove-all    Full removal including log directory"
+    echo "    --keep-image    Preserve the watchdog:latest Docker image (skip image removal)"
+    echo "    --keep-logs     Remove container and image; preserve log files"
+    echo "    --remove-all    Full removal: container + image + log directory"
     echo "    --force         Skip confirmation prompts"
     echo "    -h, --help      Display this help message"
     echo ""
     echo "EXAMPLES:"
-    echo "    # Standard uninstall (prompts for log retention):"
+    echo "    # Standard uninstall (container removed; prompted for image and logs):"
     echo "    sudo bash uninstall.sh"
     echo ""
     echo "    # Remove everything without prompts:"
     echo "    sudo bash uninstall.sh --remove-all --force"
+    echo ""
+    echo "    # Remove container, keep image and logs:"
+    echo "    sudo bash uninstall.sh --keep-image --keep-logs"
     echo ""
     echo "    # Remove container and image, keep logs:"
     echo "    sudo bash uninstall.sh --keep-logs"
@@ -100,10 +110,11 @@ usage() {
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --keep-logs)  KEEP_LOGS=true;  shift ;;
-            --remove-all) REMOVE_ALL=true; shift ;;
-            --force)      FORCE=true;      shift ;;
-            -h|--help)    usage ;;
+            --keep-image)   KEEP_IMAGE=true;  shift ;;
+            --keep-logs)    KEEP_LOGS=true;   shift ;;
+            --remove-all)   REMOVE_ALL=true;  shift ;;
+            --force)        FORCE=true;       shift ;;
+            -h|--help)      usage ;;
             *)
                 print_error "Unknown option: $1"
                 usage
@@ -113,6 +124,10 @@ parse_arguments() {
 
     if [ "$KEEP_LOGS" = true ] && [ "$REMOVE_ALL" = true ]; then
         print_error "Cannot specify both --keep-logs and --remove-all"
+        exit 1
+    fi
+    if [ "$KEEP_IMAGE" = true ] && [ "$REMOVE_ALL" = true ]; then
+        print_error "Cannot specify both --keep-image and --remove-all"
         exit 1
     fi
 }
@@ -143,7 +158,7 @@ find_installation_directory() {
     fi
 
     # Fallback: detect from container volume mounts
-    if check_docker && docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    if check_docker && docker container inspect "${CONTAINER_NAME}" &>/dev/null; then
         MOUNT=$(docker inspect "${CONTAINER_NAME}" \
             --format '{{range .Mounts}}{{if eq .Destination "/var/log/watchdog"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || echo "")
         if [ -n "$MOUNT" ]; then
@@ -171,7 +186,7 @@ display_removal_plan() {
     LOGS_EXIST=false
 
     if check_docker; then
-        if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        if docker container inspect "${CONTAINER_NAME}" &>/dev/null; then
             CONTAINER_EXISTS=true
             CSTATUS=$(docker ps -a --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}')
             echo -e "  ${RED}✗${NC} Docker container : ${CONTAINER_NAME} (${CSTATUS})"
@@ -183,7 +198,13 @@ display_removal_plan() {
             IMAGE_EXISTS=true
             ISIZE=$(docker image inspect "${IMAGE_NAME}" --format '{{.Size}}' | \
                     awk '{printf "%.0f MB", $1/1024/1024}')
-            echo -e "  ${RED}✗${NC} Docker image     : ${IMAGE_NAME} (~${ISIZE})"
+            if [ "$KEEP_IMAGE" = true ]; then
+                echo -e "  ${GREEN}✓${NC} Docker image     : ${IMAGE_NAME} (~${ISIZE}) — ${GREEN}KEEPING${NC}"
+            elif [ "$REMOVE_ALL" = true ] || [ "$FORCE" = true ]; then
+                echo -e "  ${RED}✗${NC} Docker image     : ${IMAGE_NAME} (~${ISIZE})"
+            else
+                echo -e "  ${YELLOW}?${NC} Docker image     : ${IMAGE_NAME} (~${ISIZE}) — ${YELLOW}WILL PROMPT${NC}"
+            fi
         else
             echo -e "  ${GREEN}○${NC} Docker image     : ${IMAGE_NAME} (not found)"
         fi
@@ -242,10 +263,24 @@ stop_and_remove_container() {
         return 0
     fi
 
-    if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    # Detect compose command (v2 plugin preferred, fall back to v1 standalone)
+    if docker compose version &>/dev/null 2>&1; then
+        DC="docker compose"
+    elif command -v docker-compose &>/dev/null; then
+        DC="docker-compose"
+    else
+        DC=""
+    fi
+
+    if docker container inspect "${CONTAINER_NAME}" &>/dev/null; then
         cd "${INSTALL_DIR}"
         print_info "Stopping and removing container via docker compose..."
-        docker compose down
+        if [ -n "$DC" ]; then
+            $DC down
+        else
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm   "${CONTAINER_NAME}" 2>/dev/null || true
+        fi
         print_success "Container stopped and removed: ${CONTAINER_NAME}"
     else
         print_info "Container not found: ${CONTAINER_NAME}"
@@ -253,23 +288,69 @@ stop_and_remove_container() {
 }
 
 remove_docker_image() {
-    print_section "Removing Docker Image"
+    print_section "Docker Image"
 
     if ! check_docker; then
         print_warning "Docker not available — skipping"
         return 0
     fi
 
-    if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
-        print_info "Removing Docker image..."
-        docker rmi "${IMAGE_NAME}" &>/dev/null || {
-            print_warning "Could not remove image (may be in use by another container)"
-            print_info "Remove manually with: docker rmi ${IMAGE_NAME}"
-            return 0
-        }
+    if ! docker image inspect "${IMAGE_NAME}" &>/dev/null; then
+        print_info "Docker image not found: ${IMAGE_NAME}"
+        return 0
+    fi
+
+    if [ "$KEEP_IMAGE" = true ]; then
+        IMAGE_KEPT=true
+        print_success "Keeping Docker image (--keep-image): ${IMAGE_NAME}"
+        return 0
+    fi
+
+    if [ "$REMOVE_ALL" = true ] || [ "$FORCE" = true ]; then
+        _do_remove_image
+        return 0
+    fi
+
+    # Interactive prompt
+    ISIZE=$(docker image inspect "${IMAGE_NAME}" --format '{{.Size}}' | \
+            awk '{printf "%.0f MB", $1/1024/1024}')
+    echo ""
+    print_warning "Docker image: ${IMAGE_NAME} (~${ISIZE})"
+    echo ""
+    read -p "  Remove Docker image? [y/N]: " REMOVE_IMAGE_ANSWER
+    if [[ "$REMOVE_IMAGE_ANSWER" =~ ^[Yy]$ ]]; then
+        _do_remove_image
+    else
+        IMAGE_KEPT=true
+        print_success "Docker image preserved: ${IMAGE_NAME}"
+        print_info "Remove manually later with: docker rmi ${IMAGE_NAME}"
+    fi
+}
+
+# Internal helper — stops/removes ALL containers that reference the image, then removes the image.
+_do_remove_image() {
+    print_info "Removing Docker image: ${IMAGE_NAME}..."
+
+    # Stop and remove every container (running or stopped) that uses this image.
+    # We iterate rather than rely on --filter ancestor because Docker 20.10 combos are unreliable.
+    ALL_CTRS=$(docker ps -aq --filter "ancestor=${IMAGE_NAME}" 2>/dev/null || true)
+    if [ -n "$ALL_CTRS" ]; then
+        for CID in $ALL_CTRS; do
+            CSTATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null || true)
+            CNAME=$(docker inspect --format '{{.Name}}' "$CID" 2>/dev/null | sed 's|^/||' || true)
+            if [ "$CSTATUS" = "running" ] || [ "$CSTATUS" = "paused" ]; then
+                print_info "  Stopping running container ${CNAME:-$CID} (${CSTATUS})..."
+                docker stop "$CID" 2>/dev/null || true
+            fi
+            print_info "  Removing container ${CNAME:-$CID}..."
+            docker rm "$CID" 2>/dev/null || true
+        done
+    fi
+
+    if docker rmi "${IMAGE_NAME}" 2>&1; then
         print_success "Docker image removed: ${IMAGE_NAME}"
     else
-        print_info "Docker image not found: ${IMAGE_NAME}"
+        print_warning "Could not remove image — check for containers using it: docker ps -a --filter ancestor=${IMAGE_NAME}"
     fi
 }
 
@@ -323,16 +404,24 @@ display_completion_summary() {
     echo ""
 
     if check_docker; then
-        if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+        if docker container inspect "${CONTAINER_NAME}" &>/dev/null; then
             echo -e "  ${YELLOW}⚠${NC}  Container : ${CONTAINER_NAME} — ${YELLOW}STILL EXISTS${NC}"
-        else
+        elif [ "$CONTAINER_EXISTS" = true ]; then
             echo -e "  ${GREEN}✓${NC}  Container : ${CONTAINER_NAME} — removed"
+        else
+            echo -e "  ${GREEN}○${NC}  Container : ${CONTAINER_NAME} — not found (nothing to remove)"
         fi
 
         if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
-            echo -e "  ${YELLOW}⚠${NC}  Image     : ${IMAGE_NAME} — ${YELLOW}STILL EXISTS${NC}"
-        else
+            if [ "$IMAGE_KEPT" = true ]; then
+                echo -e "  ${GREEN}✓${NC}  Image     : ${IMAGE_NAME} — ${GREEN}PRESERVED${NC}"
+            else
+                echo -e "  ${YELLOW}⚠${NC}  Image     : ${IMAGE_NAME} — ${YELLOW}STILL EXISTS (removal may have failed)${NC}"
+            fi
+        elif [ "$IMAGE_EXISTS" = true ]; then
             echo -e "  ${GREEN}✓${NC}  Image     : ${IMAGE_NAME} — removed"
+        else
+            echo -e "  ${GREEN}○${NC}  Image     : ${IMAGE_NAME} — not found (nothing to remove)"
         fi
     fi
 
@@ -340,8 +429,10 @@ display_completion_summary() {
     if [ -d "$LOG_DIR" ]; then
         echo -e "  ${GREEN}✓${NC}  Logs      : ${LOG_DIR} — ${GREEN}PRESERVED${NC}"
         print_info "Remove manually with: rm -rf ${LOG_DIR}"
-    else
+    elif [ "$LOGS_EXIST" = true ]; then
         echo -e "  ${GREEN}✓${NC}  Logs      : removed"
+    else
+        echo -e "  ${GREEN}○${NC}  Logs      : not found (nothing to remove)"
     fi
 
     echo ""

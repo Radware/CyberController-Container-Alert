@@ -36,7 +36,7 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 ├── docker-compose.yaml          # Production / offline runtime (image only)
 ├── docker-compose.build.yaml    # Developer / online build
 ├── Dockerfile                   # Image build definition (python:3.11-slim)
-├── requirements-watchdog.txt    # Python dependencies
+├── requirements-watchdog.txt    # Python dependencies (reference; Dockerfile pip-installs inline)
 ├── install.sh                   # Offline install script
 ├── uninstall.sh                 # Stop + remove script
 ├── watchdog.tar                 # Pre-built Docker image (provided, no internet needed)
@@ -57,44 +57,14 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 
 ---
 
-## Installation (Offline / Production)
+## Deployment
 
-> No internet access required. Uses the pre-built `watchdog.tar` image included in the package.
+For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
-```bash
-# 1. Load the image
-docker load -i watchdog.tar
-
-# 2. Create secrets file
-cp .env.example .env
-# Edit .env — fill in SLACK_WEBHOOK_URL (and Splunk/SMTP credentials if needed)
-
-# 3. Start
-docker compose up -d
-
-# 4. Verify
-docker compose ps
-tail -f ./watchdog/watchdog.log
-```
-
-Or use the automated script:
+**Quick start (automated):**
 
 ```bash
 sudo bash install.sh
-```
-
----
-
-## Developer Build (Online)
-
-> Requires internet access to pull `python:3.11-slim` and install Python dependencies.
-
-```bash
-# Build a fresh image and start
-docker compose -f docker-compose.build.yaml up -d --build
-
-# After a successful build, export the image for offline customers:
-docker save watchdog:latest -o watchdog.tar
 ```
 
 ---
@@ -103,7 +73,7 @@ docker save watchdog:latest -o watchdog.tar
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `alert_channels` | `[slack]` | Active destinations: `slack`, `splunk`, `smtp`, `snmp_trap` |
+| `alert_channels` | `[]` | Active destinations: `slack`, `splunk_hec`, `smtp`, `snmp_trap` |
 | `check_interval_seconds` | `60` | How often the poll loop runs |
 | `cooldown_minutes` | `5` | Suppress duplicate alerts per container per failure type |
 | `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |
@@ -119,7 +89,7 @@ docker save watchdog:latest -o watchdog.tar
 ```yaml
 syslog:
   enabled: true
-  host: 155.1.1.4
+  host: <syslog-server-ip>
   port: 514
   protocol: udp       # udp or tcp
   facility: local0
@@ -128,7 +98,7 @@ syslog:
 ### Splunk HEC
 
 ```yaml
-splunk:
+splunk_hec:
   enabled: true
   hec_url_env:   SPLUNK_HEC_URL      # env var name
   hec_token_env: SPLUNK_HEC_TOKEN    # env var name

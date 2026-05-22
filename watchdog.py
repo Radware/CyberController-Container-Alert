@@ -124,7 +124,7 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
-    "alert_channels": ["slack", "splunk"],
+    "alert_channels": ["slack", "splunk_hec"],
     "check_interval_seconds": 60,
     "cooldown_minutes": 5,
     "restart_threshold": 5,
@@ -141,7 +141,7 @@ DEFAULT_CONFIG = {
         "facility": "local0",
     },
     "slack": {"webhook_url_env": "SLACK_WEBHOOK_URL"},
-    "splunk": {
+    "splunk_hec": {
         "hec_url_env":   "SPLUNK_HEC_URL",
         "hec_token_env": "SPLUNK_HEC_TOKEN",
         "alert_index":   "main",
@@ -331,7 +331,7 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
 
 
 def send_splunk(payload: AlertPayload, cfg: dict) -> None:
-    splunk = cfg.get("splunk", {})
+    splunk = cfg.get("splunk_hec", {})
     if not splunk.get("enabled", True):  # default True for backwards-compat
         log.debug("Splunk: disabled in config — skipping")
         return
@@ -384,14 +384,14 @@ def send_splunk(payload: AlertPayload, cfg: dict) -> None:
 
 def dispatch_alert(payload: AlertPayload, cfg: dict) -> None:
     """Send alert to all configured channels."""
-    channels = cfg.get("alert_channels", ["slack", "splunk"])
+    channels = cfg.get("alert_channels", ["slack", "splunk_hec"])
     log.warning(
         "ALERT [%s] %s — %s (channels: %s)",
         payload.severity, payload.container_name,
         payload.failure_type, channels,
     )
-    if "slack"      in channels: send_slack(payload, cfg)
-    if "splunk"     in channels: send_splunk(payload, cfg)
+    if "slack"       in channels: send_slack(payload, cfg)
+    if "splunk_hec"  in channels: send_splunk(payload, cfg)
     if "smtp"       in channels: send_smtp(payload, cfg)
     if "snmp_trap"  in channels: send_snmp_trap(payload, cfg)
 
@@ -1104,7 +1104,7 @@ def main() -> None:
         cfg.get("log_level", "INFO"),
         cfg.get("log_file"),
         cfg.get("syslog"),
-        cfg.get("splunk"),
+        cfg.get("splunk_hec"),
     )
 
     watchdog = Watchdog(cfg)

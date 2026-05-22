@@ -12,7 +12,7 @@
 #   sudo bash install.sh
 ################################################################################
 
-set -e  # Exit on error
+# Errors are handled explicitly with exit 1 throughout this script
 
 # ── Detect color support ──────────────────────────────────────────────────────
 if [ "${FORCE_COLOR:-0}" = "1" ] || ([ -t 1 ] && command -v tput &>/dev/null && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]); then
@@ -32,6 +32,7 @@ IMAGE_ARCHIVE="${SCRIPT_DIR}/watchdog.tar"
 CONTAINER_NAME="watchdog"
 IMAGE_NAME="watchdog:latest"
 VERSION="1.0.0"
+DC=""  # compose command — set automatically in check_prerequisites
 
 ################################################################################
 # Helper Functions
@@ -81,15 +82,21 @@ check_prerequisites() {
     fi
     print_success "Docker daemon is running"
 
-    # Docker Compose (v2 plugin)
-    if ! docker compose version &>/dev/null; then
-        print_error "Docker Compose plugin not found"
+    # Docker Compose — accept v2 plugin (docker compose) or v1 standalone (docker-compose)
+    if docker compose version &>/dev/null 2>&1; then
+        DC="docker compose"
+        print_success "Docker Compose is available (v2 plugin): $(docker compose version --short)"
+    elif command -v docker-compose &>/dev/null; then
+        DC="docker-compose"
+        print_success "Docker Compose is available (v1 standalone): $(docker-compose --version)"
+    else
+        print_error "Docker Compose not found"
         echo ""
-        echo "  Install with: sudo apt-get install docker-compose-plugin"
+        echo "  Install the v2 plugin:  sudo apt-get install docker-compose-plugin"
+        echo "  Install v1 standalone:  sudo apt-get install docker-compose"
         echo "  Or see: https://docs.docker.com/compose/install/"
         exit 1
     fi
-    print_success "Docker Compose is available: $(docker compose version --short)"
 
     # Root / sudo warning
     if [ "$EUID" -ne 0 ]; then
@@ -123,18 +130,28 @@ load_docker_image() {
 
     # Check if image is already present
     if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
-        print_info "Image ${IMAGE_NAME} already exists locally"
-        read -p "  Re-load from watchdog.tar? [y/N]: " RELOAD
-        if [[ ! "$RELOAD" =~ ^[Yy]$ ]]; then
-            print_info "Using existing image"
-            return 0
-        fi
+        print_info "Image ${IMAGE_NAME} already exists locally — using existing image"
+        return 0
     fi
 
     if [ ! -f "$IMAGE_ARCHIVE" ]; then
-        print_error "Image archive not found: ${IMAGE_ARCHIVE}"
+        print_warning "Image archive not found: ${IMAGE_ARCHIVE}"
         echo ""
-        echo "  Ensure watchdog.tar is in the same directory as install.sh"
+        if [ -f "${INSTALL_DIR}/Dockerfile" ]; then
+            print_info "Building image from source — this may take a few minutes..."
+            # Use a clean temp dir so any .dockerignore in INSTALL_DIR is bypassed
+            local tmpdir
+            tmpdir=$(mktemp -d)
+            trap "rm -rf '${tmpdir}'" EXIT
+            cp "${INSTALL_DIR}/Dockerfile"   "${tmpdir}/"
+            cp "${INSTALL_DIR}/watchdog.py"  "${tmpdir}/"
+            docker build -t "${IMAGE_NAME}" "${tmpdir}"
+            print_success "Image built: ${IMAGE_NAME}"
+            return 0
+        fi
+        print_error "Cannot proceed: watchdog.tar not found and Dockerfile not found"
+        echo ""
+        echo "  Copy watchdog.tar into: $(dirname "$IMAGE_ARCHIVE") and re-run."
         exit 1
     fi
 
@@ -148,21 +165,14 @@ load_docker_image() {
 ################################################################################
 
 configure_environment() {
-    print_section "Environment Configuration"
+    print_section "Alert Channels \& Credentials"
 
     ENV_FILE="${INSTALL_DIR}/.env"
     ENV_EXAMPLE="${INSTALL_DIR}/.env.example"
 
     if [ -f "$ENV_FILE" ]; then
-        print_warning "Secrets file already exists: ${ENV_FILE}"
-        read -p "  Reconfigure? [y/N]: " RECONFIGURE
-        if [[ ! "$RECONFIGURE" =~ ^[Yy]$ ]]; then
-            print_info "Using existing .env"
-            return 0
-        fi
-        BACKUP="${ENV_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
-        cp "$ENV_FILE" "$BACKUP"
-        print_info "Backed up existing .env to: $(basename "$BACKUP")"
+        print_info "Using existing secrets file: ${ENV_FILE}"
+        return 0
     fi
 
     if [ ! -f "$ENV_EXAMPLE" ]; then
@@ -170,47 +180,85 @@ configure_environment() {
         exit 1
     fi
     cp "$ENV_EXAMPLE" "$ENV_FILE"
-
-    echo ""
-    print_info "Configure alert credentials (press Enter to skip optional values):"
-    echo ""
-
-    # Slack
-    read -p "  Slack Webhook URL (required for Slack alerts): " SLACK_URL
-    if [ -n "$SLACK_URL" ]; then
-        sed -i "s|^SLACK_WEBHOOK_URL=.*|SLACK_WEBHOOK_URL=${SLACK_URL}|" "$ENV_FILE"
-        print_success "Slack webhook configured"
-    else
-        print_warning "Slack URL left empty — Slack alerts will not fire until set"
-    fi
-
-    # Splunk (optional)
-    echo ""
-    read -p "  Splunk HEC URL (optional, press Enter to skip): " SPLUNK_URL
-    if [ -n "$SPLUNK_URL" ]; then
-        read -p "  Splunk HEC Token: " SPLUNK_TOKEN
-        sed -i "s|^SPLUNK_HEC_URL=.*|SPLUNK_HEC_URL=${SPLUNK_URL}|" "$ENV_FILE"
-        sed -i "s|^SPLUNK_HEC_TOKEN=.*|SPLUNK_HEC_TOKEN=${SPLUNK_TOKEN}|" "$ENV_FILE"
-        print_success "Splunk HEC configured"
-    else
-        print_info "Splunk skipped — enable later by editing ${ENV_FILE}"
-    fi
-
-    # SMTP (optional)
-    echo ""
-    read -p "  SMTP Password (optional, press Enter to skip): " -s SMTP_PASS
-    echo ""
-    if [ -n "$SMTP_PASS" ]; then
-        sed -i "s|^SMTP_PASSWORD=.*|SMTP_PASSWORD=${SMTP_PASS}|" "$ENV_FILE"
-        print_success "SMTP password configured"
-    else
-        print_info "SMTP skipped — enable later by editing ${ENV_FILE}"
-    fi
-
     chmod 600 "$ENV_FILE"
     print_success "Secrets file created: ${ENV_FILE} (permissions: 600)"
-    echo ""
-    print_info "Review alert channels and thresholds in: ${INSTALL_DIR}/watchdog-config.yaml"
+    print_info "Edit ${ENV_FILE} to add credentials, then restart: $DC restart watchdog"
+}
+
+################################################################################
+# Watchdog YAML Configuration
+################################################################################
+
+configure_watchdog_yaml() {
+    print_section "Watchdog Settings (watchdog-config.yaml)"
+
+    CONFIG_FILE="${INSTALL_DIR}/watchdog-config.yaml"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        print_info "Using existing watchdog-config.yaml"
+        return 0
+    fi
+
+    # Write yaml with default values
+    {
+        printf "# watchdog-config.yaml — generated by install.sh on %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf "# Edit and then run: docker-compose restart watchdog\n\n"
+
+        printf "alert_channels: []  # no channels — alerts logged to stdout only\n"
+
+        printf "\ncheck_interval_seconds:     60\n"
+        printf "cooldown_minutes:            5\n"
+        printf "restart_threshold:           5\n"
+        printf "restart_window_minutes:      10\n"
+        printf "unhealthy_cycles_threshold:  3\n"
+
+        printf "\nexcluded_containers: []\n"
+
+        printf "\nrunbook_base_url: \"\"\n"
+        printf "\nlog_level: INFO\n"
+        printf "log_file: /var/log/watchdog/watchdog.log\n"
+
+        printf "\nsyslog:\n"
+        printf "  enabled:  false\n"
+        printf "  host:     127.0.0.1\n"
+        printf "  port:     514\n"
+        printf "  protocol: udp\n"
+        printf "  facility: local0\n"
+
+        printf "\nsmtp:\n"
+        printf "  enabled:      false\n"
+        printf "  host:         smtp.radware.com\n"
+        printf "  port:         587\n"
+        printf "  sender:       noc-alerts@radware.com\n"
+        printf "  recipients:\n"
+        printf "    - ops-team@radware.com\n"
+        printf "    - oncall@radware.com\n"
+        printf "  tls:          true\n"
+        printf "  password_env: SMTP_PASSWORD\n"
+
+        printf "\nsnmp_trap:\n"
+        printf "  enabled:   false\n"
+        printf "  host:      127.0.0.1\n"
+        printf "  port:      162\n"
+        printf "  community: public\n"
+        printf "  trap_oid:  \"1.3.6.1.6.3.1.1.5.4\"\n"
+
+        printf "\nslack:\n"
+        printf "  enabled:         false\n"
+        printf "  webhook_url_env: SLACK_WEBHOOK_URL\n"
+
+        printf "\nsplunk_hec:\n"
+        printf "  enabled:       false\n"
+        printf "  hec_url_env:   SPLUNK_HEC_URL\n"
+        printf "  hec_token_env: SPLUNK_HEC_TOKEN\n"
+        printf "  alert_index:   main\n"
+        printf "  log_index:     main\n"
+        printf "  log_enabled:   false\n"
+        printf "  verify_ssl:    true\n"
+    } > "$CONFIG_FILE"
+
+    print_success "watchdog-config.yaml written with defaults: ${CONFIG_FILE}"
+    print_info "Edit ${CONFIG_FILE} to configure alert channels and thresholds"
 }
 
 ################################################################################
@@ -222,23 +270,14 @@ start_watchdog() {
 
     cd "${INSTALL_DIR}"
 
-    # If container already exists, ask before replacing
+    # Stop and remove existing container if present
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-        print_warning "Container '${CONTAINER_NAME}' already exists"
-        CURRENT_STATUS=$(docker ps -a --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}')
-        print_info "Current status: ${CURRENT_STATUS}"
-        read -p "  Stop and recreate it? [y/N]: " RECREATE
-        if [[ "$RECREATE" =~ ^[Yy]$ ]]; then
-            print_info "Stopping existing container..."
-            docker compose down
-        else
-            print_info "Keeping existing container"
-            return 0
-        fi
+        print_info "Stopping existing container..."
+        $DC down
     fi
 
     print_info "Starting container with docker compose..."
-    docker compose up -d
+    $DC up -d
     print_success "Watchdog container started"
 }
 
@@ -256,7 +295,7 @@ verify_deployment() {
         print_success "Container is running: ${STATUS}"
     else
         print_warning "Container does not appear to be running — check logs for errors:"
-        print_info "  docker compose logs watchdog"
+        print_info "  $DC logs watchdog"
     fi
 }
 
@@ -283,21 +322,21 @@ display_usage_instructions() {
     echo "  tail -f ${INSTALL_DIR}/watchdog/watchdog.log"
     echo ""
     echo -e "${GREEN}Container status:${NC}"
-    echo "  docker compose -f ${INSTALL_DIR}/docker-compose.yaml ps"
+    echo "  $DC -f ${INSTALL_DIR}/docker-compose.yaml ps"
     echo ""
     echo -e "${GREEN}Restart watchdog:${NC}"
-    echo "  docker compose -f ${INSTALL_DIR}/docker-compose.yaml restart"
+    echo "  $DC -f ${INSTALL_DIR}/docker-compose.yaml restart"
     echo ""
     echo -e "${GREEN}View stdout (Docker logs):${NC}"
     echo "  docker logs -f ${CONTAINER_NAME}"
     echo ""
     echo -e "${GREEN}Edit alert channels / thresholds:${NC}"
     echo "  nano ${INSTALL_DIR}/watchdog-config.yaml"
-    echo "  docker compose -f ${INSTALL_DIR}/docker-compose.yaml restart"
+    echo "  $DC -f ${INSTALL_DIR}/docker-compose.yaml restart"
     echo ""
     echo -e "${GREEN}Edit secrets (Slack / Splunk / SMTP):${NC}"
     echo "  nano ${INSTALL_DIR}/.env"
-    echo "  docker compose -f ${INSTALL_DIR}/docker-compose.yaml up -d"
+    echo "  $DC -f ${INSTALL_DIR}/docker-compose.yaml up -d"
     echo ""
     echo -e "${GREEN}Uninstall:${NC}"
     echo "  sudo bash ${INSTALL_DIR}/uninstall.sh"
@@ -314,6 +353,7 @@ main() {
     setup_log_directory
     load_docker_image
     configure_environment
+    configure_watchdog_yaml
     start_watchdog
     verify_deployment
     display_usage_instructions

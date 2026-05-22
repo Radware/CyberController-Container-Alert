@@ -24,7 +24,7 @@ services:
     env_file: .env
     environment:
       WATCHDOG_CONFIG: /etc/watchdog/watchdog-config.yaml
-      WATCHDOG_HOST:   cyber-controller-server   # identifies this node in alerts
+      WATCHDOG_HOST:   CyberController-Server   # identifies this node in alerts
     volumes:
       # Read Docker socket to monitor all containers on the host
       - /var/run/docker.sock:/var/run/docker.sock:ro
