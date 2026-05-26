@@ -1,6 +1,6 @@
 # CyberController Container Watchdog
 
-A lightweight Docker container health monitor that detects failures and dispatches alerts via **Slack**, **SMTP**, and **SNMP traps**.
+The **CyberController Container Watchdog** is a lightweight, autonomous monitoring service that continuously tracks the health of all Docker containers on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**).
 
 ---
 
@@ -88,7 +88,7 @@ Python 3.11+
 
 All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, passwords) are stored in `.env` and never committed to version control. Restart the container after editing either file — no image rebuild is needed.
 
-### watchdog-config.yaml
+### Configuration File (watchdog-config.yaml)
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -271,7 +271,7 @@ docker rmi polinux/stress
 > These tests pull images from Docker Hub and create temporary containers on the host.
 > Each section includes full cleanup instructions (container + image).
 
-#### HTTP probe
+#### HTTP Probe
 
 ```bash
 # Start a container whose /health endpoint always returns 503
@@ -291,7 +291,7 @@ The watchdog auto-discovers `http://<ip>:<port>/health`, receives a 503, and fir
 
 ---
 
-#### TCP connect probe
+#### TCP Connect Probe
 
 ```bash
 # Expose port 9999 but run nothing on it — TCP connect will be refused
@@ -312,7 +312,7 @@ After `unhealthy_cycles_threshold` consecutive failed cycles an alert fires with
 
 ---
 
-#### `/proc` alive check
+#### `/proc` Alive Check
 
 ```bash
 # No EXPOSE — watchdog falls straight to /proc check.
@@ -335,7 +335,7 @@ With no exposed ports, auto-discovery skips HTTP and TCP entirely and reads `/pr
 
 ## Troubleshooting
 
-### Watchdog container is not starting
+### Service Fails to Start
 
 ```bash
 docker compose logs watchdog
@@ -348,7 +348,7 @@ Common causes:
 - **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
 - **Image not loaded** — run `docker images watchdog`; if empty, build with `docker build -t watchdog:latest .`
 
-### No alerts received
+### Alert Notifications Not Received
 
 1. Check `alert_channels` in `watchdog-config.yaml` — ensure at least one channel is listed and configured
 2. Check watchdog logs for errors:
@@ -362,7 +362,7 @@ Common causes:
    ```
    Expected response: `ok`
 
-### Duplicate or excessive alerts
+### Duplicate and Excessive Alert Notifications
 
 Increase `cooldown_minutes` in `watchdog-config.yaml` (default: `5` minutes per container per failure type). To silence a noisy container entirely, add it to `excluded_containers`:
 
@@ -373,7 +373,7 @@ excluded_containers:
   - my-noisy-container
 ```
 
-### Probe type not as expected
+### Probe Type Not as Expected
 
 Check which probe was cached at startup:
 
