@@ -1,6 +1,6 @@
 # CyberController Container Watchdog — Deployment Guide
 
-The watchdog monitors all Docker containers on the host and fires alerts via one or more configured channels (**Slack**, **Splunk HEC**, **SMTP**, **SNMP**, or **Syslog**) whenever a container crashes, is OOM-killed, becomes unhealthy, or enters a restart loop.
+The watchdog monitors all Docker containers on the host and fires alerts via one or more configured channels (**Slack**, **SMTP**, **SNMP**, or **Syslog**) whenever a container crashes, is OOM-killed, becomes unhealthy, or enters a restart loop.
 
 ---
 
@@ -10,14 +10,15 @@ The watchdog monitors all Docker containers on the host and fires alerts via one
 2. [Repository Structure](#2-repository-structure)
 3. [Step 1 — Configure Environment Variables](#3-step-1--configure-environment-variables)
 4. [Step 2 — Configure the Watchdog](#4-step-2--configure-the-watchdog)
-5. [Step 3 — Configure Alert Channels](#5-step-3--configure-alert-channels)
-6. [Step 4 — Install and Deploy](#6-step-4--install-and-deploy)
-7. [Step 5 — Verify It Is Working](#7-step-5--verify-it-is-working)
-8. [Logs](#8-logs)
-9. [Alert Types](#9-alert-types)
-10. [Tuning](#10-tuning)
-11. [Stopping, Updating and Uninstalling](#11-stopping-updating-and-uninstalling)
-12. [Troubleshooting](#12-troubleshooting)
+5. [Step 3 — Install and Deploy](#5-step-3--install-and-deploy)
+6. [Step 4 — Verify It Is Working](#6-step-4--verify-it-is-working)
+7. [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels)
+8. [How to Change Existing Settings](#8-how-to-change-existing-settings)
+9. [Logs](#9-logs)
+10. [Alert Types](#10-alert-types)
+11. [Tuning](#11-tuning)
+12. [Stopping, Updating and Uninstalling](#12-stopping-updating-and-uninstalling)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -34,10 +35,10 @@ The watchdog monitors all Docker containers on the host and fires alerts via one
 > docker compose version   # v2 plugin — "Docker Compose version v2.x.x"
 > docker-compose --version # v1 standalone — "docker-compose version 1.x.x"
 > ```
-| Slack workspace *(if using Slack alerts)* | — |
-| Splunk instance with HEC enabled *(if using Splunk HEC)* | Splunk 8.x or later |
 
-> **Windows / macOS:** The watchdog mounts `/var/run/docker.sock` and is designed to run on a Linux Docker host. For local development on Windows, use Docker Desktop with WSL 2.
+> **Alert channels:** At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`. See [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels).
+
+> **Linux host required:** The watchdog requires direct access to `/var/run/docker.sock` and must run on a Linux Docker host. Windows and macOS are not supported as deployment targets. For local development on Windows, use Docker Desktop with WSL 2 enabled — the container will run inside the WSL 2 Linux VM where the Docker socket is available.
 
 ---
 
@@ -72,10 +73,6 @@ Open `.env` and fill in every value:
 # Slack
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 
-# Splunk HEC
-SPLUNK_HEC_URL=https://<your-splunk-host>:8088
-SPLUNK_HEC_TOKEN=<your-hec-token>
-
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO
 ```
@@ -83,10 +80,25 @@ LOG_LEVEL=INFO
 
 ## 4. Step 2 — Configure the Watchdog
 
+### Alert Channels
+
+All alert channels are **optional** — configure at least one so the watchdog has somewhere to send alerts. Multiple channels can be active simultaneously; add each identifier to `alert_channels` in `watchdog-config.yaml`.
+
+| Channel | `alert_channels` identifier | What you need |
+|---|---|---|
+| Slack Webhook | `slack` | Slack incoming webhook URL |
+| Syslog | *(syslog config block)* | Syslog server reachable from the Docker host |
+| Email (SMTP) | `smtp` | SMTP relay and credentials |
+| SNMP Traps | `snmp_trap` | SNMP trap receiver (NMS / SIEM) |
+
+> For step-by-step setup of each channel, see [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels).
+
+### watchdog-config.yaml
+
 Edit `watchdog-config.yaml` to match your environment:
 
 ```yaml
-alert_channels:          # choose one or more: slack, splunk_hec, smtp, snmp_trap
+alert_channels:          # choose one or more: slack, smtp, snmp_trap
   - slack                # remove any channel you have not configured
 
 check_interval_seconds: 60      # poll interval
@@ -102,96 +114,11 @@ runbook_base_url: "https://wiki.radware.internal/runbooks"
 
 slack:
   webhook_url_env: SLACK_WEBHOOK_URL    # reads from .env
-
-splunk_hec:
-  hec_url_env:   SPLUNK_HEC_URL        # reads from .env
-  hec_token_env: SPLUNK_HEC_TOKEN      # reads from .env
-  alert_index:   main                  # Splunk index for container alerts
-  log_index:     main                  # Splunk index for watchdog logs
-  log_enabled:   false                 # true = also stream watchdog logs to Splunk
-  verify_ssl:    true                  # false only for self-signed certs
 ```
 
 ---
 
-## 5. Step 3 — Configure Alert Channels
-
-All alert channels are **optional** — configure at least one so the watchdog has somewhere to send alerts. Multiple channels can be active simultaneously; add each identifier to `alert_channels` in `watchdog-config.yaml`.
-
-| Channel | `alert_channels` identifier | What you need |
-|---|---|---|
-| Slack Webhook | `slack` | Slack workspace with an incoming webhook |
-| Splunk HEC | `splunk_hec` | Splunk 8.x+ with HTTP Event Collector enabled |
-| Syslog | *(syslog config block)* | Syslog server reachable from the Docker host |
-| Email (SMTP) | `smtp` | SMTP relay and credentials |
-| SNMP Traps | `snmp_trap` | SNMP trap receiver (NMS / SIEM) |
-
-Choose one or more options below and complete only the relevant steps.
-
----
-
-### Option A — Slack Webhook
-
-1. Go to [https://api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
-2. Name it `Container Watchdog`, select your workspace
-3. In the left menu: **Incoming Webhooks** → toggle **On**
-4. Click **Add New Webhook to Workspace** → choose an alert channel (e.g. `#container-alerts`)
-5. Copy the webhook URL (starts with `https://hooks.slack.com/services/...`)
-6. Paste it into `.env` as `SLACK_WEBHOOK_URL`
-
----
-
-### Option B — Splunk HEC
-
-#### Enable HEC in Splunk
-
-1. In Splunk Web: **Settings → Data Inputs → HTTP Event Collector**
-2. Click **Global Settings** → set **All Tokens** to **Enabled** → Save
-3. Click **New Token**:
-   - **Name:** `container-watchdog`
-   - **Source type:** `container:alert`
-   - **Index:** select or create `main` (or a dedicated index like `containers`)
-4. Complete the wizard and copy the **Token Value**
-5. Note your Splunk server URL, e.g. `https://splunk.radware.internal:8088`
-6. Paste both into `.env`:
-   ```dotenv
-   SPLUNK_HEC_URL=https://splunk.radware.internal:8088
-   SPLUNK_HEC_TOKEN=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-   ```
-
-#### Verify HEC is reachable
-
-```bash
-curl -k https://<splunk-host>:8088/services/collector/health
-# Expected: {"text":"HEC is healthy","code":17}
-```
-
-> If your Splunk uses a self-signed certificate, set `verify_ssl: false` in `watchdog-config.yaml`.
-
----
-
-### Option C — Syslog Forwarding
-
-To forward watchdog logs to a central syslog server (rsyslog, syslog-ng, Graylog), enable the syslog block in `watchdog-config.yaml`:
-
-```yaml
-syslog:
-  enabled: true
-  host: 192.168.1.100      # your syslog server IP or hostname
-  port: 514                # 514 = UDP standard; 601 = TCP reliable
-  protocol: udp            # udp or tcp
-  facility: local0         # local0–local7, daemon, user, etc.
-```
-
-Restart the watchdog to apply:
-
-```bash
-docker compose restart watchdog
-```
-
----
-
-## 6. Step 4 — Install and Deploy
+## 5. Step 3 — Install and Deploy
 
 ### Option A — Automated installation with `install.sh` (recommended)
 
@@ -250,7 +177,7 @@ Open `.env` and fill in the credentials for your chosen alert channel(s).
 
 #### 3. Configure the watchdog
 
-Edit `watchdog-config.yaml` — set `alert_channels`, thresholds, and any channel-specific blocks (see [Step 3](#5-step-3--configure-alert-channels)).
+Edit `watchdog-config.yaml` — set `alert_channels`, thresholds, and any channel-specific blocks (see [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels)).
 
 #### 4. Start the container
 
@@ -274,39 +201,11 @@ watchdog   Up (healthy)
 
 ---
 
-### Option C — Build offline image and deploy to air-gapped host
+### Option C — Deploy to air-gapped host
 
-Use this when the target host has no internet access. Build the image on a machine that does, export it as a tar archive, transfer it, then deploy.
+Use this when the target host has no internet access. Ensure `watchdog.tar` has already been transferred to the host before proceeding.
 
-#### Step 1 — Build the image (on an internet-connected machine)
-
-```bash
-# Clone or copy the source files, then run from the Container_Alert/ directory:
-docker build -t watchdog:latest .
-```
-
-#### Step 2 — Export the image to a tar file
-
-```bash
-docker save watchdog:latest -o watchdog.tar
-```
-
-Verify the file was created:
-
-```bash
-ls -lh watchdog.tar
-# Expected: around 140 MB
-```
-
-#### Step 3 — Transfer the tar to the target host
-
-```bash
-scp watchdog.tar root@<target-host>:/opt/radware/storage/scripts/Alert_container/
-```
-
-Or copy via USB / shared drive if SCP is not available.
-
-#### Step 4 — Load the image on the target host
+#### Step 1 — Load the image
 
 ```bash
 docker load -i watchdog.tar
@@ -319,7 +218,7 @@ docker images watchdog
 # Expected: watchdog   latest   <id>   <size>
 ```
 
-#### Step 5 — Start the container
+#### Step 2 — Start the container
 
 ```bash
 # v1 standalone
@@ -329,7 +228,7 @@ docker-compose up -d
 docker compose up -d
 ```
 
-#### Step 6 — Verify
+#### Step 3 — Verify
 
 ```bash
 docker ps --filter name=watchdog
@@ -338,7 +237,7 @@ docker-compose logs -f watchdog
 
 ---
 
-## 7. Step 5 — Verify It Is Working
+## 6. Step 4 — Verify It Is Working
 
 ### Check watchdog logs
 
@@ -364,11 +263,127 @@ docker run --name test-crash --rm alpine sh -c "exit 1"
 
 Within 60 seconds (or immediately via the event listener) you should receive an alert in each of your configured channels.
 
-> **Splunk HEC:** Search `index=main sourcetype="container:alert" | table _time, severity, container_name, failure_type, host` to confirm events are arriving.
+---
+
+## 7. How to Set Up Communication Channels
+
+For each channel you want to use, follow the relevant option below. Ensure its identifier is listed under `alert_channels` in `watchdog-config.yaml`.
+
+### Option A — Slack Webhook
+
+1. Go to [https://api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
+2. Name it `Container Watchdog`, select your workspace
+3. In the left menu: **Incoming Webhooks** → toggle **On**
+4. Click **Add New Webhook to Workspace** → choose an alert channel (e.g. `#container-alerts`)
+5. Copy the webhook URL (starts with `https://hooks.slack.com/services/...`)
+6. Paste it into `.env` as `SLACK_WEBHOOK_URL`
 
 ---
 
-## 8. Logs
+### Option B — Syslog Forwarding
+
+Enable the syslog block in `watchdog-config.yaml`:
+
+```yaml
+syslog:
+  enabled: true
+  host: 192.168.1.100      # your syslog server IP or hostname
+  port: 514                # 514 = UDP standard; 601 = TCP reliable
+  protocol: udp            # udp or tcp
+  facility: local0         # local0–local7, daemon, user, etc.
+```
+
+Restart the watchdog to apply:
+
+```bash
+docker compose restart watchdog
+```
+
+---
+
+### Option C — SMTP (Email)
+
+Add `smtp` to `alert_channels` in `watchdog-config.yaml` and configure the block:
+
+```yaml
+smtp:
+  enabled: true
+  host: smtp.your-domain.com
+  port: 587
+  sender: alerts@your-domain.com
+  recipients:
+    - ops-team@your-domain.com
+  tls: true
+  password_env: SMTP_PASSWORD
+```
+
+Set `SMTP_PASSWORD` in `.env`:
+
+```dotenv
+SMTP_PASSWORD=your-smtp-password-or-app-token
+```
+
+---
+
+### Option D — SNMP Traps
+
+Add `snmp_trap` to `alert_channels` in `watchdog-config.yaml` and configure the block:
+
+```yaml
+snmp_trap:
+  enabled: true
+  host: <your-snmp-trap-receiver-ip>
+  port: 162
+  community: public
+  trap_oid: "1.3.6.1.6.3.1.1.5.4"   # replace with your enterprise OID
+```
+
+---
+
+## 8. How to Change Existing Settings
+
+No image rebuild is required for any configuration change. The type of change determines the required command:
+
+| Changed file | What to run |
+|---|---|
+| `watchdog-config.yaml` (thresholds, channels, exclusions) | `docker compose restart watchdog` |
+| `.env` (secrets, credentials) | `docker compose up -d` |
+| `docker-compose.yaml` (host name, resource limits) | `docker compose up -d` |
+
+### Apply watchdog-config.yaml changes
+
+```bash
+docker compose restart watchdog
+# or (v1 standalone)
+docker-compose restart watchdog
+```
+
+### Apply .env changes (credentials / secrets)
+
+```bash
+docker compose up -d
+# or (v1 standalone)
+docker-compose up -d
+```
+
+### Change the host identifier shown in alerts
+
+Edit the `WATCHDOG_HOST` value in `docker-compose.yaml`:
+
+```yaml
+environment:
+  WATCHDOG_HOST: my-new-server-name
+```
+
+Then redeploy:
+
+```bash
+docker compose up -d
+```
+
+---
+
+## 9. Logs
 
 | Location | Description |
 |---|---|
@@ -390,7 +405,7 @@ docker exec watchdog tail -f /var/log/watchdog/watchdog.log
 
 ---
 
-## 9. Alert Types
+## 10. Alert Types
 
 | Failure Type | Severity | Trigger |
 |---|---|---|
@@ -403,7 +418,7 @@ Each alert includes: container name, container ID, host, failure type, timestamp
 
 ---
 
-## 10. Tuning
+## 11. Tuning
 
 All settings are in `watchdog-config.yaml`. No rebuild is required — restart the watchdog container to pick up config changes:
 
@@ -432,7 +447,7 @@ environment:
 
 ---
 
-## 11. Stopping, Updating and Uninstalling
+## 12. Stopping, Updating and Uninstalling
 
 ### Stopping the watchdog (without removing)
 
@@ -514,7 +529,7 @@ Skips all confirmation prompts. Use in automated pipelines or when scripting rep
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 ### Watchdog container is not starting
 
@@ -536,17 +551,6 @@ Common causes:
      "$SLACK_WEBHOOK_URL"
    ```
    Expected response: `ok`
-
-### No Splunk events appearing
-
-1. Verify HEC is enabled in Splunk (Settings → Data Inputs → HTTP Event Collector → Global Settings)
-2. Test the HEC endpoint:
-   ```bash
-   curl -k https://<splunk-host>:8088/services/collector/health
-   ```
-3. Check the token is not disabled in Splunk
-4. If using HTTPS with self-signed cert, set `verify_ssl: false` in `watchdog-config.yaml`
-5. Confirm the index exists in Splunk — create `main` if it does not exist
 
 ### Duplicate alerts
 

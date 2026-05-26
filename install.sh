@@ -5,7 +5,7 @@
 # Version: 1.0.0
 #
 # Installs the watchdog Docker container that monitors all containers on the
-# host and fires alerts (Slack, Splunk, SMTP, SNMP) on crashes, OOM-kills,
+# host and fires alerts (Slack, SMTP, SNMP) on crashes, OOM-kills,
 # unhealthy states, and restart loops.
 #
 # Usage:
@@ -246,15 +246,6 @@ configure_watchdog_yaml() {
         printf "\nslack:\n"
         printf "  enabled:         false\n"
         printf "  webhook_url_env: SLACK_WEBHOOK_URL\n"
-
-        printf "\nsplunk_hec:\n"
-        printf "  enabled:       false\n"
-        printf "  hec_url_env:   SPLUNK_HEC_URL\n"
-        printf "  hec_token_env: SPLUNK_HEC_TOKEN\n"
-        printf "  alert_index:   main\n"
-        printf "  log_index:     main\n"
-        printf "  log_enabled:   false\n"
-        printf "  verify_ssl:    true\n"
     } > "$CONFIG_FILE"
 
     print_success "watchdog-config.yaml written with defaults: ${CONFIG_FILE}"
@@ -334,7 +325,7 @@ display_usage_instructions() {
     echo "  nano ${INSTALL_DIR}/watchdog-config.yaml"
     echo "  $DC -f ${INSTALL_DIR}/docker-compose.yaml restart"
     echo ""
-    echo -e "${GREEN}Edit secrets (Slack / Splunk / SMTP):${NC}"
+    echo -e "${GREEN}Edit secrets (Slack / SMTP):${NC}"
     echo "  nano ${INSTALL_DIR}/.env"
     echo "  $DC -f ${INSTALL_DIR}/docker-compose.yaml up -d"
     echo ""

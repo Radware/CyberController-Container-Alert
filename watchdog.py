@@ -2,7 +2,7 @@
 """
 watchdog.py — CyberController Container Health Monitor
 Monitors all Docker containers, detects failures, and dispatches
-alerts via Slack and Splunk.
+alerts via Slack, SMTP, SNMP, and Syslog.
 
 Usage:
     python3 watchdog.py [--config /path/to/watchdog-config.yaml]
@@ -29,47 +29,8 @@ SYSLOG_FORMAT = "watchdog[%(process)d]: %(levelname)s %(name)s: %(message)s"
 log = logging.getLogger("watchdog")
 
 
-class SplunkHECHandler(logging.Handler):
-    """Logging handler that ships records to Splunk via HTTP Event Collector."""
 
-    def __init__(self, hec_url: str, token: str, index: str, verify_ssl: bool) -> None:
-        super().__init__()
-        self._url = hec_url.rstrip("/") + "/services/collector/event"
-        self._headers = {
-            "Authorization": f"Splunk {token}",
-            "Content-Type": "application/json",
-        }
-        self._index = index
-        self._verify_ssl = verify_ssl
-        self._hostname = socket.gethostname()
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            event = {
-                "time": record.created,
-                "host": self._hostname,
-                "source": "watchdog",
-                "sourcetype": "watchdog:log",
-                "index": self._index,
-                "event": {
-                    "message": self.format(record),
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "process": record.process,
-                },
-            }
-            requests.post(
-                self._url,
-                json=event,
-                headers=self._headers,
-                timeout=5,
-                verify=self._verify_ssl,
-            )
-        except Exception:
-            self.handleError(record)
-
-
-def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = None, splunk_cfg: dict | None = None) -> None:
+def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = None) -> None:
     numeric = getattr(logging, level.upper(), logging.INFO)
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if log_file:
@@ -101,21 +62,6 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
         handlers.append(syslog_handler)
         # Use a plain formatter for other handlers, syslog gets its own
         log.info("Syslog handler added: %s:%d (%s)", host, port, proto)
-    if splunk_cfg and splunk_cfg.get("log_enabled"):
-        hec_url = os.environ.get(splunk_cfg.get("hec_url_env", "SPLUNK_HEC_URL"), "")
-        token   = os.environ.get(splunk_cfg.get("hec_token_env", "SPLUNK_HEC_TOKEN"), "")
-        if hec_url and token:
-            splunk_handler = SplunkHECHandler(
-                hec_url=hec_url,
-                token=token,
-                index=splunk_cfg.get("log_index", "main"),
-                verify_ssl=splunk_cfg.get("verify_ssl", True),
-            )
-            splunk_handler.setFormatter(logging.Formatter(LOG_FORMAT))
-            handlers.append(splunk_handler)
-            log.info("Splunk HEC log handler added (index: %s)", splunk_cfg.get("log_index", "main"))
-        else:
-            log.warning("Splunk log handler: SPLUNK_HEC_URL or SPLUNK_HEC_TOKEN not set — skipping")
     logging.basicConfig(level=numeric, format=LOG_FORMAT, handlers=handlers, force=True)
     # Suppress noisy third-party debug chatter (urllib3 Docker socket calls, etc.)
     for noisy in ("urllib3", "urllib3.connectionpool", "docker", "requests"):
@@ -124,7 +70,7 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DEFAULT_CONFIG = {
-    "alert_channels": ["slack", "splunk_hec"],
+    "alert_channels": ["slack"],
     "check_interval_seconds": 60,
     "cooldown_minutes": 5,
     "restart_threshold": 5,
@@ -141,14 +87,6 @@ DEFAULT_CONFIG = {
         "facility": "local0",
     },
     "slack": {"webhook_url_env": "SLACK_WEBHOOK_URL"},
-    "splunk_hec": {
-        "hec_url_env":   "SPLUNK_HEC_URL",
-        "hec_token_env": "SPLUNK_HEC_TOKEN",
-        "alert_index":   "main",
-        "log_index":     "main",
-        "log_enabled":   False,
-        "verify_ssl":    True,
-    },
 }
 
 
@@ -330,69 +268,17 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
         log.error("Slack failed: %s", exc)
 
 
-def send_splunk(payload: AlertPayload, cfg: dict) -> None:
-    splunk = cfg.get("splunk_hec", {})
-    if not splunk.get("enabled", True):  # default True for backwards-compat
-        log.debug("Splunk: disabled in config — skipping")
-        return
-    hec_url = os.environ.get(splunk.get("hec_url_env", "SPLUNK_HEC_URL"), "")
-    token   = os.environ.get(splunk.get("hec_token_env", "SPLUNK_HEC_TOKEN"), "")
-    if not hec_url or not token:
-        log.warning("Splunk: SPLUNK_HEC_URL or SPLUNK_HEC_TOKEN not set — skipping")
-        return
-
-    verify_ssl = splunk.get("verify_ssl", True)
-    index      = splunk.get("alert_index", "main")
-    event_fields: dict = {
-        "severity":           payload.severity,
-        "container_name":     payload.container_name,
-        "container_id":       payload.container_id,
-        "host":               payload.host,
-        "failure_type":       payload.failure_type,
-        "timestamp":          payload.timestamp,
-        "recommended_action": payload.recommended_action,
-        "runbook_url":        payload.runbook_url,
-        "log_tail":           payload.log_tail,
-    }
-    if payload.exit_code is not None:
-        event_fields["exit_code"] = payload.exit_code
-    if payload.probe_type:
-        event_fields["probe_type"] = payload.probe_type
-    if payload.probe_detail:
-        event_fields["probe_detail"] = payload.probe_detail
-
-    body = {
-        "time":       int(time.time()),
-        "host":       payload.host,
-        "source":     "watchdog",
-        "sourcetype": "container:alert",
-        "index":      index,
-        "event":      event_fields,
-    }
-    url = hec_url.rstrip("/") + "/services/collector/event"
-    headers = {
-        "Authorization": f"Splunk {token}",
-        "Content-Type":  "application/json",
-    }
-    try:
-        r = requests.post(url, json=body, headers=headers, timeout=10, verify=verify_ssl)
-        r.raise_for_status()
-        log.info("Splunk alert sent (index: %s)", index)
-    except Exception as exc:
-        log.error("Splunk failed: %s", exc)
-
 
 def dispatch_alert(payload: AlertPayload, cfg: dict) -> None:
     """Send alert to all configured channels."""
-    channels = cfg.get("alert_channels", ["slack", "splunk_hec"])
+    channels = cfg.get("alert_channels", ["slack"])
     log.warning(
         "ALERT [%s] %s — %s (channels: %s)",
         payload.severity, payload.container_name,
         payload.failure_type, channels,
     )
-    if "slack"       in channels: send_slack(payload, cfg)
-    if "splunk_hec"  in channels: send_splunk(payload, cfg)
-    if "smtp"       in channels: send_smtp(payload, cfg)
+    if "slack"  in channels: send_slack(payload, cfg)
+    if "smtp"   in channels: send_smtp(payload, cfg)
     if "snmp_trap"  in channels: send_snmp_trap(payload, cfg)
 
 
@@ -1104,7 +990,6 @@ def main() -> None:
         cfg.get("log_level", "INFO"),
         cfg.get("log_file"),
         cfg.get("syslog"),
-        cfg.get("splunk_hec"),
     )
 
     watchdog = Watchdog(cfg)

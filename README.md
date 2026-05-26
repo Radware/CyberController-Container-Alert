@@ -1,6 +1,22 @@
 # CyberController Container Watchdog
 
-A lightweight Docker container health monitor that detects failures and dispatches alerts via **Slack**, **Splunk**, **SMTP**, and **SNMP traps**.
+A lightweight Docker container health monitor that detects failures and dispatches alerts via **Slack**, **SMTP**, and **SNMP traps**.
+
+---
+
+## Table of Contents
+
+1. [How It Works](#how-it-works)
+2. [Project Structure](#project-structure)
+3. [Image Size](#image-size)
+4. [Configuration](#configuration)
+5. [Supported Alert Channels](#supported-alert-channels)
+6. [Deployment](#deployment)
+7. [Failure Types & Severities](#failure-types--severities)
+8. [Viewing Logs](#viewing-logs)
+9. [Testing](#testing)
+10. [Troubleshooting](#troubleshooting)
+11. [Container Probe Map](#container-probe-map)
 
 ---
 
@@ -55,25 +71,28 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 
 > These are approximate. Run `docker image ls watchdog` and `docker stats watchdog` after deployment to see exact values on your host.
 
----
+### Dependencies
 
-## Deployment
-
-For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
-
-**Quick start (automated):**
-
-```bash
-sudo bash install.sh
+```
+docker==7.1.0
+requests==2.32.3
+PyYAML==6.0.2
+pysnmp>=4.4.12
 ```
 
+Python 3.11+
+
 ---
 
-## Configuration (`watchdog-config.yaml`)
+## Configuration
+
+All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, passwords) are stored in `.env` and never committed to version control. Restart the container after editing either file — no image rebuild is needed.
+
+### watchdog-config.yaml
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `alert_channels` | `[]` | Active destinations: `slack`, `splunk_hec`, `smtp`, `snmp_trap` |
+| `alert_channels` | `[]` | Active destinations: `slack`, `smtp`, `snmp_trap` |
 | `check_interval_seconds` | `60` | How often the poll loop runs |
 | `cooldown_minutes` | `5` | Suppress duplicate alerts per container per failure type |
 | `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |
@@ -84,6 +103,31 @@ sudo bash install.sh
 | `log_file` | `/var/log/watchdog/watchdog.log` | Bind-mounted to `./watchdog/watchdog.log` on host. Rotates at 10 MB, 5 backups. Set to `null` to disable |
 | `runbook_base_url` | — | URL included in every alert |
 
+### Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `SLACK_WEBHOOK_URL` | Yes (if Slack enabled) | Slack incoming webhook URL |
+| `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or app token |
+| `WATCHDOG_CONFIG` | No | Path to config file (default: `/etc/watchdog/watchdog-config.yaml`) |
+| `WATCHDOG_HOST` | No | Hostname shown in alerts (default: system hostname) |
+
+---
+
+## Supported Alert Channels
+
+Configure at least one channel and add its identifier to `alert_channels` in `watchdog-config.yaml`. Multiple channels can be active simultaneously.
+
+### Slack
+
+Add `slack` to `alert_channels` and set `SLACK_WEBHOOK_URL` in `.env`:
+
+```yaml
+slack:
+  enabled: true
+  webhook_url_env: SLACK_WEBHOOK_URL
+```
+
 ### Syslog
 
 ```yaml
@@ -93,19 +137,6 @@ syslog:
   port: 514
   protocol: udp       # udp or tcp
   facility: local0
-```
-
-### Splunk HEC
-
-```yaml
-splunk_hec:
-  enabled: true
-  hec_url_env:   SPLUNK_HEC_URL      # env var name
-  hec_token_env: SPLUNK_HEC_TOKEN    # env var name
-  alert_index:   main
-  log_index:     main
-  log_enabled:   false               # also ship watchdog logs to Splunk
-  verify_ssl:    true
 ```
 
 ### SMTP (Email)
@@ -140,6 +171,18 @@ snmp_trap:
 
 ---
 
+## Deployment
+
+For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
+
+**Quick start (automated):**
+
+```bash
+sudo bash install.sh
+```
+
+---
+
 ## Failure Types & Severities
 
 | Failure | Severity | Trigger |
@@ -153,8 +196,8 @@ OOM alerts include **memory stats** (usage / limit / peak) prepended to the log 
 
 Every alert includes two probe fields that identify exactly how and why the failure was detected:
 
-- **Probe Type** — short label classifying the detection mechanism (Slack short field; `probe_type` in Splunk)
-- **Detection** — full detail string with path, status code, or error message (Slack full-width field; `probe_detail` in Splunk)
+- **Probe Type** — short label classifying the detection mechanism
+- **Detection** — full detail string with path, status code, or error message
 
 | Failure | Probe Type | Example Detection value |
 |---------|------------|-------------------------|
@@ -199,7 +242,11 @@ docker compose logs -f watchdog
 
 ---
 
-## OOM Simulation *(Optional — requires internet access)*
+## Testing
+
+The sections below describe optional manual tests that validate the watchdog's detection and alerting paths. Each creates a temporary Docker container and cleans up after itself.
+
+### OOM Simulation *(Optional — requires internet access)*
 
 > Pulls `polinux/stress` from Docker Hub and creates a temporary `oom-test` container.
 
@@ -219,12 +266,12 @@ docker rmi polinux/stress
 
 ---
 
-## Probe Testing *(Optional — requires internet access)*
+### Probe Testing *(Optional — requires internet access)*
 
 > These tests pull images from Docker Hub and create temporary containers on the host.
 > Each section includes full cleanup instructions (container + image).
 
-### HTTP probe
+#### HTTP probe
 
 ```bash
 # Start a container whose /health endpoint always returns 503
@@ -244,7 +291,7 @@ The watchdog auto-discovers `http://<ip>:<port>/health`, receives a 503, and fir
 
 ---
 
-### TCP connect probe
+#### TCP connect probe
 
 ```bash
 # Expose port 9999 but run nothing on it — TCP connect will be refused
@@ -265,7 +312,7 @@ After `unhealthy_cycles_threshold` consecutive failed cycles an alert fires with
 
 ---
 
-### `/proc` alive check
+#### `/proc` alive check
 
 ```bash
 # No EXPOSE — watchdog falls straight to /proc check.
@@ -283,6 +330,56 @@ docker rmi alpine
 ```
 
 With no exposed ports, auto-discovery skips HTTP and TCP entirely and reads `/proc/1/status` inside the container. A `Z` (zombie) or `T` (stopped) state triggers an `unhealthy` alert with Detection value `/proc alive check failed — PID 1 is zombie/stopped (exit code 1)`.
+
+---
+
+## Troubleshooting
+
+### Watchdog container is not starting
+
+```bash
+docker compose logs watchdog
+# or (v1 standalone)
+docker-compose logs watchdog
+```
+
+Common causes:
+- **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
+- **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
+- **Image not loaded** — run `docker images watchdog`; if empty, build with `docker build -t watchdog:latest .`
+
+### No alerts received
+
+1. Check `alert_channels` in `watchdog-config.yaml` — ensure at least one channel is listed and configured
+2. Check watchdog logs for errors:
+   ```bash
+   grep -E "ERROR|CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+   ```
+3. For Slack: verify `SLACK_WEBHOOK_URL` is set in `.env` and test manually:
+   ```bash
+   curl -X POST -H 'Content-type: application/json' \
+     --data '{"text":"Watchdog test"}' "$SLACK_WEBHOOK_URL"
+   ```
+   Expected response: `ok`
+
+### Duplicate or excessive alerts
+
+Increase `cooldown_minutes` in `watchdog-config.yaml` (default: `5` minutes per container per failure type). To silence a noisy container entirely, add it to `excluded_containers`:
+
+```yaml
+excluded_containers:
+  - debug-shell
+  - load-test
+  - my-noisy-container
+```
+
+### Probe type not as expected
+
+Check which probe was cached at startup:
+
+```bash
+grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+```
 
 ---
 
@@ -338,29 +435,3 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 > ```bash
 > grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
 > ```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SLACK_WEBHOOK_URL` | Yes (if Slack enabled) | Slack incoming webhook URL |
-| `SPLUNK_HEC_URL` | Yes (if Splunk enabled) | Splunk HEC endpoint |
-| `SPLUNK_HEC_TOKEN` | Yes (if Splunk enabled) | Splunk HEC authentication token |
-| `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or app token |
-| `WATCHDOG_CONFIG` | No | Path to config file (default: `/etc/watchdog/watchdog-config.yaml`) |
-| `WATCHDOG_HOST` | No | Hostname shown in alerts (default: system hostname) |
-
----
-
-## Dependencies
-
-```
-docker==7.1.0
-requests==2.32.3
-PyYAML==6.0.2
-pysnmp>=4.4.12
-```
-
-Python 3.11+

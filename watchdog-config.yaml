@@ -9,12 +9,8 @@
 
 # ── Alert channels ────────────────────────────────────────────────────────────
 # Empty for local testing — alerts are still logged to stdout/file.
-# Restore when Slack/Splunk are available.
 alert_channels:
   - slack
-# alert_channels:
-#   - slack
-#   - splunk_hec
 
 # ── Watchdog behaviour ────────────────────────────────────────────────────────
 check_interval_seconds:     60    # how often to poll all containers
@@ -70,16 +66,6 @@ snmp_trap:
 slack:
   enabled: true                        # set to true to enable
   webhook_url_env: SLACK_WEBHOOK_URL   # env var: https://hooks.slack.com/services/...
-
-# ── Splunk HEC (HTTP Event Collector) ───────────────────────────────────
-splunk_hec:
-  enabled: false                     # set to true to enable
-  hec_url_env:   SPLUNK_HEC_URL      # env var: https://your-splunk:8088
-  hec_token_env: SPLUNK_HEC_TOKEN    # env var: HEC token from Splunk Settings > Data Inputs
-  alert_index:   main                # Splunk index for container alerts
-  log_index:     main                # Splunk index for watchdog logs
-  log_enabled:   false               # set true to also ship watchdog logs to Splunk HEC
-  verify_ssl:    true                # set false only for self-signed certs in dev
 
 # ── Custom health checks for containers without a Docker HEALTHCHECK ──────────
 # These containers show no ports in `docker ps` or simply have no HEALTHCHECK

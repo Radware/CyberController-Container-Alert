@@ -6,7 +6,7 @@ version: "3.8"
 #   docker load -i watchdog.tar
 #
 # Usage:
-#   cp .env.example .env   # fill in SLACK_WEBHOOK_URL (and Splunk if needed)
+#   cp .env.example .env   # fill in SLACK_WEBHOOK_URL and any other channel secrets
 #   docker compose up -d
 #
 # To build a new image (requires internet):
