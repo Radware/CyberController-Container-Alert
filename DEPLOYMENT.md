@@ -1,23 +1,30 @@
 # CyberController Container Watchdog — Deployment Guide
 
-The watchdog monitors all Docker containers on the host and fires alerts via one or more configured channels (**Slack**, **SMTP**, **SNMP**, or **Syslog**) whenever a container crashes, is OOM-killed, becomes unhealthy, or enters a restart loop.
+The **CyberController Container Watchdog** is an autonomous monitoring service that provides continuous health visibility across all Docker containers running on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**).
+
+This guide covers initial deployment, alert channel configuration, and ongoing operational management of the watchdog service.
 
 ---
 
 ## Table of Contents
 
+**Getting Started** *(complete sections 1–6 in order for a new installation)*
+
 1. [Prerequisites](#1-prerequisites)
 2. [Repository Structure](#2-repository-structure)
-3. [Step 1 — Configure Environment Variables](#3-step-1--configure-environment-variables)
-4. [Step 2 — Configure the Watchdog](#4-step-2--configure-the-watchdog)
-5. [Step 3 — Install and Deploy](#5-step-3--install-and-deploy)
-6. [Step 4 — Verify It Is Working](#6-step-4--verify-it-is-working)
+3. [Configure Environment Variables](#3-configure-environment-variables)
+4. [Configure the Watchdog](#4-configure-the-watchdog)
+5. [Install and Deploy](#5-install-and-deploy)
+6. [Verify Deployment](#6-verify-deployment)
+
+**Reference**
+
 7. [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels)
 8. [How to Change Existing Settings](#8-how-to-change-existing-settings)
 9. [Logs](#9-logs)
 10. [Alert Types](#10-alert-types)
-11. [Tuning](#11-tuning)
-12. [Stopping, Updating and Uninstalling](#12-stopping-updating-and-uninstalling)
+11. [Configuration Reference](#11-configuration-reference)
+12. [Lifecycle Management](#12-lifecycle-management)
 13. [Troubleshooting](#13-troubleshooting)
 
 ---
@@ -38,7 +45,6 @@ The watchdog monitors all Docker containers on the host and fires alerts via one
 
 > **Alert channels:** At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`. See [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels).
 
-> **Linux host required:** The watchdog requires direct access to `/var/run/docker.sock` and must run on a Linux Docker host. Windows and macOS are not supported as deployment targets. For local development on Windows, use Docker Desktop with WSL 2 enabled — the container will run inside the WSL 2 Linux VM where the Docker socket is available.
 
 ---
 
@@ -60,7 +66,7 @@ Container_Alert/
 
 ---
 
-## 3. Step 1 — Configure Environment Variables
+## 3. Configure Environment Variables
 
 ```bash
 cp .env.example .env
@@ -78,7 +84,7 @@ LOG_LEVEL=INFO
 ```
 ---
 
-## 4. Step 2 — Configure the Watchdog
+## 4. Configure the Watchdog
 
 ### Alert Channels
 
@@ -93,7 +99,7 @@ All alert channels are **optional** — configure at least one so the watchdog h
 
 > For step-by-step setup of each channel, see [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels).
 
-### watchdog-config.yaml
+### Configuration File (watchdog-config.yaml)
 
 Edit `watchdog-config.yaml` to match your environment:
 
@@ -118,7 +124,7 @@ slack:
 
 ---
 
-## 5. Step 3 — Install and Deploy
+## 5. Install and Deploy
 
 ### Option A — Automated installation with `install.sh` (recommended)
 
@@ -237,7 +243,7 @@ docker-compose logs -f watchdog
 
 ---
 
-## 6. Step 4 — Verify It Is Working
+## 6. Verify Deployment
 
 ### Check watchdog logs
 
@@ -418,9 +424,9 @@ Each alert includes: container name, container ID, host, failure type, timestamp
 
 ---
 
-## 11. Tuning
+## 11. Configuration Reference
 
-All settings are in `watchdog-config.yaml`. No rebuild is required — restart the watchdog container to pick up config changes:
+All settings are in `watchdog-config.yaml`. No image rebuild is required for configuration changes — restart the watchdog container to apply updates:
 
 ```bash
 docker compose restart watchdog
@@ -433,10 +439,10 @@ docker compose restart watchdog
 | `restart_threshold` | `5` | Restarts within the window to trigger restart-loop alert |
 | `restart_window_minutes` | `10` | Rolling window for restart counting |
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy polls before alerting |
-| `excluded_containers` | `[debug-shell, load-test]` | Containers never alerted on |
-| `log_level` | `DEBUG` | `INFO` or `DEBUG` — set to `INFO` in production |
+| `excluded_containers` | `[debug-shell, load-test]` | Containers that are never alerted on |
+| `log_level` | `INFO` | Logging verbosity: `INFO` (recommended for production) or `DEBUG` |
 
-### Identify this host in alerts
+### Host Identification in Alerts
 
 Set `WATCHDOG_HOST` in `docker-compose.yaml` under the watchdog service environment:
 
@@ -447,9 +453,9 @@ environment:
 
 ---
 
-## 12. Stopping, Updating and Uninstalling
+## 12. Lifecycle Management
 
-### Stopping the watchdog (without removing)
+### Stopping the Service
 
 ```bash
 # Pause the container — restartable with `docker compose start`
@@ -459,7 +465,7 @@ docker compose stop
 docker compose down
 ```
 
-### Restarting after config changes
+### Restarting After Configuration Changes
 
 ```bash
 # Pick up watchdog-config.yaml changes (no rebuild needed)
@@ -469,7 +475,7 @@ docker compose restart watchdog
 docker compose up -d
 ```
 
-### Updating the watchdog
+### Updating the Watchdog Image
 
 ```bash
 # Rebuild the image (requires internet)
@@ -482,7 +488,7 @@ docker compose up -d        # v2
 
 ---
 
-### Uninstalling with `uninstall.sh`
+### Uninstalling
 
 Run `uninstall.sh` from the `Container_Alert/` directory. Choose the option that matches how much you want removed:
 
@@ -531,7 +537,7 @@ Skips all confirmation prompts. Use in automated pipelines or when scripting rep
 
 ## 13. Troubleshooting
 
-### Watchdog container is not starting
+### Service Fails to Start
 
 ```bash
 docker compose logs watchdog
@@ -541,7 +547,7 @@ Common causes:
 - `/var/run/docker.sock` is not accessible — ensure the host socket exists and the container has read access
 - Missing `.env` file — run `cp .env.example .env` and fill in values
 
-### No Slack alerts received
+### Alert Notifications Not Received
 
 1. Verify `SLACK_WEBHOOK_URL` is set correctly in `.env`
 2. Test the webhook manually:
@@ -552,11 +558,11 @@ Common causes:
    ```
    Expected response: `ok`
 
-### Duplicate alerts
+### Duplicate Alert Notifications
 
 Increase `cooldown_minutes` in `watchdog-config.yaml`. The default is 5 minutes per container per failure type.
 
-### Too many alerts / noise
+### Excessive Alert Volume
 
 Add noisy containers to `excluded_containers` in `watchdog-config.yaml`:
 
