@@ -1,22 +1,20 @@
 # CyberController Container Watchdog
 
-A lightweight Docker container health monitor that detects failures and dispatches alerts via **Slack**, **SMTP**, and **SNMP traps**.
+The **CyberController Container Watchdog** is a lightweight, autonomous monitoring service that continuously tracks the health of all Docker containers on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**).
 
 ---
 
 ## Table of Contents
 
 1. [How It Works](#how-it-works)
-2. [Project Structure](#project-structure)
-3. [Image Size](#image-size)
-4. [Deployment](#deployment)
-5. [Configuration](#configuration)
-6. [Supported Alert Channels](#supported-alert-channels)
-7. [Failure Types & Severities](#failure-types--severities)
-8. [Viewing Logs](#viewing-logs)
-9. [Testing](#testing)
-10. [Troubleshooting](#troubleshooting)
-11. [Container Probe Map](#container-probe-map)
+2. [System Overview](#system-overview)
+3. [Configuration](#configuration)
+4. [Supported Alert Channels](#supported-alert-channels)
+5. [Deployment Instructions](#deployment-instructions)
+6. [Failure Types & Severities](#failure-types--severities)
+7. [Testing](#testing)
+8. [Troubleshooting](#troubleshooting)
+9. [Container Probe Map](#container-probe-map)
 
 ---
 
@@ -43,7 +41,9 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 
 ---
 
-## Project Structure
+## System Overview
+
+### Project Structure
 
 ```
 .
@@ -61,7 +61,7 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 
 ---
 
-## Image Size
+### Image Size
 
 | Item | Size |
 |------|------|
@@ -84,23 +84,11 @@ Python 3.11+
 
 ---
 
-## Deployment
-
-For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
-
-**Quick start (automated):**
-
-```bash
-sudo bash install.sh
-```
-
----
-
 ## Configuration
 
 All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, passwords) are stored in `.env` and never committed to version control. Restart the container after editing either file — no image rebuild is needed.
 
-### watchdog-config.yaml
+### Configuration File (watchdog-config.yaml)
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -123,6 +111,75 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or app token |
 | `WATCHDOG_CONFIG` | No | Path to config file (default: `/etc/watchdog/watchdog-config.yaml`) |
 | `WATCHDOG_HOST` | No | Hostname shown in alerts (default: system hostname) |
+
+---
+
+## Supported Alert Channels
+
+Configure at least one channel and add its identifier to `alert_channels` in `watchdog-config.yaml`. Multiple channels can be active simultaneously.
+
+### Slack
+
+Add `slack` to `alert_channels` and set `SLACK_WEBHOOK_URL` in `.env`:
+
+```yaml
+slack:
+  enabled: true
+  webhook_url_env: SLACK_WEBHOOK_URL
+```
+
+### Syslog
+
+```yaml
+syslog:
+  enabled: true
+  host: <syslog-server-ip>
+  port: 514
+  protocol: udp       # udp or tcp
+  facility: local0
+```
+
+### SMTP (Email)
+
+Add `smtp` to `alert_channels` to enable.
+
+```yaml
+smtp:
+  enabled: true
+  host: smtp.radware.com
+  port: 587
+  sender: noc-alerts@radware.com
+  recipients:
+    - ops-team@radware.com
+    - oncall@radware.com
+  tls: true
+  password_env: SMTP_PASSWORD        # env var: SMTP password or app token
+```
+
+### SNMP Traps
+
+Add `snmp_trap` to `alert_channels` to enable. Sends SNMPv2c traps to your NMS/SIEM on every alert.
+
+```yaml
+snmp_trap:
+  enabled: true
+  host: 155.1.1.4                    # IP or hostname of your SNMP trap receiver
+  port: 162                          # Standard SNMPv2c trap port
+  community: public                  # SNMPv2c community string
+  trap_oid: "1.3.6.1.6.3.1.1.5.4"   # Replace with your enterprise OID
+```
+
+---
+
+## Deployment Instructions
+
+For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
+
+**Quick start (automated):**
+
+```bash
+sudo bash install.sh
+```
 
 ---
 
@@ -155,7 +212,177 @@ Every alert includes two probe fields that identify exactly how and why the fail
 
 ---
 
-## Viewing Logs
+## Testing
+
+The sections below describe optional manual tests that validate the watchdog's detection and alerting paths. Each creates a temporary Docker container and cleans up after itself.
+
+### OOM Simulation
+
+Two options — choose based on whether the host has internet access.
+
+#### Option A — `polinux/stress` *(requires internet access)*
+
+> Pulls `polinux/stress` from Docker Hub.
+
+```bash
+# --memory-swap=32m disables swap so the kernel is forced to OOM-kill rather than swap out
+# Note: the polinux/stress entrypoint IS the stress binary — do not repeat "stress" in the args
+docker run -d --name oom-test --memory=32m --memory-swap=32m polinux/stress \
+  --vm 1 --vm-bytes 64M --vm-keep
+```
+
+```bash
+# Clean up
+docker rm -f oom-test
+docker rmi polinux/stress
+```
+
+#### Option B — `watchdog:latest` *(no internet required)*
+
+> Uses the watchdog image already present on the host — no pull needed.
+
+```bash
+docker run -d --name oom-test --memory=32m --memory-swap=32m watchdog:latest \
+  python3 -c "x = b'\xff' * (64 * 1024 * 1024)"
+```
+
+```bash
+# Clean up — container only (keep the watchdog image)
+docker rm -f oom-test
+```
+
+Docker kills the container with exit code `137` and emits an `oom` event. The watchdog captures memory stats and the last 20 log lines, then dispatches a CRITICAL alert — all within seconds of the kill.
+
+> **If the container exits cleanly (exit code 0) instead of being OOM-killed**, cgroup memory accounting may be disabled on this host. Verify with:
+> ```bash
+> docker info 2>&1 | grep -i "memory limit"
+> ```
+> `WARNING: No memory limit support` means the `--memory` flag is silently ignored. Enable cgroup memory accounting by adding `cgroup_enable=memory swapaccount=1` to `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, then run `sudo update-grub` and reboot.
+
+---
+
+### Probe Testing *(Optional — requires internet access)*
+
+> These tests pull images from Docker Hub and create temporary containers on the host.
+> Each section includes full cleanup instructions (container + image).
+
+#### HTTP Probe
+
+```bash
+# Start a container where every HTTP path returns 503
+# Note: the full server { } block is required — a bare location { } directive is not valid nginx config
+docker run -d --name http-probe-test \
+  nginx:alpine \
+  sh -c "printf 'server { listen 80; location / { return 503; } }' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
+
+# Verify the container is running:
+docker ps | grep http-probe-test
+
+# Wait one poll cycle (60s), then check watchdog detected it:
+grep "http-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+
+# Clean up
+docker rm -f http-probe-test
+docker rmi nginx:alpine
+```
+
+During auto-discovery the watchdog sends an HTTP GET to `/-/healthy` on port 80. Nginx returns 503, so the watchdog immediately caches that endpoint as failing and reports unhealthy. After `unhealthy_cycles_threshold` consecutive unhealthy cycles an alert fires with Detection value `HTTP probe failed — error response 503 Service Unavailable, URI http://<ip>:80/-/healthy`.
+
+---
+
+#### TCP Connect Probe
+
+```bash
+# Expose port 9999 but run nothing on it — TCP connect will be refused
+docker run -d --name tcp-probe-test \
+  --expose 9999 \
+  alpine \
+  sh -c "sleep infinity"
+
+# Watch the watchdog fall through HTTP → TCP and alert:
+grep "tcp-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+
+# Clean up
+docker rm -f tcp-probe-test
+docker rmi alpine
+```
+
+After `unhealthy_cycles_threshold` consecutive failed cycles an alert fires with Detection value `TCP probe failed — connection refused or timed out on <ip>:9999`.
+
+---
+
+#### `/proc` Alive Check
+
+```bash
+# No EXPOSE — watchdog falls straight to /proc alive check
+docker run -d --name proc-probe-test \
+  alpine \
+  sleep infinity
+
+# Verify the container is running:
+docker ps | grep proc-probe-test
+
+# After one poll cycle, confirm the watchdog selected /proc as the probe type:
+grep "proc-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+
+# Clean up
+docker rm -f proc-probe-test
+docker rmi alpine
+```
+
+With no exposed ports, auto-discovery skips HTTP and TCP and falls back to reading `/proc/1/status` inside the container via `exec_run`. Since `sleep` is PID 1 in a live `S` (sleeping) state, no alert fires. The log will show `falling back to /proc alive-check` confirming the probe type was selected. In production, this probe fires when PID 1 enters zombie (`Z`) or stopped (`T`) state.
+
+---
+
+## Troubleshooting
+
+### Service Fails to Start
+
+```bash
+docker compose logs watchdog
+# or (v1 standalone)
+docker-compose logs watchdog
+```
+
+Common causes:
+- **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
+- **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
+- **Image not loaded** — run `docker images watchdog`; if empty, build with `docker build -t watchdog:latest .`
+
+### Alert Notifications Not Received
+
+1. Check `alert_channels` in `watchdog-config.yaml` — ensure at least one channel is listed and configured
+2. Check watchdog logs for errors:
+   ```bash
+   grep -E "ERROR|CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+   ```
+3. For Slack: verify `SLACK_WEBHOOK_URL` is set in `.env` and test manually:
+   ```bash
+   curl -X POST -H 'Content-type: application/json' \
+     --data '{"text":"Watchdog test"}' "$SLACK_WEBHOOK_URL"
+   ```
+   Expected response: `ok`
+
+### Duplicate and Excessive Alert Notifications
+
+Increase `cooldown_minutes` in `watchdog-config.yaml` (default: `5` minutes per container per failure type). To silence a noisy container entirely, add it to `excluded_containers`:
+
+```yaml
+excluded_containers:
+  - debug-shell
+  - load-test
+  - my-noisy-container
+```
+
+### Probe Type Not as Expected
+
+Check which probe was cached at startup:
+
+```bash
+grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+```
+
+### Viewing Logs
 
 Log destinations (simultaneous):
 - **stdout** — always on; captured by `docker compose logs`
@@ -181,147 +408,6 @@ grep "CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.l
 
 # Via Docker (stdout only)
 docker compose logs -f watchdog
-```
-
----
-
-## Testing
-
-The sections below describe optional manual tests that validate the watchdog's detection and alerting paths. Each creates a temporary Docker container and cleans up after itself.
-
-### OOM Simulation *(Optional — requires internet access)*
-
-> Pulls `polinux/stress` from Docker Hub and creates a temporary `oom-test` container.
-
-```bash
-# Fire an OOM-kill
-docker run -d --name oom-test --memory=32m polinux/stress \
-  stress --vm 1 --vm-bytes 64M --vm-keep
-```
-
-Docker kills the container with exit code `137` and emits an `oom` event. The watchdog captures memory stats and the last 20 log lines, then dispatches a CRITICAL alert — all within seconds of the kill.
-
-```bash
-# Clean up — container and image
-docker rm -f oom-test
-docker rmi polinux/stress
-```
-
----
-
-### Probe Testing *(Optional — requires internet access)*
-
-> These tests pull images from Docker Hub and create temporary containers on the host.
-> Each section includes full cleanup instructions (container + image).
-
-#### HTTP probe
-
-```bash
-# Start a container whose /health endpoint always returns 503
-docker run -d --name http-probe-test \
-  nginx:alpine \
-  sh -c "echo 'location /health { return 503; }' > /etc/nginx/conf.d/health.conf && nginx -g 'daemon off;'"
-
-# Wait one poll cycle (60s), then check watchdog detected it:
-grep "http-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f http-probe-test
-docker rmi nginx:alpine
-```
-
-The watchdog auto-discovers `http://<ip>:<port>/health`, receives a 503, and fires an `unhealthy` alert with Detection value `HTTP probe failed — error response 503 Service Unavailable, URI http://...`.
-
----
-
-#### TCP connect probe
-
-```bash
-# Expose port 9999 but run nothing on it — TCP connect will be refused
-docker run -d --name tcp-probe-test \
-  --expose 9999 \
-  alpine \
-  sh -c "sleep infinity"
-
-# Watch the watchdog fall through HTTP → TCP and alert:
-grep "tcp-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f tcp-probe-test
-docker rmi alpine
-```
-
-After `unhealthy_cycles_threshold` consecutive failed cycles an alert fires with Detection value `TCP probe failed — connection refused or timed out on <ip>:9999`.
-
----
-
-#### `/proc` alive check
-
-```bash
-# No EXPOSE — watchdog falls straight to /proc check.
-# The shell exits but the container stays running with a zombie PID 1.
-docker run -d --name proc-probe-test \
-  alpine \
-  sh -c "sh -c 'exit 0' & wait"
-
-# After one poll cycle:
-grep "proc-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f proc-probe-test
-docker rmi alpine
-```
-
-With no exposed ports, auto-discovery skips HTTP and TCP entirely and reads `/proc/1/status` inside the container. A `Z` (zombie) or `T` (stopped) state triggers an `unhealthy` alert with Detection value `/proc alive check failed — PID 1 is zombie/stopped (exit code 1)`.
-
----
-
-## Troubleshooting
-
-### Watchdog container is not starting
-
-```bash
-docker compose logs watchdog
-# or (v1 standalone)
-docker-compose logs watchdog
-```
-
-Common causes:
-- **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
-- **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
-- **Image not loaded** — run `docker images watchdog`; if empty, build with `docker build -t watchdog:latest .`
-
-### No alerts received
-
-1. Check `alert_channels` in `watchdog-config.yaml` — ensure at least one channel is listed and configured
-2. Check watchdog logs for errors:
-   ```bash
-   grep -E "ERROR|CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-   ```
-3. For Slack: verify `SLACK_WEBHOOK_URL` is set in `.env` and test manually:
-   ```bash
-   curl -X POST -H 'Content-type: application/json' \
-     --data '{"text":"Watchdog test"}' "$SLACK_WEBHOOK_URL"
-   ```
-   Expected response: `ok`
-
-### Duplicate or excessive alerts
-
-Increase `cooldown_minutes` in `watchdog-config.yaml` (default: `5` minutes per container per failure type). To silence a noisy container entirely, add it to `excluded_containers`:
-
-```yaml
-excluded_containers:
-  - debug-shell
-  - load-test
-  - my-noisy-container
-```
-
-### Probe type not as expected
-
-Check which probe was cached at startup:
-
-```bash
-grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
 ```
 
 ---
