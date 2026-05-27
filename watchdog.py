@@ -346,7 +346,7 @@ def send_smtp(payload: AlertPayload, cfg: dict) -> None:
 
 
 def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
-    """Send SNMPv2c trap to a configured trap receiver."""
+    """Send an SNMP trap (v1, v2c, or v3) to a configured trap receiver."""
     snmp = cfg.get("snmp_trap", {})
     if not snmp.get("enabled", False):
         log.debug("SNMP trap: disabled in config — skipping")
@@ -354,18 +354,50 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
 
     try:
         from pysnmp.hlapi import (  # type: ignore[import]
-            sendNotification, SnmpEngine, CommunityData, UdpTransportTarget,
-            ContextData, NotificationType, ObjectIdentity, OctetString,
+            sendNotification, SnmpEngine, CommunityData, UsmUserData,
+            UdpTransportTarget, ContextData, NotificationType, ObjectIdentity,
+            OctetString, usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol,
+            usmNoAuthProtocol, usmDESPrivProtocol, usmAESPrivProtocol,
+            usmNoPrivProtocol,
         )
     except ImportError:
         log.error("SNMP trap: pysnmp is not installed — pip install pysnmp")
         return
 
-    host      = snmp.get("host", "localhost")
-    port      = int(snmp.get("port", 162))
-    community = snmp.get("community", "public")
+    host    = snmp.get("host", "localhost")
+    port    = int(snmp.get("port", 162))
+    version = snmp.get("version", "v2c").lower()  # v1, v2c, or v3
     # Configurable notification OID — replace with your enterprise OID if needed
-    trap_oid  = snmp.get("trap_oid", "1.3.6.1.6.3.1.1.5.4")  # SNMPv2-MIB::linkUp placeholder
+    trap_oid = snmp.get("trap_oid", "1.3.6.1.6.3.1.1.5.4")
+
+    if version == "v3":
+        _AUTH = {"MD5": usmHMACMD5AuthProtocol, "SHA": usmHMACSHAAuthProtocol}
+        _PRIV = {"DES": usmDESPrivProtocol,      "AES": usmAESPrivProtocol}
+        username       = snmp.get("v3_username", "")
+        auth_proto_str = snmp.get("v3_auth_protocol", "SHA").upper()
+        priv_proto_str = snmp.get("v3_priv_protocol", "AES").upper()
+        auth_key = os.environ.get(snmp.get("v3_auth_key_env", ""), "")
+        priv_key = os.environ.get(snmp.get("v3_priv_key_env", ""), "")
+        if auth_key and priv_key:
+            security_data = UsmUserData(
+                username,
+                authKey=auth_key, authProtocol=_AUTH.get(auth_proto_str, usmHMACSHAAuthProtocol),
+                privKey=priv_key, privProtocol=_PRIV.get(priv_proto_str, usmAESPrivProtocol),
+            )
+        elif auth_key:
+            security_data = UsmUserData(
+                username,
+                authKey=auth_key, authProtocol=_AUTH.get(auth_proto_str, usmHMACSHAAuthProtocol),
+                privProtocol=usmNoPrivProtocol,
+            )
+        else:
+            security_data = UsmUserData(
+                username, authProtocol=usmNoAuthProtocol, privProtocol=usmNoPrivProtocol,
+            )
+    else:
+        community     = snmp.get("community", "public")
+        mp_model      = 0 if version == "v1" else 1  # 0=SNMPv1, 1=SNMPv2c
+        security_data = CommunityData(community, mpModel=mp_model)
 
     summary = (
         f"[{payload.severity}] {payload.container_name} on {payload.host}: "
@@ -376,7 +408,7 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
         error_indication, error_status, error_index, _ = next(
             sendNotification(
                 SnmpEngine(),
-                CommunityData(community, mpModel=1),   # SNMPv2c
+                security_data,  # CommunityData (v1/v2c) or UsmUserData (v3)
                 UdpTransportTarget((host, port), timeout=5, retries=1),
                 ContextData(),
                 "trap",

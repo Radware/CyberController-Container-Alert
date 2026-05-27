@@ -8,23 +8,18 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 
 ## Table of Contents
 
-**Getting Started** *(complete sections 1–6 in order for a new installation)*
-
 1. [Prerequisites](#1-prerequisites)
 2. [Repository Structure](#2-repository-structure)
 3. [Configure Environment Variables](#3-configure-environment-variables)
 4. [Configure the Watchdog](#4-configure-the-watchdog)
 5. [Install and Deploy](#5-install-and-deploy)
 6. [Verify Deployment](#6-verify-deployment)
-
-**Reference**
-
 7. [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels)
-8. [How to Change Existing Settings](#8-how-to-change-existing-settings)
-9. [Logs](#9-logs)
-10. [Alert Types](#10-alert-types)
-11. [Configuration Reference](#11-configuration-reference)
-12. [Lifecycle Management](#12-lifecycle-management)
+8. [Logs](#8-logs)
+9. [Alert Types](#9-alert-types)
+10. [Configuration Reference](#10-configuration-reference)
+11. [Lifecycle Management](#11-lifecycle-management)
+12. [How to Change Existing Settings](#12-how-to-change-existing-settings)
 13. [Troubleshooting](#13-troubleshooting)
 
 ---
@@ -340,56 +335,20 @@ snmp_trap:
   enabled: true
   host: <your-snmp-trap-receiver-ip>
   port: 162
-  community: public
+  version: v2c                       # v1, v2c, or v3
+  community: public                  # SNMPv1/v2c only; ignored for v3
   trap_oid: "1.3.6.1.6.3.1.1.5.4"   # replace with your enterprise OID
+  # SNMPv3 only — add SNMP_V3_AUTH_KEY / SNMP_V3_PRIV_KEY to .env
+  # v3_username:      watchdog-user
+  # v3_auth_protocol: SHA  # MD5 or SHA
+  # v3_auth_key_env:  SNMP_V3_AUTH_KEY
+  # v3_priv_protocol: AES  # DES or AES
+  # v3_priv_key_env:  SNMP_V3_PRIV_KEY
 ```
 
 ---
 
-## 8. How to Change Existing Settings
-
-No image rebuild is required for any configuration change. The type of change determines the required command:
-
-| Changed file | What to run |
-|---|---|
-| `watchdog-config.yaml` (thresholds, channels, exclusions) | `docker compose restart watchdog` |
-| `.env` (secrets, credentials) | `docker compose up -d` |
-| `docker-compose.yaml` (host name, resource limits) | `docker compose up -d` |
-
-### Apply watchdog-config.yaml changes
-
-```bash
-docker compose restart watchdog
-# or (v1 standalone)
-docker-compose restart watchdog
-```
-
-### Apply .env changes (credentials / secrets)
-
-```bash
-docker compose up -d
-# or (v1 standalone)
-docker-compose up -d
-```
-
-### Change the host identifier shown in alerts
-
-Edit the `WATCHDOG_HOST` value in `docker-compose.yaml`:
-
-```yaml
-environment:
-  WATCHDOG_HOST: my-new-server-name
-```
-
-Then redeploy:
-
-```bash
-docker compose up -d
-```
-
----
-
-## 9. Logs
+## 8. Logs
 
 | Location | Description |
 |---|---|
@@ -411,7 +370,7 @@ docker exec watchdog tail -f /var/log/watchdog/watchdog.log
 
 ---
 
-## 10. Alert Types
+## 9. Alert Types
 
 | Failure Type | Severity | Trigger |
 |---|---|---|
@@ -424,7 +383,7 @@ Each alert includes: container name, container ID, host, failure type, timestamp
 
 ---
 
-## 11. Configuration Reference
+## 10. Configuration Reference
 
 All settings are in `watchdog-config.yaml`. No image rebuild is required for configuration changes — restart the watchdog container to apply updates:
 
@@ -453,7 +412,7 @@ environment:
 
 ---
 
-## 12. Lifecycle Management
+## 11. Lifecycle Management
 
 ### Stopping the Service
 
@@ -484,6 +443,49 @@ docker build -t watchdog:latest .
 # Redeploy
 docker-compose up -d        # v1
 docker compose up -d        # v2
+```
+
+---
+
+## 12. How to Change Existing Settings
+
+No image rebuild is required for any configuration change. The type of change determines the required command:
+
+| Changed file | What to run |
+|---|---|
+| `watchdog-config.yaml` (thresholds, channels, exclusions) | `docker compose restart watchdog` |
+| `.env` (secrets, credentials) | `docker compose up -d` |
+| `docker-compose.yaml` (host name, resource limits) | `docker compose up -d` |
+
+### Apply watchdog-config.yaml changes
+
+```bash
+docker compose restart watchdog
+# or (v1 standalone)
+docker-compose restart watchdog
+```
+
+### Apply .env changes (credentials / secrets)
+
+```bash
+docker compose up -d
+# or (v1 standalone)
+docker-compose up -d
+```
+
+### Apply docker-compose.yaml changes (container settings)
+
+For example, edit the `WATCHDOG_HOST` value in `docker-compose.yaml`:
+
+```yaml
+environment:
+  WATCHDOG_HOST: my-new-server-name
+```
+
+Then redeploy to take effect:
+
+```bash
+docker compose up -d
 ```
 
 ---

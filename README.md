@@ -164,9 +164,16 @@ Add `snmp_trap` to `alert_channels` to enable. Sends SNMPv2c traps to your NMS/S
 snmp_trap:
   enabled: true
   host: 155.1.1.4                    # IP or hostname of your SNMP trap receiver
-  port: 162                          # Standard SNMPv2c trap port
-  community: public                  # SNMPv2c community string
+  port: 162                          # Standard SNMP trap port
+  version: v2c                       # SNMP version: v1, v2c, or v3
+  community: public                  # SNMPv1/v2c community string (ignored for v3)
   trap_oid: "1.3.6.1.6.3.1.1.5.4"   # Replace with your enterprise OID
+  # SNMPv3 only — add SNMP_V3_AUTH_KEY / SNMP_V3_PRIV_KEY to .env
+  # v3_username:      watchdog-user
+  # v3_auth_protocol: SHA              # MD5 or SHA
+  # v3_auth_key_env:  SNMP_V3_AUTH_KEY
+  # v3_priv_protocol: AES              # DES or AES
+  # v3_priv_key_env:  SNMP_V3_PRIV_KEY
 ```
 
 ---

@@ -47,7 +47,9 @@ FORCE=false
 
 # ── Runtime state (set during removal operations, read by summary) ─────────────
 IMAGE_KEPT=false
-
+# ── Upfront decisions (set by plan_and_confirm, read by removal functions) ─────
+REMOVE_IMAGE_CONFIRMED=false
+REMOVE_LOGS_CONFIRMED=false
 ################################################################################
 # Helper Functions
 ################################################################################
@@ -172,41 +174,35 @@ find_installation_directory() {
 }
 
 ################################################################################
-# Removal Plan
+# Removal Plan, Decisions, and Confirmation
 ################################################################################
 
-display_removal_plan() {
+plan_and_confirm() {
     print_section "Uninstallation Plan"
-
-    echo -e "${YELLOW}The following items will be removed:${NC}"
-    echo ""
 
     CONTAINER_EXISTS=false
     IMAGE_EXISTS=false
     LOGS_EXIST=false
+    ISIZE=""
+    LSIZE=""
+    LCOUNT=0
 
     if check_docker; then
         if docker container inspect "${CONTAINER_NAME}" &>/dev/null; then
             CONTAINER_EXISTS=true
             CSTATUS=$(docker ps -a --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}')
-            echo -e "  ${RED}✗${NC} Docker container : ${CONTAINER_NAME} (${CSTATUS})"
+            echo -e "  ${RED}✗${NC} Container : ${CONTAINER_NAME} (${CSTATUS})"
         else
-            echo -e "  ${GREEN}○${NC} Docker container : ${CONTAINER_NAME} (not found)"
+            echo -e "  ${GREEN}○${NC} Container : ${CONTAINER_NAME} — not found"
         fi
 
         if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
             IMAGE_EXISTS=true
             ISIZE=$(docker image inspect "${IMAGE_NAME}" --format '{{.Size}}' | \
                     awk '{printf "%.0f MB", $1/1024/1024}')
-            if [ "$KEEP_IMAGE" = true ]; then
-                echo -e "  ${GREEN}✓${NC} Docker image     : ${IMAGE_NAME} (~${ISIZE}) — ${GREEN}KEEPING${NC}"
-            elif [ "$REMOVE_ALL" = true ] || [ "$FORCE" = true ]; then
-                echo -e "  ${RED}✗${NC} Docker image     : ${IMAGE_NAME} (~${ISIZE})"
-            else
-                echo -e "  ${YELLOW}?${NC} Docker image     : ${IMAGE_NAME} (~${ISIZE}) — ${YELLOW}WILL PROMPT${NC}"
-            fi
+            echo -e "  ${YELLOW}?${NC} Image     : ${IMAGE_NAME} (~${ISIZE})"
         else
-            echo -e "  ${GREEN}○${NC} Docker image     : ${IMAGE_NAME} (not found)"
+            echo -e "  ${GREEN}○${NC} Image     : ${IMAGE_NAME} — not found"
         fi
     fi
 
@@ -214,15 +210,10 @@ display_removal_plan() {
     if [ -d "$LOG_DIR" ]; then
         LOGS_EXIST=true
         LSIZE=$(du -sh "$LOG_DIR" 2>/dev/null | cut -f1 || echo "unknown")
-        if [ "$KEEP_LOGS" = true ]; then
-            echo -e "  ${GREEN}✓${NC} Log directory    : ${LOG_DIR} (${LSIZE}) — ${GREEN}KEEPING${NC}"
-        elif [ "$REMOVE_ALL" = true ]; then
-            echo -e "  ${RED}✗${NC} Log directory    : ${LOG_DIR} (${LSIZE})"
-        else
-            echo -e "  ${YELLOW}?${NC} Log directory    : ${LOG_DIR} (${LSIZE}) — ${YELLOW}WILL PROMPT${NC}"
-        fi
+        LCOUNT=$(find "$LOG_DIR" -type f 2>/dev/null | wc -l || echo "0")
+        echo -e "  ${YELLOW}?${NC} Logs      : ${LOG_DIR} (${LCOUNT} file(s), ${LSIZE})"
     else
-        echo -e "  ${GREEN}○${NC} Log directory    : ${LOG_DIR} (not found)"
+        echo -e "  ${GREEN}○${NC} Logs      : ${INSTALL_DIR}/watchdog — not found"
     fi
 
     echo ""
@@ -231,19 +222,57 @@ display_removal_plan() {
         print_info "Nothing to uninstall — watchdog not found"
         exit 0
     fi
-}
 
-################################################################################
-# Confirmation
-################################################################################
+    # ── Resolve decisions ──────────────────────────────────────────────────────
+    # Flags set on the command line take precedence over interactive prompts
+    if [ "$KEEP_IMAGE" = true ]; then
+        REMOVE_IMAGE_CONFIRMED=false
+    elif [ "$REMOVE_ALL" = true ] || [ "$FORCE" = true ]; then
+        REMOVE_IMAGE_CONFIRMED=true
+    fi
 
-confirm_removal() {
-    if [ "$FORCE" = true ]; then
-        print_warning "Force mode — skipping confirmation"
-        return 0
+    if [ "$KEEP_LOGS" = true ]; then
+        REMOVE_LOGS_CONFIRMED=false
+    elif [ "$REMOVE_ALL" = true ] || [ "$FORCE" = true ]; then
+        REMOVE_LOGS_CONFIRMED=true
+    fi
+
+    # Interactive prompts — only for items not already decided by flags
+    if [ "$FORCE" = false ]; then
+        if [ "$IMAGE_EXISTS" = true ] && [ "$KEEP_IMAGE" = false ] && [ "$REMOVE_ALL" = false ]; then
+            read -p "  Remove Docker image (${IMAGE_NAME}, ~${ISIZE})? [Y/n]: " RI
+            [[ "${RI:-y}" =~ ^[Nn] ]] || REMOVE_IMAGE_CONFIRMED=true
+        fi
+
+        if [ "$LOGS_EXIST" = true ] && [ "$KEEP_LOGS" = false ] && [ "$REMOVE_ALL" = false ]; then
+            read -p "  Remove log files (${LCOUNT} file(s), ${LSIZE})? [y/N]: " RL
+            [[ "${RL:-n}" =~ ^[Yy] ]] && REMOVE_LOGS_CONFIRMED=true
+        fi
+    fi
+
+    # ── Final summary + single confirmation ───────────────────────────────────
+    echo ""
+    echo -e "${BLUE}═══ Removal summary ═══${NC}"
+    [ "$CONTAINER_EXISTS" = true ] && echo -e "  ${RED}✗${NC} Container : will be stopped and removed" \
+                                   || echo -e "  ${GREEN}○${NC} Container : not found"
+    if [ "$IMAGE_EXISTS" = true ]; then
+        [ "$REMOVE_IMAGE_CONFIRMED" = true ] \
+            && echo -e "  ${RED}✗${NC} Image     : will be removed" \
+            || echo -e "  ${GREEN}✓${NC} Image     : will be preserved"
+    fi
+    if [ "$LOGS_EXIST" = true ]; then
+        [ "$REMOVE_LOGS_CONFIRMED" = true ] \
+            && echo -e "  ${RED}✗${NC} Logs      : will be removed" \
+            || echo -e "  ${GREEN}✓${NC} Logs      : will be preserved"
     fi
     echo ""
-    read -p "Proceed with uninstallation? [y/N]: " CONFIRM
+
+    if [ "$FORCE" = true ]; then
+        print_warning "Force mode — proceeding without confirmation"
+        return 0
+    fi
+
+    read -p "Proceed? [y/N]: " CONFIRM
     if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
         print_info "Uninstallation cancelled"
         exit 0
@@ -306,24 +335,12 @@ remove_docker_image() {
         return 0
     fi
 
-    if [ "$REMOVE_ALL" = true ] || [ "$FORCE" = true ]; then
-        _do_remove_image
-        return 0
-    fi
-
-    # Interactive prompt
-    ISIZE=$(docker image inspect "${IMAGE_NAME}" --format '{{.Size}}' | \
-            awk '{printf "%.0f MB", $1/1024/1024}')
-    echo ""
-    print_warning "Docker image: ${IMAGE_NAME} (~${ISIZE})"
-    echo ""
-    read -p "  Remove Docker image? [y/N]: " REMOVE_IMAGE_ANSWER
-    if [[ "$REMOVE_IMAGE_ANSWER" =~ ^[Yy]$ ]]; then
+    if [ "$REMOVE_IMAGE_CONFIRMED" = true ]; then
         _do_remove_image
     else
         IMAGE_KEPT=true
         print_success "Docker image preserved: ${IMAGE_NAME}"
-        print_info "Remove manually later with: docker rmi ${IMAGE_NAME}"
+        print_info "Remove manually with: docker rmi ${IMAGE_NAME}"
     fi
 }
 
@@ -369,25 +386,12 @@ remove_logs() {
         return 0
     fi
 
-    if [ "$REMOVE_ALL" = true ] || [ "$FORCE" = true ]; then
-        rm -rf "$LOG_DIR"
-        print_success "Log directory removed: ${LOG_DIR}"
-        return 0
-    fi
-
-    # Interactive prompt
-    LSIZE=$(du -sh "$LOG_DIR" 2>/dev/null | cut -f1 || echo "unknown")
-    LCOUNT=$(find "$LOG_DIR" -type f 2>/dev/null | wc -l || echo "0")
-    echo ""
-    print_warning "Log directory contains ${LCOUNT} file(s) (${LSIZE}): ${LOG_DIR}"
-    echo ""
-    read -p "  Remove log files? [y/N]: " REMOVE_LOGS_ANSWER
-    if [[ "$REMOVE_LOGS_ANSWER" =~ ^[Yy]$ ]]; then
+    if [ "$REMOVE_LOGS_CONFIRMED" = true ]; then
         rm -rf "$LOG_DIR"
         print_success "Log directory removed: ${LOG_DIR}"
     else
         print_success "Log directory preserved: ${LOG_DIR}"
-        print_info "Remove manually later with: rm -rf ${LOG_DIR}"
+        print_info "Remove manually with: rm -rf ${LOG_DIR}"
     fi
 }
 
@@ -446,8 +450,7 @@ main() {
     parse_arguments "$@"
     print_header
     find_installation_directory
-    display_removal_plan
-    confirm_removal
+    plan_and_confirm
     stop_and_remove_container
     remove_docker_image
     remove_logs
