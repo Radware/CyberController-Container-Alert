@@ -272,7 +272,7 @@ configure_all() {
     # ── SMTP ──────────────────────────────────────────────────────────────────
     local SMTP_HOST="smtp.radware.com" SMTP_PORT="587"
     local SMTP_SENDER="noc-alerts@radware.com" SMTP_RECIPIENTS="ops-team@radware.com"
-    local SMTP_TLS="true" SMTP_PASSWORD="" SMTP_ENABLED="false"
+    local SMTP_TLS="true" SMTP_USERNAME="" SMTP_PASSWORD="" SMTP_ENABLED="false"
     if _in_array "smtp" "${SELECTED_CHANNELS[@]}"; then
         SMTP_ENABLED="true"
         print_info "SMTP (email)"
@@ -281,6 +281,7 @@ configure_all() {
         SMTP_SENDER=$(_prompt     "Sender address"               "noc-alerts@radware.com")
         SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "ops-team@radware.com")
         SMTP_TLS=$(_prompt_yn     "Use TLS?"                     "yes")
+        SMTP_USERNAME=$(_prompt   "SMTP username / app token"    "")
         SMTP_PASSWORD=$(_prompt_secret "SMTP password / app token")
         echo ""
     fi
@@ -337,7 +338,7 @@ configure_all() {
             printf "# Slack\nSLACK_WEBHOOK_URL=%s\n\n" "$SLACK_WEBHOOK"
         fi
         if [ "$SMTP_ENABLED" = "true" ]; then
-            printf "# SMTP\nSMTP_PASSWORD=%s\n\n" "$SMTP_PASSWORD"
+            printf "# SMTP\nSMTP_USERNAME=%s\nSMTP_PASSWORD=%s\n\n" "$SMTP_USERNAME" "$SMTP_PASSWORD"
         fi
         if [ "$SNMP_ENABLED" = "true" ] && [ "${SNMP_VERSION,,}" = "v3" ]; then
             printf "# SNMP v3\nSNMP_V3_AUTH_KEY=%s\nSNMP_V3_PRIV_KEY=%s\n\n" \
@@ -390,6 +391,7 @@ configure_all() {
         printf "  host:         %s\n" "$SMTP_HOST"
         printf "  port:         %s\n" "$SMTP_PORT"
         printf "  sender:       %s\n" "$SMTP_SENDER"
+        printf "  username_env: SMTP_USERNAME\n"
         printf "  recipients:\n%s" "$RECIPIENTS_YAML"
         printf "  tls:          %s\n" "$SMTP_TLS"
         printf "  password_env: SMTP_PASSWORD\n"

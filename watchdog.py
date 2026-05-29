@@ -283,66 +283,112 @@ def dispatch_alert(payload: AlertPayload, cfg: dict) -> None:
 
 
 def send_smtp(payload: AlertPayload, cfg: dict) -> None:
-    """Send alert email via SMTP."""
+    """Send alert email via SMTP with production-grade error handling and retries."""
     import smtplib
     import ssl
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
 
     smtp_cfg = cfg.get("smtp", {})
     if not smtp_cfg.get("enabled", False):
         log.debug("SMTP: disabled in config — skipping")
         return
 
-    host         = smtp_cfg.get("host", "localhost")
+    host         = smtp_cfg.get("host", "").strip()
     port         = int(smtp_cfg.get("port", 587))
-    sender       = smtp_cfg.get("sender", "watchdog@localhost")
+    sender       = smtp_cfg.get("sender", "watchdog@localhost").strip()
     recipients   = smtp_cfg.get("recipients") or []
     use_tls      = smtp_cfg.get("tls", True)
+    username_env = smtp_cfg.get("username_env", "SMTP_USERNAME")
     password_env = smtp_cfg.get("password_env", "SMTP_PASSWORD")
-    password     = os.environ.get(password_env, "")
+    username     = os.environ.get(username_env, "").strip()
+    password     = os.environ.get(password_env, "").strip()
 
-    if not recipients:
-        log.warning("SMTP: no recipients configured — skipping")
+    # ── Validate configuration
+    if not host:
+        log.error("SMTP: host not configured")
+        return
+    if not sender:
+        log.error("SMTP: sender address not configured")
         return
 
-    subject = f"[{payload.severity}] {payload.subject()}"
-    lines = [
-        f"Container : {payload.container_name}",
-        f"Host      : {payload.host}",
-        f"Failure   : {payload.failure_type}",
-        f"Severity  : {payload.severity}",
-        f"Time (UTC): {payload.timestamp}",
-    ]
-    if payload.exit_code is not None:
-        lines.append(f"Exit Code : {payload.exit_code}")
-    if payload.probe_type:
-        lines.append(f"Probe Type: {payload.probe_type}")
-    if payload.probe_detail:
-        lines.append(f"Detection : {payload.probe_detail}")
-    lines += ["", "Recommended Action:", f"  {payload.recommended_action}"]
-    if payload.runbook_url:
-        lines.append(f"\nRunbook: {payload.runbook_url}")
-    if payload.log_tail:
-        lines += ["", "--- Log Tail ---", payload.log_tail]
+    # Normalize recipients to list of strings
+    if isinstance(recipients, str):
+        recipients = [recipients]
+    elif not isinstance(recipients, (list, tuple)):
+        recipients = list(recipients) if recipients else []
+    recipients = [str(r).strip() for r in recipients if r]
 
-    msg            = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = sender
-    msg["To"]      = ", ".join(recipients)
-    msg.attach(MIMEText("\n".join(lines), "plain"))
+    if not recipients:
+        log.error("SMTP: no recipients configured")
+        return
 
-    try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP(host, port, timeout=15) as server:
-            if use_tls:
-                server.starttls(context=context)
-            if password:
-                server.login(sender, password)
-            server.sendmail(sender, recipients, msg.as_string())
-        log.info("SMTP alert sent to %d recipient(s)", len(recipients))
-    except Exception as exc:
-        log.error("SMTP failed: %s", exc)
+    if not username or not password:
+        log.error("SMTP: credentials not set in environment (%s, %s)", username_env, password_env)
+        return
+
+    # ── Build message
+    subject = f"[{payload.severity}] {payload.container_name}: {payload.failure_type}"
+    body = f"""Container: {payload.container_name}
+Host: {payload.host}
+Status: {payload.failure_type}
+Severity: {payload.severity}
+Time: {payload.timestamp}
+Exit Code: {payload.exit_code if payload.exit_code is not None else 'N/A'}
+
+{payload.recommended_action}"""
+    
+    message = f"Subject: {subject}\r\nFrom: {sender}\r\nTo: {', '.join(recipients)}\r\n\r\n{body}"
+
+    # ── Send with exponential backoff retry
+    max_retries = 2
+    for attempt in range(1, max_retries + 1):
+        try:
+            log.debug(f"SMTP: attempt {attempt}/{max_retries} — connecting {host}:{port}")
+            context = ssl.create_default_context()
+            
+            with smtplib.SMTP(host, port, timeout=20) as server:
+                log.debug(f"SMTP: connected, TLS={use_tls}")
+                if use_tls:
+                    server.starttls(context=context)
+                    log.debug("SMTP: TLS handshake completed")
+                log.debug(f"SMTP: logging in as {username_env}")
+                server.login(username, password)
+                log.debug(f"SMTP: authenticated, sending to {recipients}")
+                server.sendmail(sender, recipients, message)
+                log.debug("SMTP: sendmail completed")
+            
+            log.info(f"SMTP: alert sent to {len(recipients)} recipient(s)")
+            return  # Success
+            
+        except smtplib.SMTPAuthenticationError as exc:
+            log.error(f"SMTP: authentication failed — check credentials: {exc}")
+            return  # Don't retry auth failures
+            
+        except smtplib.SMTPRecipientsRefused as exc:
+            log.error(f"SMTP: one or more recipients refused: {exc}")
+            return  # Don't retry recipient rejection
+            
+        except smtplib.SMTPSenderRefused as exc:
+            log.error(f"SMTP: sender address rejected: {exc}")
+            return  # Don't retry sender rejection
+            
+        except smtplib.SMTPDataError as exc:
+            log.error(f"SMTP: message data rejected by server: {exc}")
+            return  # Don't retry data errors
+            
+        except (smtplib.SMTPException, OSError, EOFError, BrokenPipeError) as exc:
+            # Transient errors: retry
+            exc_type = type(exc).__name__
+            if attempt < max_retries:
+                wait_secs = 2 ** attempt  # exponential: 2s, 4s
+                log.warning(f"SMTP: {exc_type} (attempt {attempt}/{max_retries}), retrying in {wait_secs}s: {exc}")
+                time.sleep(wait_secs)
+            else:
+                log.error(f"SMTP: {exc_type} after {max_retries} attempts: {exc}")
+                return
+                
+        except Exception as exc:
+            log.error(f"SMTP: {type(exc).__name__}: {exc}")
+            return
 
 
 def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:

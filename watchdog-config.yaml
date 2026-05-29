@@ -11,6 +11,7 @@
 # Empty for local testing — alerts are still logged to stdout/file.
 alert_channels:
   - slack
+  - smtp
 
 # ── Watchdog behaviour ────────────────────────────────────────────────────────
 check_interval_seconds:     60    # how often to poll all containers
@@ -41,10 +42,11 @@ syslog:
 # ── Email (SMTP) ─────────────────────────────────────────────────────────────
 # Add "smtp" to alert_channels above to enable.
 smtp:
-  enabled: false                     # set to true to enable
+  enabled: true                      # set to true to enable
   host: smtp.radware.com
   port: 587
   sender: noc-alerts@radware.com
+  username_env: SMTP_USERNAME        # env var: SMTP username or app token (Mailtrap, Gmail app password, etc.)
   recipients:
     - ops-team@radware.com
     - oncall@radware.com

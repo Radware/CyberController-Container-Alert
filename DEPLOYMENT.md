@@ -74,6 +74,10 @@ Open `.env` and fill in every value:
 # Slack
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 
+# SMTP (only if SMTP channel is enabled)
+SMTP_USERNAME=your-smtp-username-or-app-token
+SMTP_PASSWORD=your-smtp-password-or-app-token
+
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO
 ```
@@ -140,12 +144,12 @@ The script walks through the following stages in order:
 | **Log directory** | Creates `./watchdog/` for persistent log storage |
 | **Load image** | Loads `watchdog.tar` into Docker (`watchdog:latest`); builds from source if archive is absent |
 | **Host identification** | `WATCHDOG_HOST` is hardcoded to `CyberController-Server` in `docker-compose.yaml` |
-| **Credentials** | Uses existing `.env` if present; otherwise copies `.env.example` → `.env` with `chmod 600` |
-| **Watchdog config** | Uses existing `watchdog-config.yaml` if present; otherwise writes one with safe defaults (all channels disabled) |
+| **Configuration wizard** | Selects channels and prompts for Slack/SMTP/SNMP/Syslog values interactively |
+| **Credentials + config write** | Generates/updates `.env` and `watchdog-config.yaml` from wizard answers |
 | **Start** | Runs `docker compose up -d` in the background |
 | **Verify** | Checks the container is running and prints a summary with common commands |
 
-> **Re-running `install.sh` on an existing installation is safe.** Existing configuration files (`.env`, `watchdog-config.yaml`) are preserved unchanged; only missing files are created from defaults.
+> **Re-running `install.sh` on an existing installation is safe.** If configuration files already exist, the installer asks whether to reconfigure from scratch. Choose `N` to keep existing files unchanged.
 
 ---
 
@@ -312,15 +316,17 @@ smtp:
   host: smtp.your-domain.com
   port: 587
   sender: alerts@your-domain.com
+  username_env: SMTP_USERNAME
   recipients:
     - ops-team@your-domain.com
   tls: true
   password_env: SMTP_PASSWORD
 ```
 
-Set `SMTP_PASSWORD` in `.env`:
+Set SMTP credentials in `.env`:
 
 ```dotenv
+SMTP_USERNAME=your-smtp-username-or-app-token
 SMTP_PASSWORD=your-smtp-password-or-app-token
 ```
 
