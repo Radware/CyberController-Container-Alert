@@ -288,7 +288,7 @@ configure_all() {
 
     # ── SNMP Trap ─────────────────────────────────────────────────────────────
     local SNMP_HOST="" SNMP_PORT="162" SNMP_COMMUNITY="public"
-    local SNMP_OID="1.3.6.1.6.3.1.1.5.4" SNMP_ENABLED="false"
+    local SNMP_ENABLED="false"
     local SNMP_VERSION="v2c" SNMP_V3_USER="" SNMP_V3_AUTH_PROTO="SHA"
     local SNMP_V3_AUTH_KEY="" SNMP_V3_PRIV_PROTO="AES" SNMP_V3_PRIV_KEY=""
     if _in_array "snmp_trap" "${SELECTED_CHANNELS[@]}"; then
@@ -306,7 +306,6 @@ configure_all() {
         else
             SNMP_COMMUNITY=$(_prompt "Community string"                   "public")
         fi
-        SNMP_OID=$(_prompt     "Trap OID"                      "1.3.6.1.6.3.1.1.5.4")
         echo ""
     fi
 
@@ -401,7 +400,6 @@ configure_all() {
         printf "  port:      %s\n" "$SNMP_PORT"
         printf "  version:   %s\n" "${SNMP_VERSION:-v2c}"
         printf "  community: %s\n" "$SNMP_COMMUNITY"
-        printf "  trap_oid:  \"%s\"\n" "$SNMP_OID"
         if [ "${SNMP_VERSION,,}" = "v3" ]; then
             printf "  v3_username:      %s\n" "$SNMP_V3_USER"
             printf "  v3_auth_protocol: %s\n" "${SNMP_V3_AUTH_PROTO:-SHA}"

@@ -7,7 +7,9 @@ RUN pip install --no-cache-dir \
     docker==7.1.0 \
     requests==2.32.3 \
     PyYAML==6.0.2 \
-    "pysnmp>=4.4.12"
+    "pyasn1==0.4.8" \
+    "pyasn1-modules==0.2.8" \
+    "pysnmp>=4.4.12,<5"
 
 # Copy agent
 COPY watchdog.py .

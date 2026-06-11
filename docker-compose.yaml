@@ -30,6 +30,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Config file (read-only mount)
       - ./watchdog-config.yaml:/etc/watchdog/watchdog-config.yaml:ro
+      # Watchdog script — mount so code changes take effect without image rebuild
+      - ./watchdog.py:/app/watchdog.py:ro
       # Persistent log storage — written directly to host folder
       - ./watchdog:/var/log/watchdog
     healthcheck:

@@ -1,4 +1,4 @@
 docker==7.1.0
 requests==2.32.3
 PyYAML==6.0.2
-pysnmp>=4.4.12   # SNMP trap dispatch
+pysnmp>=4.4.12,<5   # SNMP trap dispatch (5.x removed sync API and usmDESPrivProtocol)
