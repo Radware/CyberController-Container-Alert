@@ -12,8 +12,6 @@ import argparse
 import logging
 import logging.handlers
 import os
-import hashlib
-import re
 import signal
 import sys
 import time
@@ -214,10 +212,6 @@ class AlertPayload:
 # ── Alert channels ────────────────────────────────────────────────────────────
 _SLACK_COLORS = {"CRITICAL": "#C0392B", "HIGH": "#E67E22", "WARNING": "#F1C40F"}
 
-# SNMP constants
-_LINKDOWN_OID = "1.3.6.1.6.3.1.1.5.4"  # standard linkDown — wrong for container alerts
-_HEX_RE = re.compile(r'^[0-9a-fA-F]+$')
-
 
 def send_slack(payload: AlertPayload, cfg: dict) -> None:
     slack_cfg = cfg.get("slack", {})
@@ -398,36 +392,13 @@ Exit Code: {payload.exit_code if payload.exit_code is not None else 'N/A'}
 
 
 def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
-    """Send an SNMP trap (v1, v2c, or v3) to a configured trap receiver.
-
-    SNMPv3 notes
-    ------------
-    * On first run, leave ``v3_local_engine_id`` unset. The function logs the
-      auto-generated engine ID at INFO level. Copy that value into
-      ``watchdog-config.yaml`` as ``v3_local_engine_id`` so it stays stable
-      across restarts.
-    * Register the same engine ID in snmptrapd.conf::
-
-          createUser -e 0x<engine_id> <username> SHA "<auth_pw>" DES "<priv_pw>"
-          authUser log,execute,net <username>
-    """
+    """Send an SNMP trap (v1, v2c, or v3) to a configured trap receiver."""
     snmp = cfg.get("snmp_trap", {})
     if not snmp.get("enabled", False):
         log.debug("SNMP trap: disabled in config — skipping")
         return
 
-    # ── 1. Import guard — pysnmp 4.x only ────────────────────────────────────
     try:
-        import pysnmp as _pysnmp_pkg
-        _pysnmp_ver = tuple(int(x) for x in _pysnmp_pkg.__version__.split(".")[:2])
-        if _pysnmp_ver >= (5, 0):
-            log.error(
-                "SNMP trap: pysnmp %s is not supported — requires pysnmp 4.x "
-                "(pysnmp 5.x removed the synchronous API and usmDESPrivProtocol). "
-                "Fix: pip install 'pysnmp>=4.4.12,<5' pyasn1==0.4.8 pyasn1-modules==0.2.8",
-                _pysnmp_pkg.__version__,
-            )
-            return
         from pysnmp.hlapi import (  # type: ignore[import]
             sendNotification, SnmpEngine, CommunityData, UsmUserData,
             UdpTransportTarget, ContextData, NotificationType, ObjectIdentity,
@@ -440,95 +411,38 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
         except ImportError:
             from pysnmp.hlapi import usmAES128PrivProtocol as _usmAESPrivProtocol  # type: ignore[import]
     except ImportError:
-        log.error("SNMP trap: pysnmp is not installed — pip install 'pysnmp>=4.4.12,<5'")
+        log.error("SNMP trap: pysnmp is not installed — pip install pysnmp")
         return
 
-    # ── 2. Basic config ───────────────────────────────────────────────────────
     host    = snmp.get("host", "localhost")
     port    = int(snmp.get("port", 162))
     version = snmp.get("version", "v2c").lower()  # v1, v2c, or v3
-    trap_oid = snmp.get("trap_oid", "1.3.6.1.4.1.89.110.0.1")
-
-    if trap_oid == _LINKDOWN_OID:
-        log.warning(
-            "SNMP trap: trap_oid is set to linkDown (%s). "
-            "This OID expects ifIndex/ifAdminStatus/ifOperStatus var-binds, "
-            "not container alert fields. Consider using the enterprise OID "
-            "1.3.6.1.4.1.89.110.0.1 instead.",
-            _LINKDOWN_OID,
-        )
-
-    # ── Determine the local engine ID ONCE ───────────────────────────────────
-    #   This single value is used for BOTH the message header AND for localizing
-    #   the v3 USM auth/priv keys. They MUST be identical, otherwise snmptrapd
-    #   computes the HMAC with keys localized to a different engine ID and
-    #   rejects the trap with "Verification failed".
-    _local_eid_hex = snmp.get("v3_local_engine_id", "").strip()
-    if _local_eid_hex[:2] in ("0x", "0X"):
-        _local_eid_hex = _local_eid_hex[2:]
-    if _local_eid_hex:
-        if not _HEX_RE.match(_local_eid_hex):
-            log.error(
-                "SNMP trap: v3_local_engine_id contains non-hex characters: %r — skipping",
-                _local_eid_hex,
-            )
-            return
-        if len(_local_eid_hex) % 2 != 0:
-            log.error(
-                "SNMP trap: v3_local_engine_id has odd length (%d chars) — "
-                "must be an even-length hex string — skipping",
-                len(_local_eid_hex),
-            )
-            return
-        _engine_id_octets = OctetString(hexValue=_local_eid_hex)
-        _eid_source = "config"
-    else:
-        # Derive a stable engine ID from the hostname so it survives container
-        # restarts without requiring v3_local_engine_id in the config.
-        # Format: 0x80004fb8 05 <hostname_bytes_up_to_20> <4_byte_sha256_suffix>
-        _hostname_bytes = socket.gethostname().encode()[:20]
-        _stable_suffix = hashlib.sha256(_hostname_bytes).digest()[:4]
-        _engine_id_octets = OctetString(b'\x80\x00\x4f\xb8\x05' + _hostname_bytes + _stable_suffix)
-        _eid_source = "hostname-derived"
-
-    # ── 3. Security / community data ─────────────────────────────────────────
-    _AUTH = {"MD5": usmHMACMD5AuthProtocol, "SHA": usmHMACSHAAuthProtocol}
-    _PRIV = {"DES": usmDESPrivProtocol,      "AES": _usmAESPrivProtocol}
+    # Configurable notification OID — replace with your enterprise OID if needed
+    trap_oid = snmp.get("trap_oid", "1.3.6.1.6.3.1.1.5.4")
 
     if version == "v3":
+        _AUTH = {"MD5": usmHMACMD5AuthProtocol, "SHA": usmHMACSHAAuthProtocol}
+        _PRIV = {"DES": usmDESPrivProtocol,      "AES": _usmAESPrivProtocol}
         username       = snmp.get("v3_username", "")
         auth_proto_str = snmp.get("v3_auth_protocol", "SHA").upper()
         priv_proto_str = snmp.get("v3_priv_protocol", "AES").upper()
         auth_key = os.environ.get(snmp.get("v3_auth_key_env", ""), "")
         priv_key = os.environ.get(snmp.get("v3_priv_key_env", ""), "")
-
-        if not username:
-            log.error("SNMP trap: v3_username is not set — skipping")
-            return
-
         if auth_key and priv_key:
             security_data = UsmUserData(
                 username,
                 authKey=auth_key, authProtocol=_AUTH.get(auth_proto_str, usmHMACSHAAuthProtocol),
                 privKey=priv_key, privProtocol=_PRIV.get(priv_proto_str, _usmAESPrivProtocol),
-                securityEngineId=_engine_id_octets,
             )
         elif auth_key:
             security_data = UsmUserData(
                 username,
                 authKey=auth_key, authProtocol=_AUTH.get(auth_proto_str, usmHMACSHAAuthProtocol),
                 privProtocol=usmNoPrivProtocol,
-                securityEngineId=_engine_id_octets,
             )
         else:
-            log.warning(
-                "SNMP trap: no auth key found for v3 user '%s' — "
-                "sending noAuthNoPriv (not recommended for production)",
-                username,
-            )
             security_data = UsmUserData(
                 username, authProtocol=usmNoAuthProtocol, privProtocol=usmNoPrivProtocol,
-                securityEngineId=_engine_id_octets,
             )
     else:
         community     = snmp.get("community", "public")
@@ -540,76 +454,29 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
         f"{payload.failure_type}"
     )
 
-    # ── 5. Build SnmpEngine with the engine ID determined above ───────────────
-    _snmp_engine = SnmpEngine(snmpEngineID=_engine_id_octets)
-    if _eid_source == "config":
-        log.debug(
-            "SNMP engine ID (pinned from config): 0x%s",
-            _engine_id_octets.asOctets().hex(),
-        )
-    else:
-        log.info(
-            "SNMP trap: v3_local_engine_id is not set — using auto-stable engine ID "
-            "derived from hostname '%s'. This ID is consistent across restarts. "
-            "Configure snmptrapd once with the engine ID logged below.",
-            socket.gethostname(),
-        )
-
-    # ── 6. Log the effective engine ID (needed for snmptrapd createUser -e) ───
-    try:
-        _eid_val = getattr(_snmp_engine, 'snmpEngineID', None)
-        if _eid_val is not None:
-            if hasattr(_eid_val, 'asOctets'):
-                _eid_hex = _eid_val.asOctets().hex()
-            elif hasattr(_eid_val, 'prettyPrint'):
-                _eid_hex = _eid_val.prettyPrint()
-            else:
-                _eid_hex = str(_eid_val)
-            log.info(
-                "SNMP engine ID: 0x%s "
-                "(snmptrapd.conf: createUser -e 0x%s %s SHA \"...\" DES \"...\")",
-                _eid_hex, _eid_hex, snmp.get("v3_username", "<username>"),
-            )
-    except Exception as _eid_exc:
-        log.debug("SNMP engine ID read failed (non-fatal): %r", _eid_exc)
-
-    # ── 7. Send the trap ──────────────────────────────────────────────────────
     try:
         error_indication, error_status, error_index, _ = next(
             sendNotification(
-                _snmp_engine,
+                SnmpEngine(),
                 security_data,  # CommunityData (v1/v2c) or UsmUserData (v3)
                 UdpTransportTarget((host, port), timeout=5, retries=1),
                 ContextData(),
                 "trap",
                 NotificationType(ObjectIdentity(trap_oid)).addVarBinds(
-                    # sysName (1.3.6.1.2.1.1.5.0) — STRING — hostname of the alerting node
-                    ("1.3.6.1.2.1.1.5.0", OctetString(payload.host.encode("utf-8", errors="replace"))),
-                    # sysDescr (1.3.6.1.2.1.1.1.0) — STRING — human-readable alert summary
-                    ("1.3.6.1.2.1.1.1.0", OctetString(summary.encode("utf-8", errors="replace"))),
-                    # sysLocation (1.3.6.1.2.1.1.6.0) — STRING — repurposed for container name
-                    ("1.3.6.1.2.1.1.6.0", OctetString(payload.container_name.encode("utf-8", errors="replace"))),
-                    # Enterprise OID for failure type (STRING)
-                    ("1.3.6.1.4.1.89.110.1.0", OctetString(payload.failure_type.encode("utf-8", errors="replace"))),
-                    # Enterprise OID for probe detail (STRING)
-                    ("1.3.6.1.4.1.89.110.2.0", OctetString((payload.probe_detail or "").encode("utf-8", errors="replace"))),
+                    ("1.3.6.1.2.1.1.5.0", OctetString(payload.host)),
+                    ("1.3.6.1.2.1.1.1.0", OctetString(summary)),
+                    ("1.3.6.1.2.1.1.6.0", OctetString(payload.container_name)),
+                    ("1.3.6.1.2.1.1.7.0", OctetString(payload.failure_type)),
+                    ("1.3.6.1.2.1.1.8.0", OctetString(payload.probe_detail or "")),
                 ),
             )
         )
         if error_indication:
-            log.error(
-                "SNMP trap failed to %s:%d: indication=%s, status=%s, index=%s",
-                host, port, error_indication, error_status, error_index,
-            )
+            log.error("SNMP trap failed: %s", error_indication)
         else:
-            log.info("SNMP trap sent to %s:%d (version=%s)", host, port, version)
+            log.info("SNMP trap sent to %s:%d", host, port)
     except Exception as exc:
-        import traceback as _tb
-        tb_oneline = " | ".join(_tb.format_exc().splitlines())
-        log.error(
-            "SNMP trap error to %s:%d — %s: %r — traceback: %s",
-            host, port, type(exc).__name__, exc, tb_oneline,
-        )
+        log.error("SNMP trap error: %s: %r", type(exc).__name__, exc, exc_info=True)
 
 
 # ── Failure type → remediation mapping ───────────────────────────────────────
@@ -657,7 +524,7 @@ def get_docker_health_log(container) -> str:
         last = checks[-1]
         output = (last.get("Output") or "").strip()
         exit_code = last.get("ExitCode", "?")
-        return f"Docker health probe failed - exit code {exit_code}, output: {output or '(no output)'}"
+        return f"Docker health probe failed — exit code {exit_code}, output: {output or '(no output)'}"
     except Exception:
         return ""
 
@@ -815,7 +682,7 @@ class Watchdog:
             if should_alert(state, failure_type, self._cooldown_minutes):
                 payload = build_payload(container, failure_type, self.host,
                                         self.runbook_base, exit_code,
-                                        probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
+                                        probe_detail=f"Crash probe failed — container exited with exit code {exit_code}")
                 dispatch_alert(payload, self.cfg)
                 record_alert(state, failure_type)
 
@@ -826,7 +693,7 @@ class Watchdog:
                 payload = build_payload(container, failure_type, self.host,
                                         self.runbook_base,
                                         extra_context=get_memory_stats(container),
-                                        probe_detail="OOM probe failed - container was OOM-killed by the kernel")
+                                        probe_detail="OOM probe failed — container was OOM-killed by the kernel")
                 dispatch_alert(payload, self.cfg)
                 record_alert(state, failure_type)
 
@@ -837,7 +704,7 @@ class Watchdog:
             if state.unhealthy_cycles >= threshold:
                 failure_type = "unhealthy"
                 if should_alert(state, failure_type, self._cooldown_minutes):
-                    probe_detail = get_docker_health_log(container) or "Docker health probe failed - health_status: unhealthy event"
+                    probe_detail = get_docker_health_log(container) or "Docker health probe failed — health_status: unhealthy event"
                     payload = build_payload(container, failure_type, self.host,
                                             self.runbook_base,
                                             probe_detail=probe_detail)
@@ -897,7 +764,7 @@ class Watchdog:
                     if should_alert(state, failure_type, self._cooldown_minutes):
                         payload = build_payload(container, failure_type,
                                                 self.host, self.runbook_base,
-                                                probe_detail=f"Restart-loop probe failed - {len(state.restart_times)} restarts in {int(self._restart_window_secs // 60)}min window")
+                                                probe_detail=f"Restart-loop probe failed — {len(state.restart_times)} restarts in {int(self._restart_window_secs // 60)}min window")
                         dispatch_alert(payload, self.cfg)
                         record_alert(state, failure_type)
 
@@ -908,7 +775,7 @@ class Watchdog:
                 if state.unhealthy_cycles >= unhealthy_threshold:
                     failure_type = "unhealthy"
                     if should_alert(state, failure_type, self._cooldown_minutes):
-                        probe_detail = get_docker_health_log(container) or "Docker health probe failed - health_status: unhealthy (poll-detected)"
+                        probe_detail = get_docker_health_log(container) or "Docker health probe failed — health_status: unhealthy (poll-detected)"
                         payload = build_payload(container, failure_type,
                                                 self.host, self.runbook_base,
                                                 probe_detail=probe_detail)
@@ -1058,8 +925,8 @@ class Watchdog:
             try:
                 r = self._session.get(url, timeout=timeout)
                 healthy = r.status_code < 500
-                detail = f"HTTP probe failed - error response {r.status_code} {r.reason or 'FAIL'}, URI {url}"
-                log.debug("%s: auto-check %s \u2192 %d (%s)",
+                detail = f"HTTP probe failed — error response {r.status_code} {r.reason or 'FAIL'}, URI {url}"
+                log.debug("%s: auto-check %s → %d (%s)",
                           name, url, r.status_code, "ok" if healthy else "FAIL")
                 return healthy, ("" if healthy else detail)
             except Exception as exc:
@@ -1093,11 +960,11 @@ class Watchdog:
                             log.info("%s: auto-discovered HTTP endpoint (failing): %s (HTTP %d)",
                                      name, url, r.status_code)
                             self._discovered_checks[name] = {"ip": ip, "port": port, "path": path}
-                            detail = f"HTTP probe failed - error response {r.status_code} {r.reason or 'FAIL'}, URI {url}"
+                            detail = f"HTTP probe failed — error response {r.status_code} {r.reason or 'FAIL'}, URI {url}"
                             return False, detail
                     except Exception:
                         continue
-                # HTTP exhausted for this ip:port - try raw TCP connect
+                # HTTP exhausted for this ip:port — try raw TCP connect
                 try:
                     with socket.create_connection((ip, port), timeout=discover_timeout):
                         pass
@@ -1116,7 +983,7 @@ class Watchdog:
             ip, port, exc = last_tcp_failure
             log.info("%s: auto-discovered TCP endpoint (failing, all ports tried): %s:%d — %s", name, ip, port, exc)
             self._discovered_checks[name] = {"type": "tcp", "ip": ip, "port": port}
-            detail = f"TCP probe failed - connection refused or timed out on {ip}:{port} ({exc})"
+            detail = f"TCP probe failed — connection refused or timed out on {ip}:{port} ({exc})"
             return False, detail
 
         # No HTTP or TCP endpoint found — fall back to /proc alive-check
@@ -1138,8 +1005,8 @@ class Watchdog:
             log.debug("TCP connect %s:%d → OK", ip, port)
             return True, ""
         except OSError as exc:
-            detail = f"TCP probe failed - connection refused or timed out on {ip}:{port} ({exc})"
-            log.debug("TCP connect %s:%d -> FAIL: %s", ip, port, exc)
+            detail = f"TCP probe failed — connection refused or timed out on {ip}:{port} ({exc})"
+            log.debug("TCP connect %s:%d → FAIL: %s", ip, port, exc)
             return False, detail
 
     def _proc_alive_check(self, container, timeout: int) -> tuple[bool, str]:
@@ -1160,7 +1027,7 @@ class Watchdog:
                 log.debug("%s: /proc alive-check — sh not available, skipping", container.name)
                 return True, ""
             healthy = result.exit_code == 0
-            detail = f"/proc alive check failed - PID 1 is zombie/stopped (exit code {result.exit_code})"
+            detail = f"/proc alive check failed — PID 1 is zombie/stopped (exit code {result.exit_code})"
             log.debug(
                 "%s: /proc alive-check → exit %d (%s)",
                 container.name, result.exit_code, "ok" if healthy else "FAIL (zombie/stopped)",
