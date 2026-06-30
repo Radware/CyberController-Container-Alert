@@ -31,13 +31,17 @@ The watchdog selects one of **4 active probe types** per container, chosen autom
 
 1. **Docker HEALTHCHECK** *(passive)* — for containers that have a `HEALTHCHECK` directive in their Dockerfile. The watchdog reads the result from `container.attrs["State"]["Health"]` rather than running its own probe. When Docker reports `health_status: unhealthy` 3 consecutive times, an alert fires. The last health check output is included in the alert's Detection field.
 
-2. **HTTP GET** *(active)* — for containers with **no** `HEALTHCHECK` that expose HTTP ports. Auto-discovers a working endpoint by trying common paths (`/health`, `/healthz`, `/-/healthy`, `/metrics`, `/`) on each exposed internal port. Returns healthy if `status_code < 500`. The discovered URL is cached for the container's lifetime.
+2. **HTTP GET** *(active)* — for containers with **no** `HEALTHCHECK` that expose HTTP ports. Auto-discovers a working endpoint by trying common paths (`/-/healthy`, `/health`, `/healthz`, `/metrics`, `/`) on each exposed internal port, and across all internal IPs when the container is attached to multiple Docker networks (configurable via `auto_health_check.paths` in `watchdog-config.yaml`). Returns healthy if `status_code < 500`. The discovered URL is cached for the container's lifetime.
 
 3. **TCP connect** *(active)* — if no HTTP path responds on a port, falls back to a raw `socket.create_connection()` on that port. A successful connect confirms the service is listening; a refused or timed-out connection triggers an `unhealthy` alert. Used by databases, message brokers, and any non-HTTP service.
 
 4. **`/proc` alive check** *(active)* — last resort when the container exposes no ports at all, or all TCP connects fail during initial discovery. Reads `/proc/1/status` inside the container via `exec_run` and checks that PID 1 is in a live state (R/S/D). A zombie (Z) or stopped (T) PID 1 triggers an `unhealthy` alert.
 
 Alerts are deduplicated via a **cooldown** — once an alert fires for a container, the same failure type is suppressed for `cooldown_minutes` minutes. The cooldown resets automatically when the container recovers.
+
+Two additional deduplication rules suppress redundant alerts at the event level:
+- **OOM → die suppression**: when a container is OOM-killed, Docker emits both an `oom` event and an immediately following `die` event. The watchdog fires the `oom` CRITICAL alert and suppresses the subsequent `crashed` alert to avoid a duplicate for the same incident.
+- **Restart-loop → die suppression**: once a `restart-loop` HIGH alert is active for a container, subsequent per-cycle `die` events are suppressed — the restart-loop alert is the primary signal until the container stabilises.
 
 ---
 
@@ -77,8 +81,12 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 docker==7.1.0
 requests==2.32.3
 PyYAML==6.0.2
-pysnmp>=4.4.12
+pyasn1==0.4.8
+pyasn1-modules==0.2.8
+pysnmp>=4.4.12,<5
 ```
+
+> `pysnmp<5` is required — version 5.x removed the synchronous API and `usmDESPrivProtocol` used by the SNMP trap sender.
 
 Python 3.11+
 
@@ -92,7 +100,7 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `alert_channels` | `[]` | Active destinations: `slack`, `smtp`, `snmp_trap` |
+| `alert_channels` | `["slack"]` | Active destinations: `slack`, `smtp`, `snmp_trap` |
 | `check_interval_seconds` | `60` | How often the poll loop runs |
 | `cooldown_minutes` | `5` | Suppress duplicate alerts per container per failure type |
 | `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |

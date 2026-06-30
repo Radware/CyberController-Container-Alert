@@ -253,7 +253,7 @@ docker compose logs -f watchdog
 You should see:
 
 ```
-Watchdog starting — host: cyber-controller-server
+Watchdog starting — host: CyberController-Server
 Docker event listener started
 Poll loop started — interval: 60s
 ```
