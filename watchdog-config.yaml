@@ -12,6 +12,8 @@
 alert_channels:
   - slack
   - smtp
+  - syslog
+  - snmp_trap
 
 # ── Watchdog behaviour ────────────────────────────────────────────────────────
 check_interval_seconds:     60    # how often to poll all containers
@@ -72,7 +74,8 @@ snmp_trap:
   # v3_priv_key_env:  SNMP_V3_PRIV_KEY # env var in .env holding the priv passphrase
   # v3_local_engine_id: ""             # Pin the sender engine ID (hex, with or without 0x).
   #   Obtain with: docker exec watchdog python3 -c "from pysnmp.hlapi import SnmpEngine; print(SnmpEngine().snmpEngineID.prettyPrint())"
-  #   Then set here AND in snmptrapd.conf: createUser -e 0x<id> watchdog-user SHA "..." DES "..."
+  #   Then set here AND in snmptrapd.conf: createUser -e 0x<id> watchdog-user SHA "..." AES "..."
+  #   (prefer AES over DES — DES is cryptographically weak)
   #   This prevents snmptrapd from needing reconfiguration after container restarts.
 
 # ── Slack ─────────────────────────────────────────────────────────────────────

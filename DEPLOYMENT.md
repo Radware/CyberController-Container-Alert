@@ -341,16 +341,34 @@ snmp_trap:
   enabled: true
   host: <your-snmp-trap-receiver-ip>
   port: 162
-  version: v2c                       # v1, v2c, or v3
-  community: public                  # SNMPv1/v2c only; ignored for v3
-  trap_oid: "1.3.6.1.6.3.1.1.5.4"   # replace with your enterprise OID
+  version: v2c                             # v1, v2c, or v3
+  community: public                        # SNMPv1/v2c only; ignored for v3
+  trap_oid: "1.3.6.1.4.1.89.110.0.1"      # Radware enterprise container-alert notification OID
   # SNMPv3 only — add SNMP_V3_AUTH_KEY / SNMP_V3_PRIV_KEY to .env
-  # v3_username:      watchdog-user
-  # v3_auth_protocol: SHA  # MD5 or SHA
-  # v3_auth_key_env:  SNMP_V3_AUTH_KEY
-  # v3_priv_protocol: AES  # DES or AES
-  # v3_priv_key_env:  SNMP_V3_PRIV_KEY
+  # v3_username:        watchdog-user
+  # v3_auth_protocol:   SHA                # MD5 or SHA
+  # v3_auth_key_env:    SNMP_V3_AUTH_KEY   # min 8 chars
+  # v3_priv_protocol:   AES                # DES (weak) or AES (recommended)
+  # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
+  # v3_local_engine_id: ""                 # pin engine ID across restarts — see SNMPv3 note below
 ```
+
+**Trap var-binds (enterprise OID arc `1.3.6.1.4.1.89.110`):**
+
+| OID | Object | Value |
+|-----|--------|-------|
+| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
+| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
+| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` |
+| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
+
+**SNMPv3 notes:**
+
+- **Engine ID:** On the first run the watchdog logs an auto-stable engine ID derived from the hostname (look for `SNMP engine ID: 0x...` in the logs). Copy it into `v3_local_engine_id` and register it in `snmptrapd.conf` with `createUser -e 0x<id> watchdog-user SHA "..." AES "..."`. This keeps the ID stable across container restarts.
+- **Key length:** Both auth and priv passphrases must be at least 8 characters (RFC 3414 §11.2). The watchdog rejects shorter keys with a clear error.
+- **No privacy-only mode:** Setting a priv key without an auth key is rejected — SNMPv3 has no `privNoAuth` security level. Both keys must be set together for encrypted traps.
+- **Protocol names:** Valid values are `MD5`/`SHA` for auth and `DES`/`AES` for priv. An unrecognised name is rejected with an error listing the supported values.
 
 ---
 

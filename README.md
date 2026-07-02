@@ -118,6 +118,8 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `SLACK_WEBHOOK_URL` | Yes (if Slack enabled) | Slack incoming webhook URL |
 | `SMTP_USERNAME` | Yes (if SMTP enabled) | SMTP username or app token used for login |
 | `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or app token |
+| `SNMP_V3_AUTH_KEY` | Yes (if SNMPv3 enabled) | SNMPv3 authentication passphrase — minimum 8 characters (RFC 3414) |
+| `SNMP_V3_PRIV_KEY` | Yes (if SNMPv3 authPriv) | SNMPv3 privacy passphrase — minimum 8 characters; requires auth key also set |
 | `WATCHDOG_CONFIG` | No | Path to config file (default: `/etc/watchdog/watchdog-config.yaml`) |
 | `WATCHDOG_HOST` | No | Hostname shown in alerts (default: system hostname) |
 
@@ -168,23 +170,34 @@ smtp:
 
 ### SNMP Traps
 
-Add `snmp_trap` to `alert_channels` to enable. Sends SNMPv2c traps to your NMS/SIEM on every alert.
+Add `snmp_trap` to `alert_channels` to enable. Sends SNMP traps (v1, v2c, or v3) to your NMS/SIEM on every alert.
 
 ```yaml
 snmp_trap:
   enabled: true
-  host: 155.1.1.4                    # IP or hostname of your SNMP trap receiver
-  port: 162                          # Standard SNMP trap port
-  version: v2c                       # SNMP version: v1, v2c, or v3
-  community: public                  # SNMPv1/v2c community string (ignored for v3)
-  trap_oid: "1.3.6.1.6.3.1.1.5.4"   # Replace with your enterprise OID
+  host: 155.1.1.4                          # IP or hostname of your SNMP trap receiver
+  port: 162                                # Standard SNMP trap port
+  version: v2c                             # SNMP version: v1, v2c, or v3
+  community: public                        # SNMPv1/v2c community string (ignored for v3)
+  trap_oid: "1.3.6.1.4.1.89.110.0.1"      # Radware enterprise container-alert notification OID
   # SNMPv3 only — add SNMP_V3_AUTH_KEY / SNMP_V3_PRIV_KEY to .env
-  # v3_username:      watchdog-user
-  # v3_auth_protocol: SHA              # MD5 or SHA
-  # v3_auth_key_env:  SNMP_V3_AUTH_KEY
-  # v3_priv_protocol: AES              # DES or AES
-  # v3_priv_key_env:  SNMP_V3_PRIV_KEY
+  # v3_username:        watchdog-user
+  # v3_auth_protocol:   SHA                # MD5 or SHA
+  # v3_auth_key_env:    SNMP_V3_AUTH_KEY   # min 8 chars
+  # v3_priv_protocol:   AES                # DES (weak) or AES (recommended)
+  # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
+  # v3_local_engine_id: ""                 # hex engine ID pinned from first-run log; see DEPLOYMENT.md
 ```
+
+Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3.6.1.4.1.89.110`):
+
+| OID | Object | Value |
+|-----|--------|-------|
+| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
+| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
+| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` |
+| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
 
 ---
 
