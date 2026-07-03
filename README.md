@@ -25,7 +25,7 @@ The watchdog runs two parallel monitoring paths:
 | Path | Mechanism | What It Catches |
 |------|-----------|-----------------|
 | **Event stream** | `docker events` (real-time) | Crashes (`die`), OOM-kills (`oom`), health status changes |
-| **Poll loop** | `docker ps` every N seconds | Stuck unhealthy containers, auto health checks, restart loops (≥ 5 restarts in 10 min by default) |
+| **Active Probes** | `docker ps` + Probes | **Integrity**: Periodic verification of liveness, stuck states, and restart-loops |
 
 The watchdog selects one of **4 active probe types** per container, chosen automatically based on the container's configuration. Probe selection is cached for the container's lifetime and re-discovered on restart.
 
