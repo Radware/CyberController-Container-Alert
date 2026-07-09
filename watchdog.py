@@ -214,15 +214,6 @@ class AlertPayload:
 # ── Alert channels ────────────────────────────────────────────────────────────
 _SLACK_COLORS = {"CRITICAL": "#C0392B", "HIGH": "#E67E22", "WARNING": "#F1C40F"}
 
-# SNMP constants
-# Standard IF-MIB link-state notification OIDs (RFC 3418). These are the wrong
-# semantics for container alerts — they expect ifIndex/ifAdminStatus/ifOperStatus
-# var-binds — so warn if someone points trap_oid at one of them by mistake.
-_STANDARD_LINK_OIDS = {
-    "1.3.6.1.6.3.1.1.5.3": "linkDown",
-    "1.3.6.1.6.3.1.1.5.4": "linkUp",
-}
-
 # Radware enterprise arc (PEN 89) for the container watchdog notification objects.
 _ENTERPRISE_ARC = "1.3.6.1.4.1.89.110"
 _HEX_RE = re.compile(r'^[0-9a-fA-F]+$')
@@ -409,6 +400,13 @@ Exit Code: {payload.exit_code if payload.exit_code is not None else 'N/A'}
 def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
     """Send an SNMP trap (v1, v2c, or v3) to a configured trap receiver.
 
+    pysnmp 6.x / 7.x async API
+    --------------------------
+    This function uses pysnmp's asyncio-based high-level API (pysnmp >= 6.2)
+    and wraps it with ``asyncio.run()`` for use in this synchronous watchdog.
+    pysnmp 4.x is no longer supported — its synchronous generator API
+    (``sendNotification`` as a generator) was removed in 5.x.
+
     SNMPv3 notes
     ------------
     * On first run, leave ``v3_local_engine_id`` unset. The function logs the
@@ -417,60 +415,149 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
       across restarts.
     * Register the same engine ID in snmptrapd.conf::
 
-          createUser -e 0x<engine_id> <username> SHA "<auth_pw>" DES "<priv_pw>"
+          createUser -e 0x<engine_id> <username> SHA "<auth_pw>" AES "<priv_pw>"
           authUser log,execute,net <username>
+
+    Privacy protocol
+    ----------------
+    DES (``v3_priv_protocol: DES``) is still supported by pysnmp 7.x but is
+    cryptographically weak (56-bit key, broken since ~2000). Prefer AES for
+    any new deployment. The default is ``AES`` when nothing is configured.
     """
+    import asyncio
+
     snmp = cfg.get("snmp_trap", {})
     if not snmp.get("enabled", False):
         log.debug("SNMP trap: disabled in config — skipping")
         return
 
-    # ── 1. Import guard — pysnmp 4.x only ────────────────────────────────────
+    # ── 1. Import guard — pysnmp 6.x / 7.x required ──────────────────────────
+    # pysnmp 7.x renamed constants to PEP-8 style (USM_AUTH_HMAC96_SHA, etc.).
+    # Each group is imported separately so one missing name doesn't block all others.
     try:
         import pysnmp as _pysnmp_pkg
         _pysnmp_ver = tuple(int(x) for x in _pysnmp_pkg.__version__.split(".")[:2])
-        if _pysnmp_ver >= (5, 0):
+        if _pysnmp_ver < (5, 0):
             log.error(
-                "SNMP trap: pysnmp %s is not supported — requires pysnmp 4.x "
-                "(pysnmp 5.x removed the synchronous API and usmDESPrivProtocol). "
-                "Fix: pip install 'pysnmp>=4.4.12,<5' pyasn1==0.4.8 pyasn1-modules==0.2.8",
+                "SNMP trap: pysnmp %s is not supported — requires pysnmp 6.2 or later. "
+                "pysnmp 4.x used a synchronous generator API that has since been "
+                "removed. Fix: pip install 'pysnmp>=6.2'",
                 _pysnmp_pkg.__version__,
             )
             return
-        from pysnmp.hlapi import (  # type: ignore[import]
-            sendNotification, SnmpEngine, CommunityData, UsmUserData,
-            UdpTransportTarget, ContextData, NotificationType, ObjectIdentity,
-            OctetString, usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol,
-            usmNoAuthProtocol, usmDESPrivProtocol, usmNoPrivProtocol,
-        )
-        # pysnmp 4.x calls it usmAesCfb128Protocol; 5.x+ calls it usmAES128PrivProtocol
+        # Work around a circular-import bug in pysnmp 7.1.x: importing the AES
+        # privacy module (rfc3826.priv.aes) can fail with "partially initialized
+        # module ... has no attribute 'Aes'" because rfc3414.service ↔
+        # eso.priv.aesbase ↔ rfc3826.priv.aes form an import cycle. The cycle is
+        # only avoided when rfc3414.service is imported BEFORE anything else
+        # touches the AES module — and importing pysnmp.hlapi.v3arch.asyncio can
+        # trigger that broken load first, caching the half-initialised module.
+        # So prime rfc3414.service HERE, before the hlapi import below.
+        # Best-effort — ignore if the internal module layout differs.
         try:
-            from pysnmp.hlapi import usmAesCfb128Protocol as _usmAESPrivProtocol  # type: ignore[import]
+            import pysnmp.proto.secmod.rfc3414.service  # noqa: F401
+            import pysnmp.proto.secmod.rfc3826.priv.aes  # noqa: F401
+        except Exception:
+            pass
+        # Core classes — stable across 6.x and 7.x
+        from pysnmp.hlapi.v3arch.asyncio import (  # type: ignore[import]
+            SnmpEngine, CommunityData, UsmUserData,
+            UdpTransportTarget, ContextData, NotificationType, ObjectIdentity,
+            OctetString,
+        )
+        # send_notification: PEP-8 name in 7.x, camelCase alias in 6.x
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import send_notification as _send_notification  # type: ignore[import]
         except ImportError:
-            from pysnmp.hlapi import usmAES128PrivProtocol as _usmAESPrivProtocol  # type: ignore[import]
+            from pysnmp.hlapi.v3arch.asyncio import sendNotification as _send_notification  # type: ignore[import]
+        # Auth no-auth constant
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_AUTH_NONE as usmNoAuthProtocol  # type: ignore[import]
+        except ImportError:
+            from pysnmp.hlapi.v3arch.asyncio import usmNoAuthProtocol  # type: ignore[import]
+        # Auth: MD5
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_AUTH_HMAC96_MD5 as usmHMACMD5AuthProtocol  # type: ignore[import]
+        except ImportError:
+            from pysnmp.hlapi.v3arch.asyncio import usmHMACMD5AuthProtocol  # type: ignore[import]
+        # Auth: SHA-1
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_AUTH_HMAC96_SHA as usmHMACSHAAuthProtocol  # type: ignore[import]
+        except ImportError:
+            from pysnmp.hlapi.v3arch.asyncio import usmHMACSHAAuthProtocol  # type: ignore[import]
+        # Auth: SHA-224/256/384/512
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_AUTH_HMAC128_SHA224 as usmHMACSHA224AuthProtocol  # type: ignore[import]
+        except ImportError:
+            try:
+                from pysnmp.hlapi.v3arch.asyncio import usmHMACSHA224AuthProtocol  # type: ignore[import]
+            except ImportError:
+                usmHMACSHA224AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_AUTH_HMAC192_SHA256 as usmHMACSHA256AuthProtocol  # type: ignore[import]
+        except ImportError:
+            try:
+                from pysnmp.hlapi.v3arch.asyncio import usmHMACSHA256AuthProtocol  # type: ignore[import]
+            except ImportError:
+                usmHMACSHA256AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_AUTH_HMAC256_SHA384 as usmHMACSHA384AuthProtocol  # type: ignore[import]
+        except ImportError:
+            try:
+                from pysnmp.hlapi.v3arch.asyncio import usmHMACSHA384AuthProtocol  # type: ignore[import]
+            except ImportError:
+                usmHMACSHA384AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_AUTH_HMAC384_SHA512 as usmHMACSHA512AuthProtocol  # type: ignore[import]
+        except ImportError:
+            try:
+                from pysnmp.hlapi.v3arch.asyncio import usmHMACSHA512AuthProtocol  # type: ignore[import]
+            except ImportError:
+                usmHMACSHA512AuthProtocol = usmHMACSHAAuthProtocol  # type: ignore[assignment]
+        # Priv: no-priv
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_PRIV_NONE as usmNoPrivProtocol  # type: ignore[import]
+        except ImportError:
+            from pysnmp.hlapi.v3arch.asyncio import usmNoPrivProtocol  # type: ignore[import]
+        # Priv: DES (weak but still supported)
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_PRIV_CBC56_DES as usmDESPrivProtocol  # type: ignore[import]
+        except ImportError:
+            from pysnmp.hlapi.v3arch.asyncio import usmDESPrivProtocol  # type: ignore[import]
+        # Priv: AES-128
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_PRIV_CFB128_AES as usmAES128PrivProtocol  # type: ignore[import]
+        except ImportError:
+            from pysnmp.hlapi.v3arch.asyncio import usmAES128PrivProtocol  # type: ignore[import]
+        # Priv: AES-192 / AES-256
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_PRIV_CFB192_AES as usmAES192PrivProtocol  # type: ignore[import]
+        except ImportError:
+            try:
+                from pysnmp.hlapi.v3arch.asyncio import usmAES192PrivProtocol  # type: ignore[import]
+            except ImportError:
+                usmAES192PrivProtocol = usmAES128PrivProtocol  # type: ignore[assignment]
+        try:
+            from pysnmp.hlapi.v3arch.asyncio import USM_PRIV_CFB256_AES as usmAES256PrivProtocol  # type: ignore[import]
+        except ImportError:
+            try:
+                from pysnmp.hlapi.v3arch.asyncio import usmAES256PrivProtocol  # type: ignore[import]
+            except ImportError:
+                usmAES256PrivProtocol = usmAES128PrivProtocol  # type: ignore[assignment]
     except ImportError:
-        log.error("SNMP trap: pysnmp is not installed — pip install 'pysnmp>=4.4.12,<5'")
+        log.error("SNMP trap: pysnmp is not installed — pip install 'pysnmp>=6.2'")
         return
 
     # ── 2. Basic config ───────────────────────────────────────────────────────
-    host    = snmp.get("host", "localhost")
-    port    = int(snmp.get("port", 162))
-    version = snmp.get("version", "v2c").lower()  # v1, v2c, or v3
+    host     = snmp.get("host", "localhost")
+    port     = int(snmp.get("port", 162))
+    version  = snmp.get("version", "v2c").lower()  # v1, v2c, or v3
     trap_oid = snmp.get("trap_oid", "1.3.6.1.4.1.89.110.0.1")
 
-    if trap_oid in _STANDARD_LINK_OIDS:
-        log.warning(
-            "SNMP trap: trap_oid is set to the standard IF-MIB %s notification (%s). "
-            "This OID expects ifIndex/ifAdminStatus/ifOperStatus var-binds, "
-            "not container alert fields. Consider using the enterprise OID "
-            "1.3.6.1.4.1.89.110.0.1 instead.",
-            _STANDARD_LINK_OIDS[trap_oid], trap_oid,
-        )
-
-    # ── Determine the local engine ID ONCE ───────────────────────────────────
-    #   This single value is used for BOTH the message header AND for localizing
+    # ── 3. Determine the local engine ID ONCE ────────────────────────────────
+    #   This single value is used for BOTH the message header AND for localising
     #   the v3 USM auth/priv keys. They MUST be identical, otherwise snmptrapd
-    #   computes the HMAC with keys localized to a different engine ID and
+    #   computes the HMAC with keys localised to a different engine ID and
     #   rejects the trap with "Verification failed".
     _local_eid_hex = snmp.get("v3_local_engine_id", "").strip()
     if _local_eid_hex[:2] in ("0x", "0X"):
@@ -489,31 +576,48 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
                 len(_local_eid_hex),
             )
             return
-        _engine_id_octets = OctetString(hexValue=_local_eid_hex)
+        _engine_id_bytes = bytes.fromhex(_local_eid_hex)
         _eid_source = "config"
     else:
         # Derive a stable engine ID from the hostname so it survives container
         # restarts without requiring v3_local_engine_id in the config.
         # Format: 0x80004fb8 05 <hostname_bytes_up_to_20> <4_byte_sha256_suffix>
         _hostname_bytes = socket.gethostname().encode()[:20]
-        _stable_suffix = hashlib.sha256(_hostname_bytes).digest()[:4]
-        _engine_id_octets = OctetString(b'\x80\x00\x4f\xb8\x05' + _hostname_bytes + _stable_suffix)
+        _stable_suffix  = hashlib.sha256(_hostname_bytes).digest()[:4]
+        _engine_id_bytes = b'\x80\x00\x4f\xb8\x05' + _hostname_bytes + _stable_suffix
         _eid_source = "hostname-derived"
 
-    # ── 3. Security / community data ─────────────────────────────────────────
-    _AUTH = {"MD5": usmHMACMD5AuthProtocol, "SHA": usmHMACSHAAuthProtocol}
-    _PRIV = {"DES": usmDESPrivProtocol,      "AES": _usmAESPrivProtocol}
+    _engine_id_octets = OctetString(_engine_id_bytes)
 
+    # ── 4. Auth / priv protocol tables ───────────────────────────────────────
+    # pysnmp 7.x supports all of these. DES is still present but cryptographically
+    # weak (56-bit key) — accepted with a warning; AES is the recommended default.
+    _AUTH = {
+        "MD5":    usmHMACMD5AuthProtocol,
+        "SHA":    usmHMACSHAAuthProtocol,
+        "SHA224": usmHMACSHA224AuthProtocol,
+        "SHA256": usmHMACSHA256AuthProtocol,
+        "SHA384": usmHMACSHA384AuthProtocol,
+        "SHA512": usmHMACSHA512AuthProtocol,
+    }
+    _PRIV = {
+        "DES":    usmDESPrivProtocol,      # 56-bit — weak; accepted with warning
+        "AES":    usmAES128PrivProtocol,   # AES-128 — recommended default
+        "AES128": usmAES128PrivProtocol,
+        "AES192": usmAES192PrivProtocol,
+        "AES256": usmAES256PrivProtocol,
+    }
+
+    # ── 5. Security / community data ─────────────────────────────────────────
     if version == "v3":
         username       = snmp.get("v3_username", "")
         auth_proto_str = snmp.get("v3_auth_protocol", "SHA").upper()
-        # NOTE: "DES" is kept as the default only to preserve existing behaviour.
-        # DES is cryptographically weak — set v3_priv_protocol: AES in your config
-        # (and the matching AES key in snmptrapd) when you can.
-        priv_proto_str = snmp.get("v3_priv_protocol", "DES").upper()
+        # Default is AES: DES is still functional but cryptographically weak.
+        # New deployments should use AES; existing DES configs will log a warning.
+        priv_proto_str = snmp.get("v3_priv_protocol", "AES").upper()
         # .strip() is essential: a stray newline (CRLF env files on Windows), a
         # trailing space, or a wrapping quote captured into these env vars changes
-        # the localized USM key, so snmptrapd rejects the trap with
+        # the localised USM key, so snmptrapd rejects the trap with
         # "usm: Verification failed" even though the passphrase "looks" identical.
         _auth_key_raw = os.environ.get(snmp.get("v3_auth_key_env", ""), "")
         _priv_key_raw = os.environ.get(snmp.get("v3_priv_key_env", ""), "")
@@ -531,6 +635,17 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
             log.error("SNMP trap: v3_username is not set — skipping")
             return
 
+        # DES is still supported by pysnmp 7.x (RFC 3414 §8) but is
+        # cryptographically broken (56-bit key, exhausted by brute-force in hours).
+        # Warn and continue — do not hard-error, as some NMS devices still only
+        # support DES. New deployments should use AES.
+        if priv_proto_str == "DES":
+            log.warning(
+                "SNMP trap: DES privacy protocol is cryptographically weak "
+                "(56-bit key, broken since ~2000). Consider upgrading to AES: "
+                "set v3_priv_protocol: AES and update snmptrapd.conf to match.",
+            )
+
         # SNMPv3 has no privacy-only mode (RFC 3414): encryption requires
         # authentication. A priv key with no auth key would otherwise silently
         # fall through to noAuthNoPriv and send the trap UNENCRYPTED. Refuse.
@@ -543,10 +658,9 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
             )
             return
 
-        # Reject unknown protocol names instead of silently downgrading to the
-        # SHA/AES defaults — a silent downgrade mismatches snmptrapd and surfaces
-        # as a baffling "usm: Verification failed". Only validated when the
-        # relevant key is actually in use.
+        # Reject unknown protocol names instead of silently downgrading — a silent
+        # downgrade mismatches snmptrapd and surfaces as a baffling
+        # "usm: Verification failed". Only validated when the key is in use.
         if auth_key and auth_proto_str not in _AUTH:
             log.error(
                 "SNMP trap: unknown v3_auth_protocol %r — supported values: %s — skipping",
@@ -560,9 +674,7 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
             )
             return
 
-        # SNMPv3 requires auth/priv passphrases of at least 8 characters
-        # (RFC 3414 §11.2). Fail with a clear message rather than an obscure
-        # USM error downstream.
+        # SNMPv3 requires auth/priv passphrases of at least 8 characters (RFC 3414 §11.2).
         if auth_key and len(auth_key) < 8:
             log.error(
                 "SNMP trap: v3 auth key is only %d characters — SNMPv3 requires at "
@@ -577,8 +689,6 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
             return
 
         if auth_key and priv_key:
-            # Direct lookup is safe: membership validated above, so we no longer
-            # silently default here.
             security_data = UsmUserData(
                 username,
                 authKey=auth_key, authProtocol=_AUTH[auth_proto_str],
@@ -612,12 +722,11 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
         f"{payload.failure_type}"
     )
 
-    # ── 5. Build SnmpEngine with the engine ID determined above ───────────────
-    _snmp_engine = SnmpEngine(snmpEngineID=_engine_id_octets)
+    # ── 6. Log the effective engine ID (needed for snmptrapd createUser -e) ───
     if _eid_source == "config":
         log.debug(
             "SNMP engine ID (pinned from config): 0x%s",
-            _engine_id_octets.asOctets().hex(),
+            _engine_id_bytes.hex(),
         )
     else:
         log.info(
@@ -626,51 +735,78 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
             "Configure snmptrapd once with the engine ID logged below.",
             socket.gethostname(),
         )
+    log.info(
+        "SNMP engine ID: 0x%s "
+        "(snmptrapd.conf: createUser -e 0x%s %s SHA \"...\" AES \"...\")",
+        _engine_id_bytes.hex(), _engine_id_bytes.hex(),
+        snmp.get("v3_username", "<username>"),
+    )
 
-    # ── 6. Log the effective engine ID (needed for snmptrapd createUser -e) ───
-    try:
-        _eid_val = getattr(_snmp_engine, 'snmpEngineID', None)
-        if _eid_val is not None:
-            if hasattr(_eid_val, 'asOctets'):
-                _eid_hex = _eid_val.asOctets().hex()
-            elif hasattr(_eid_val, 'prettyPrint'):
-                _eid_hex = _eid_val.prettyPrint()
+    # ── 7. Send via asyncio (pysnmp 6.x/7.x uses coroutine-based API) ─────────
+    # asyncio.run() creates a temporary event loop — safe because the watchdog
+    # is entirely synchronous (threading-based, no running event loop).
+    async def _do_send() -> tuple:
+        # SnmpEngine MUST be created inside the running event loop (pysnmp 7.x
+        # requirement — its internal asyncio dispatcher is bound to the loop).
+        _engine = SnmpEngine(snmpEngineID=_engine_id_octets)
+
+        # pysnmp 7.x has a known bug where TRAP sends (which need no response)
+        # occasionally call future.set_result() twice, raising InvalidStateError
+        # from asyncio's callback machinery. Suppress it — it is cosmetic and
+        # does not affect trap delivery.
+        def _suppress_invalid_state(loop, context):
+            exc = context.get("exception")
+            if isinstance(exc, asyncio.InvalidStateError):
+                return
+            loop.default_exception_handler(context)
+        asyncio.get_event_loop().set_exception_handler(_suppress_invalid_state)
+
+        try:
+            # UdpTransportTarget.create() is an async factory in pysnmp 7.1+;
+            # fall back to the synchronous constructor for 6.x / 7.0.
+            _create = getattr(UdpTransportTarget, 'create', None)
+            if _create is not None and asyncio.iscoroutinefunction(_create):
+                transport = await UdpTransportTarget.create((host, port), timeout=5, retries=1)
             else:
-                _eid_hex = str(_eid_val)
-            log.info(
-                "SNMP engine ID: 0x%s "
-                "(snmptrapd.conf: createUser -e 0x%s %s SHA \"...\" DES \"...\")",
-                _eid_hex, _eid_hex, snmp.get("v3_username", "<username>"),
-            )
-    except Exception as _eid_exc:
-        log.debug("SNMP engine ID read failed (non-fatal): %r", _eid_exc)
+                transport = UdpTransportTarget((host, port), timeout=5, retries=1)  # type: ignore[call-arg]
 
-    # ── 7. Send the trap ──────────────────────────────────────────────────────
-    try:
-        error_indication, error_status, error_index, _ = next(
-            sendNotification(
-                _snmp_engine,
-                security_data,  # CommunityData (v1/v2c) or UsmUserData (v3)
-                UdpTransportTarget((host, port), timeout=5, retries=1),
+            # Build the notification. add_varbinds is the PEP-8 name (pysnmp 7.x);
+            # addVarBinds is the legacy alias kept for 6.x compatibility.
+            _notif = NotificationType(ObjectIdentity(trap_oid))
+            _add_vb = getattr(_notif, 'add_varbinds', None) or getattr(_notif, 'addVarBinds')
+            notification = _add_vb(
+                # All var-binds under the Radware enterprise objects branch
+                # 1.3.6.1.4.1.89.110.1.<n>.0 — RADWARE-CONTAINER-WATCHDOG-MIB.
+                # cwHost (.1.1.0) — STRING — hostname of the alerting node
+                (f"{_ENTERPRISE_ARC}.1.1.0", OctetString(payload.host.encode("utf-8", errors="replace"))),
+                # cwSummary (.1.2.0) — STRING — human-readable alert summary
+                (f"{_ENTERPRISE_ARC}.1.2.0", OctetString(summary.encode("utf-8", errors="replace"))),
+                # cwContainerName (.1.3.0) — STRING — container name
+                (f"{_ENTERPRISE_ARC}.1.3.0", OctetString(payload.container_name.encode("utf-8", errors="replace"))),
+                # cwFailureType (.1.4.0) — STRING — crashed | oom | unhealthy | restart-loop
+                (f"{_ENTERPRISE_ARC}.1.4.0", OctetString(payload.failure_type.encode("utf-8", errors="replace"))),
+                # cwProbeDetail (.1.5.0) — STRING — what probe failed and why
+                (f"{_ENTERPRISE_ARC}.1.5.0", OctetString((payload.probe_detail or "").encode("utf-8", errors="replace"))),
+            )
+
+            error_indication, error_status, error_index, _ = await _send_notification(
+                _engine,
+                security_data,    # CommunityData (v1/v2c) or UsmUserData (v3)
+                transport,
                 ContextData(),
                 "trap",
-                NotificationType(ObjectIdentity(trap_oid)).addVarBinds(
-                    # All var-binds live under the Radware enterprise objects branch
-                    # 1.3.6.1.4.1.89.110.1.<n>.0 (scalar instances) so nothing is
-                    # repurposed from MIB-II — see RADWARE-CONTAINER-WATCHDOG-MIB.
-                    # cwHost (.1.1.0) — STRING — hostname of the alerting node
-                    (f"{_ENTERPRISE_ARC}.1.1.0", OctetString(payload.host.encode("utf-8", errors="replace"))),
-                    # cwSummary (.1.2.0) — STRING — human-readable alert summary
-                    (f"{_ENTERPRISE_ARC}.1.2.0", OctetString(summary.encode("utf-8", errors="replace"))),
-                    # cwContainerName (.1.3.0) — STRING — container name
-                    (f"{_ENTERPRISE_ARC}.1.3.0", OctetString(payload.container_name.encode("utf-8", errors="replace"))),
-                    # cwFailureType (.1.4.0) — STRING — crashed | oom | unhealthy | restart-loop
-                    (f"{_ENTERPRISE_ARC}.1.4.0", OctetString(payload.failure_type.encode("utf-8", errors="replace"))),
-                    # cwProbeDetail (.1.5.0) — STRING — what probe failed and why
-                    (f"{_ENTERPRISE_ARC}.1.5.0", OctetString((payload.probe_detail or "").encode("utf-8", errors="replace"))),
-                ),
+                notification,
+                lookupMib=False,  # skip MIB resolution — all OIDs are numeric
             )
-        )
+            return error_indication, error_status, error_index
+        finally:
+            try:
+                _engine.close_dispatcher()
+            except Exception:
+                pass
+
+    try:
+        error_indication, error_status, error_index = asyncio.run(_do_send())
         if error_indication:
             log.error(
                 "SNMP trap failed to %s:%d: indication=%s, status=%s, index=%s",

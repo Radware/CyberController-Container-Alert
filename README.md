@@ -81,12 +81,10 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 docker==7.1.0
 requests==2.32.3
 PyYAML==6.0.2
-pyasn1==0.4.8
-pyasn1-modules==0.2.8
-pysnmp>=4.4.12,<5
+pysnmp>=6.2
 ```
 
-> `pysnmp<5` is required — version 5.x removed the synchronous API and `usmDESPrivProtocol` used by the SNMP trap sender.
+> pysnmp 6.2+ uses the modern `pysnmp.hlapi.v3arch.asyncio` API. pysnmp 4.x is no longer supported — its synchronous generator API was removed in 5.x. `pyasn1` is a transitive dependency managed by pysnmp itself and no longer needs to be pinned separately.
 
 Python 3.11+
 
@@ -182,9 +180,9 @@ snmp_trap:
   trap_oid: "1.3.6.1.4.1.89.110.0.1"      # Radware enterprise container-alert notification OID
   # SNMPv3 only — add SNMP_V3_AUTH_KEY / SNMP_V3_PRIV_KEY to .env
   # v3_username:        watchdog-user
-  # v3_auth_protocol:   SHA                # MD5 or SHA
+  # v3_auth_protocol:   SHA                # MD5 | SHA | SHA256 | SHA384 | SHA512
   # v3_auth_key_env:    SNMP_V3_AUTH_KEY   # min 8 chars
-  # v3_priv_protocol:   AES                # DES (weak) or AES (recommended)
+  # v3_priv_protocol:   AES                # AES (recommended) | AES192 | AES256 | DES (weak)
   # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
   # v3_local_engine_id: ""                 # hex engine ID pinned from first-run log; see DEPLOYMENT.md
 ```

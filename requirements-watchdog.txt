@@ -1,4 +1,5 @@
 docker==7.1.0
 requests==2.32.3
 PyYAML==6.0.2
-pysnmp>=4.4.12,<5   # SNMP trap dispatch (5.x removed sync API and usmDESPrivProtocol)
+pysnmp>=6.2          # SNMP trap dispatch — async API (pysnmp.hlapi.v3arch.asyncio)
+cryptography>=42.0   # SNMPv3 USM AES/DES cipher backend (pysnmp 7.x uses pyca/cryptography)

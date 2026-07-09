@@ -348,7 +348,7 @@ snmp_trap:
   # v3_username:        watchdog-user
   # v3_auth_protocol:   SHA                # MD5 or SHA
   # v3_auth_key_env:    SNMP_V3_AUTH_KEY   # min 8 chars
-  # v3_priv_protocol:   AES                # DES (weak) or AES (recommended)
+  # v3_priv_protocol:   AES                # AES (recommended) | AES192 | AES256 | DES (weak)
   # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
   # v3_local_engine_id: ""                 # pin engine ID across restarts — see SNMPv3 note below
 ```
@@ -368,7 +368,7 @@ snmp_trap:
 - **Engine ID:** On the first run the watchdog logs an auto-stable engine ID derived from the hostname (look for `SNMP engine ID: 0x...` in the logs). Copy it into `v3_local_engine_id` and register it in `snmptrapd.conf` with `createUser -e 0x<id> watchdog-user SHA "..." AES "..."`. This keeps the ID stable across container restarts.
 - **Key length:** Both auth and priv passphrases must be at least 8 characters (RFC 3414 §11.2). The watchdog rejects shorter keys with a clear error.
 - **No privacy-only mode:** Setting a priv key without an auth key is rejected — SNMPv3 has no `privNoAuth` security level. Both keys must be set together for encrypted traps.
-- **Protocol names:** Valid values are `MD5`/`SHA` for auth and `DES`/`AES` for priv. An unrecognised name is rejected with an error listing the supported values.
+- **Protocol names:** Auth: `MD5`, `SHA`, `SHA256`, `SHA384`, `SHA512`. Priv: `AES` (AES-128, recommended), `AES192`, `AES256`, `DES` (weak — logs a warning). An unrecognised name is rejected with an error listing the supported values.
 
 ---
 

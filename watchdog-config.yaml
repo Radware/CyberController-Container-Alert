@@ -68,14 +68,13 @@ snmp_trap:
   # trap_oid is not set here — code defaults to Radware enterprise OID 1.3.6.1.4.1.89.110.0.1
   # SNMPv3 settings (used only when version: v3 — add secrets to .env)
   # v3_username:      watchdog-user
-  # v3_auth_protocol: SHA              # MD5 or SHA
+  # v3_auth_protocol: SHA              # MD5 | SHA | SHA256 | SHA384 | SHA512
   # v3_auth_key_env:  SNMP_V3_AUTH_KEY # env var in .env holding the auth passphrase
-  # v3_priv_protocol: AES              # DES or AES
+  # v3_priv_protocol: AES              # AES (AES-128, recommended) | AES192 | AES256 | DES (weak — logs warning)
   # v3_priv_key_env:  SNMP_V3_PRIV_KEY # env var in .env holding the priv passphrase
   # v3_local_engine_id: ""             # Pin the sender engine ID (hex, with or without 0x).
-  #   Obtain with: docker exec watchdog python3 -c "from pysnmp.hlapi import SnmpEngine; print(SnmpEngine().snmpEngineID.prettyPrint())"
-  #   Then set here AND in snmptrapd.conf: createUser -e 0x<id> watchdog-user SHA "..." AES "..."
-  #   (prefer AES over DES — DES is cryptographically weak)
+  #   The watchdog logs the auto-derived engine ID at startup (INFO level) — copy it here.
+  #   Then set in snmptrapd.conf: createUser -e 0x<id> watchdog-user SHA "..." AES "..."
   #   This prevents snmptrapd from needing reconfiguration after container restarts.
 
 # ── Slack ─────────────────────────────────────────────────────────────────────
