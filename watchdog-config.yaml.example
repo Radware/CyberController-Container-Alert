@@ -1,0 +1,123 @@
+# watchdog-config.yaml
+# CyberController Container Watchdog — full configuration
+#
+# SECRETS: All passwords and webhook URLs are read from environment
+# variables, never hardcoded here. Set them in your .env file.
+#
+# Copy this file to /opt/radware/storage/scripts/Alert_Container/watchdog-config.yaml
+# and update the values for your environment.
+
+# ── Alert channels ────────────────────────────────────────────────────────────
+# Empty for local testing — alerts are still logged to stdout/file.
+alert_channels:
+  - slack
+  - smtp
+  - syslog
+  - snmp_trap
+
+# ── Watchdog behaviour ────────────────────────────────────────────────────────
+check_interval_seconds:     60    # how often to poll all containers
+cooldown_minutes:            5    # suppress duplicate alerts per container
+restart_threshold:           5    # number of restarts within the window triggers alert
+restart_window_minutes:     10    # rolling window for restart counting
+unhealthy_cycles_threshold:  3    # consecutive unhealthy cycles before alerting
+
+# Containers to never alert on (debug, test, or one-shot containers)
+excluded_containers: []
+  # - my-temp-container
+
+# Runbook URL — sent as-is in every alert
+runbook_base_url: 
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log_level: DEBUG    # DEBUG | INFO | WARNING | ERROR
+log_file: /var/log/watchdog/watchdog.log   # bind-mounted to ./watchdog/watchdog.log on host
+
+# ── Syslog (remote / central log server) ─────────────────────────────────────
+syslog:
+  enabled: true             # set to true to enable
+  host: 155.1.1.4           # IP or hostname of your syslog server
+  port: 514                 # 514 = standard syslog (UDP); 601 = reliable syslog (TCP)
+  protocol: udp             # udp (fire-and-forget) or tcp (reliable)
+  facility: local0          # syslog facility: local0–local7, daemon, user, etc.
+
+# ── Email (SMTP) ─────────────────────────────────────────────────────────────
+# Add "smtp" to alert_channels above to enable.
+smtp:
+  enabled: true                      # set to true to enable
+  host: smtp.radware.com
+  port: 587
+  sender: noc-alerts@radware.com
+  username_env: SMTP_USERNAME        # env var: SMTP username or app token (Mailtrap, Gmail app password, etc.)
+  recipients:
+    - ops-team@radware.com
+    - oncall@radware.com
+  tls: true
+  password_env: SMTP_PASSWORD        # env var: SMTP password or app token
+
+# ── SNMP Traps ────────────────────────────────────────────────────────────────
+# Sends SNMP traps (v1, v2c, or v3) to your NMS/SIEM on every alert.
+# Add "snmp_trap" to alert_channels above to enable.
+# Requires: pip install pysnmp (already in requirements-watchdog.txt)
+snmp_trap:
+  enabled: false                     # set to true to enable
+  host: 155.1.1.1                    # IP or hostname of your SNMP trap receiver (NMS)
+  port: 162                          # UDP port — 162 is the standard SNMP trap port
+  version: v2c                       # SNMP version: v1, v2c, or v3
+  community: public                  # SNMPv1/v2c community string (ignored for v3)
+  # trap_oid is not set here — code defaults to Radware enterprise OID 1.3.6.1.4.1.89.110.0.1
+  # SNMPv3 settings (used only when version: v3 — add secrets to .env)
+  # v3_username:      watchdog-user
+  # v3_auth_protocol: SHA              # MD5 | SHA | SHA256 | SHA384 | SHA512
+  # v3_auth_key_env:  SNMP_V3_AUTH_KEY # env var in .env holding the auth passphrase
+  # v3_priv_protocol: AES              # AES (AES-128, recommended) | AES192 | AES256 | DES (weak — logs warning)
+  # v3_priv_key_env:  SNMP_V3_PRIV_KEY # env var in .env holding the priv passphrase
+  # v3_local_engine_id: ""             # Pin the sender engine ID (hex, with or without 0x).
+  #   The watchdog logs the auto-derived engine ID at startup (INFO level) — copy it here.
+  #   Then set in snmptrapd.conf: createUser -e 0x<id> watchdog-user SHA "..." AES "..."
+  #   This prevents snmptrapd from needing reconfiguration after container restarts.
+
+# ── Slack ─────────────────────────────────────────────────────────────────────
+slack:
+  enabled: true                        # set to true to enable
+  webhook_url_env: SLACK_WEBHOOK_URL   # env var: https://hooks.slack.com/services/...
+
+# ── Custom health checks for containers without a Docker HEALTHCHECK ──────────
+# These containers show no ports in `docker ps` or simply have no HEALTHCHECK
+# directive, so Docker reports their health as "none".  The watchdog probes them
+# using an internal network connection (http) or a command run inside the
+# container (exec) — no published/exposed port is required for http checks.
+#
+# type: http  — GET http://<container-internal-ip>:<internal_port>/<path>
+#               Healthy = HTTP status < 500.
+# type: exec  — run `command` inside the container.
+#               Healthy = exit code 0.
+# Add custom health checks here only for containers actually running on this host
+# that have no Docker HEALTHCHECK directive.
+# Example:
+# container_health_checks:
+#   my-app:
+#     type: http
+#     internal_port: 8080
+#     path: /health
+#     timeout_seconds: 5
+# ── Auto health-check discovery ───────────────────────────────────────────────
+# When enabled, the watchdog automatically probes every container that has
+# health=none (no Docker HEALTHCHECK) and no manual entry below.
+# It tries each exposed internal port with the listed paths in order.
+# The first responding endpoint (HTTP < 500) is cached for that container.
+# Cache is cleared automatically when the container restarts.
+auto_health_check:
+  enabled: true
+  paths:
+    - /-/healthy     # Prometheus-style
+    - /health        # common REST convention
+    - /healthz       # Kubernetes-style
+    - /api/health    # Grafana
+    - /metrics       # exporters
+    - /              # fallback
+  timeout_seconds: 2   # discovery uses 1s (half), cached checks use 2s
+
+# ── Manual health checks (override auto-discovery for specific containers) ────
+# Leave empty — all containers use auto-discovery
+container_health_checks: {}

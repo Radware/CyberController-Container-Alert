@@ -292,6 +292,8 @@ def send_smtp(payload: AlertPayload, cfg: dict) -> None:
     """Send alert email via SMTP with production-grade error handling and retries."""
     import smtplib
     import ssl
+    from email.message import EmailMessage
+    from email.utils import formatdate
 
     smtp_cfg = cfg.get("smtp", {})
     if not smtp_cfg.get("enabled", False):
@@ -342,7 +344,17 @@ Exit Code: {payload.exit_code if payload.exit_code is not None else 'N/A'}
 
 {payload.recommended_action}"""
     
-    message = f"Subject: {subject}\r\nFrom: {sender}\r\nTo: {', '.join(recipients)}\r\n\r\n{body}"
+    # Build an RFC-compliant MIME message.  smtplib.sendmail(str) tries to
+    # encode the whole message as ASCII, which breaks on Unicode text such as
+    # the em dash in recommended_action.  quoted-printable UTF-8 keeps the SMTP
+    # payload ASCII-safe while preserving readable Unicode for recipients.
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = ", ".join(recipients)
+    msg["Date"] = formatdate(localtime=False)
+    msg.set_content(body, charset="utf-8", cte="quoted-printable")
+    message = msg.as_bytes()
 
     # ── Send with exponential backoff retry
     max_retries = 2
