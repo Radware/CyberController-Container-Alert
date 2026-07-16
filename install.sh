@@ -9,7 +9,7 @@
 # unhealthy states, and restart loops.
 #
 # Usage:
-#   sudo bash install.sh
+# bash install.sh
 ################################################################################
 
 # Errors are handled explicitly with exit 1 throughout this script
@@ -29,7 +29,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$SCRIPT_DIR"          # package is already extracted to the install directory
 IMAGE_ARCHIVE="${SCRIPT_DIR}/watchdog.tar"
-CONTAINER_NAME="watchdog"
+CONTAINER_NAME="docker-container-watchdog"
 IMAGE_NAME="watchdog:latest"
 VERSION="1.0.0"
 DC=""  # compose command — set automatically in check_prerequisites

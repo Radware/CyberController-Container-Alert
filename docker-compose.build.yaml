@@ -17,7 +17,7 @@ services:
     build:
       context: .
     image: watchdog:latest
-    container_name: watchdog
+    container_name: docker-container-watchdog
     restart: always
     network_mode: host
     env_file: .env

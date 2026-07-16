@@ -34,7 +34,7 @@ fi
 # ── Constants ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$SCRIPT_DIR"
-CONTAINER_NAME="watchdog"
+CONTAINER_NAME="docker-container-watchdog"
 IMAGE_NAME="watchdog:latest"
 VERSION="1.0.0"
 DC=""  # compose command — detected at runtime

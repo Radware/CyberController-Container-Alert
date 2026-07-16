@@ -133,7 +133,7 @@ Run the installer from the `Container_Alert/` directory. It guides you through e
 
 ```bash
 cd /path/to/Container_Alert
-sudo bash install.sh
+bash install.sh
 ```
 
 The script walks through the following stages in order:
@@ -194,14 +194,14 @@ docker compose up -d
 
 ```bash
 docker compose ps
-docker compose logs -f watchdog
+docker compose logs -f docker-container-watchdog
 ```
 
 Expected output from `docker compose ps`:
 
 ```
-NAME       STATUS
-watchdog   Up (healthy)
+NAME                        STATUS
+docker-container-watchdog   Up (healthy)
 ```
 
 ---
@@ -237,7 +237,7 @@ docker compose up -d
 
 ```bash
 docker ps --filter name=watchdog
-docker-compose logs -f watchdog
+docker-compose logs -f docker-container-watchdog
 ```
 
 ---
@@ -247,7 +247,7 @@ docker-compose logs -f watchdog
 ### Check watchdog logs
 
 ```bash
-docker compose logs -f watchdog
+docker compose logs -f docker-container-watchdog
 ```
 
 You should see:
@@ -301,7 +301,7 @@ syslog:
 Restart the watchdog to apply:
 
 ```bash
-docker compose restart watchdog
+docker compose restart docker-container-watchdog
 ```
 
 ---
@@ -376,20 +376,20 @@ snmp_trap:
 
 | Location | Description |
 |---|---|
-| `docker compose logs watchdog` | Live stdout logs |
+| `docker compose logs docker-container-watchdog` | Live stdout logs |
 | `./watchdog/watchdog.log` | Bind-mounted log file on the host (inside the `Container_Alert/` directory) |
 | `/var/log/watchdog/watchdog.log` | Inside the container (rotated, max 10 MB × 5 files) |
 
 To follow logs with timestamps:
 
 ```bash
-docker compose logs -f --timestamps watchdog
+docker compose logs -f --timestamps docker-container-watchdog
 ```
 
 To read the log file directly from the volume:
 
 ```bash
-docker exec watchdog tail -f /var/log/watchdog/watchdog.log
+docker exec docker-container-watchdog tail -f /var/log/watchdog/watchdog.log
 ```
 
 ---
@@ -412,7 +412,7 @@ Each alert includes: container name, container ID, host, failure type, timestamp
 All settings are in `watchdog-config.yaml`. No image rebuild is required for configuration changes — restart the watchdog container to apply updates:
 
 ```bash
-docker compose restart watchdog
+docker compose restart docker-container-watchdog
 ```
 
 | Setting | Default | Description |
@@ -452,7 +452,7 @@ docker compose down
 
 ```bash
 # Pick up watchdog-config.yaml changes (no rebuild needed)
-docker compose restart watchdog
+docker compose restart docker-container-watchdog
 
 # Re-read .env credential changes
 docker compose up -d
@@ -477,16 +477,16 @@ No image rebuild is required for any configuration change. The type of change de
 
 | Changed file | What to run |
 |---|---|
-| `watchdog-config.yaml` (thresholds, channels, exclusions) | `docker compose restart watchdog` |
+| `watchdog-config.yaml` (thresholds, channels, exclusions) | `docker compose restart docker-container-watchdog` |
 | `.env` (secrets, credentials) | `docker compose up -d` |
 | `docker-compose.yaml` (host name, resource limits) | `docker compose up -d` |
 
 ### Apply watchdog-config.yaml changes
 
 ```bash
-docker compose restart watchdog
+docker compose restart docker-container-watchdog
 # or (v1 standalone)
-docker-compose restart watchdog
+docker-compose restart docker-container-watchdog
 ```
 
 ### Apply .env changes (credentials / secrets)
@@ -520,15 +520,15 @@ Run `uninstall.sh` from the `Container_Alert/` directory. Choose the option that
 
 | Scenario | Container removed | Image removed | Logs removed | Command |
 |---|:---:|:---:|:---:|---|
-| Standard (container removed; image + logs prompted) | ✓ | Prompted | Prompted | `sudo bash uninstall.sh` |
-| Remove everything without prompts | ✓ | ✓ | ✓ | `sudo bash uninstall.sh --remove-all --force` |
-| Remove container, keep image + logs | ✓ | ✗ | ✗ | `sudo bash uninstall.sh --keep-image --keep-logs` |
-| Remove container + image, keep logs | ✓ | ✓ | ✗ | `sudo bash uninstall.sh --keep-logs --force` |
+| Standard (container removed; image + logs prompted) | ✓ | Prompted | Prompted | `bash uninstall.sh` |
+| Remove everything without prompts | ✓ | ✓ | ✓ | `bash uninstall.sh --remove-all --force` |
+| Remove container, keep image + logs | ✓ | ✗ | ✗ | `bash uninstall.sh --keep-image --keep-logs` |
+| Remove container + image, keep logs | ✓ | ✓ | ✗ | `bash uninstall.sh --keep-logs --force` |
 
 #### Standard interactive uninstall
 
 ```bash
-sudo bash uninstall.sh
+bash uninstall.sh
 ```
 
 Shows a removal plan (container name, image size, log directory size), asks for confirmation, then prompts whether to delete log files. Safe default for manual runs.
@@ -536,7 +536,7 @@ Shows a removal plan (container name, image size, log directory size), asks for 
 #### Remove container and image, preserve logs
 
 ```bash
-sudo bash uninstall.sh --keep-logs
+bash uninstall.sh --keep-logs
 ```
 
 Stops and removes the `watchdog` container and the `watchdog:latest` Docker image. The `./watchdog/` log directory is left intact so you can review historical logs later.
@@ -544,7 +544,7 @@ Stops and removes the `watchdog` container and the `watchdog:latest` Docker imag
 #### Remove everything including logs
 
 ```bash
-sudo bash uninstall.sh --remove-all
+bash uninstall.sh --remove-all
 ```
 
 Removes the container, image, and the entire `./watchdog/` log directory. Prompts for confirmation before proceeding.
@@ -552,7 +552,7 @@ Removes the container, image, and the entire `./watchdog/` log directory. Prompt
 #### Fully non-interactive (automation / CI pipelines)
 
 ```bash
-sudo bash uninstall.sh --remove-all --force
+bash uninstall.sh --remove-all --force
 ```
 
 Skips all confirmation prompts. Use in automated pipelines or when scripting repeated clean installs.
@@ -566,7 +566,7 @@ Skips all confirmation prompts. Use in automated pipelines or when scripting rep
 ### Service Fails to Start
 
 ```bash
-docker compose logs watchdog
+docker compose logs docker-container-watchdog
 ```
 
 Common causes:

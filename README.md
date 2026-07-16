@@ -73,7 +73,7 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 | Running container (memory) | ~50–80 MB |
 | `watchdog.tar` export | ~170 MB |
 
-> These are approximate. Run `docker image ls watchdog` and `docker stats watchdog` after deployment to see exact values on your host.
+> These are approximate. Run `docker image ls watchdog` and `docker stats docker-container-watchdog` after deployment to see exact values on your host.
 
 ### Dependencies
 
@@ -367,9 +367,9 @@ With no exposed ports, auto-discovery skips HTTP and TCP and falls back to readi
 ### Service Fails to Start
 
 ```bash
-docker compose logs watchdog
+docker compose logs docker-container-watchdog
 # or (v1 standalone)
-docker-compose logs watchdog
+docker-compose logs docker-container-watchdog
 ```
 
 Common causes:
@@ -435,7 +435,7 @@ grep "CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.l
              /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log.1
 
 # Via Docker (stdout only)
-docker compose logs -f watchdog
+docker compose logs -f docker-container-watchdog
 ```
 
 ---
@@ -491,4 +491,13 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 > **Verify what was actually cached after startup:**
 > ```bash
 > grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+
+
+# Version History
+
+| Version | Date | Author | Changes |
+|---------|------------|--------|---------|
+| 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |
+| 1.0.0 | 2026-06-25 | Rahul Kumar | Added Slack notifications and bug fixes |
+
 > ```
