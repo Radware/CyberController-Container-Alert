@@ -10,17 +10,15 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 
 1. [Prerequisites](#1-prerequisites)
 2. [Repository Structure](#2-repository-structure)
-3. [Configure Environment Variables](#3-configure-environment-variables)
-4. [Configure the Watchdog](#4-configure-the-watchdog)
-5. [Install and Deploy](#5-install-and-deploy)
-6. [Verify Deployment](#6-verify-deployment)
-7. [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels)
-8. [Logs](#8-logs)
-9. [Alert Types](#9-alert-types)
-10. [Configuration Reference](#10-configuration-reference)
-11. [Lifecycle Management](#11-lifecycle-management)
-12. [How to Change Existing Settings](#12-how-to-change-existing-settings)
-13. [Troubleshooting](#13-troubleshooting)
+3. [Install and Deploy](#3-install-and-deploy)
+4. [Verify Deployment](#4-verify-deployment)
+5. [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels)
+6. [Logs](#6-logs)
+7. [Alert Types](#7-alert-types)
+8. [Configuration Reference](#8-configuration-reference)
+9. [Lifecycle Management](#9-lifecycle-management)
+10. [How to Change Existing Settings](#10-how-to-change-existing-settings)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -29,16 +27,15 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 | Requirement | Minimum Version |
 |---|---|
 | Docker Engine | 20.10+ |
-| Docker Compose plugin **or** standalone | v2 plugin (`docker compose`) or v1 standalone (`docker-compose`) |
+| Docker Compose plugin **or** standalone | v2 plugin (`docker compose`)
 | Linux host (for Docker socket) | Ubuntu 20.04 / RHEL 8 or later |
 
-> **Docker Compose v1 vs v2:** All commands in this guide use the v2 syntax (`docker compose …`). If your system has the v1 standalone binary, replace `docker compose` with `docker-compose` throughout. To check which you have:
+
 > ```bash
 > docker compose version   # v2 plugin — "Docker Compose version v2.x.x"
-> docker-compose --version # v1 standalone — "docker-compose version 1.x.x"
 > ```
 
-> **Alert channels:** At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`. See [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels).
+> **Alert channels:** At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`. See [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels).
 
 
 ---
@@ -61,69 +58,9 @@ Container_Alert/
 
 ---
 
-## 3. Configure Environment Variables
 
-```bash
-cp .env.example .env
-chmod 600 .env          # restrict to owner only — contains secrets
-```
 
-Open `.env` and fill in every value:
-
-```dotenv
-# Slack
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
-
-# SMTP (only if SMTP channel is enabled)
-SMTP_USERNAME=your-smtp-username
-SMTP_PASSWORD=your-smtp-password
-
-# Tuning (optional — defaults shown)
-LOG_LEVEL=INFO
-```
----
-
-## 4. Configure the Watchdog
-
-### Alert Channels
-
-All alert channels are **optional** — configure at least one so the watchdog has somewhere to send alerts. Multiple channels can be active simultaneously; add each identifier to `alert_channels` in `watchdog-config.yaml`.
-
-| Channel | `alert_channels` identifier | What you need |
-|---|---|---|
-| Slack Webhook | `slack` | Slack incoming webhook URL |
-| Syslog | *(syslog config block)* | Syslog server reachable from the Docker host |
-| Email (SMTP) | `smtp` | SMTP relay and credentials |
-| SNMP Traps | `snmp_trap` | SNMP trap receiver (NMS / SIEM) |
-
-> For step-by-step setup of each channel, see [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels).
-
-### Configuration File (watchdog-config.yaml)
-
-Edit `watchdog-config.yaml` to match your environment:
-
-```yaml
-alert_channels:          # choose one or more: slack, smtp, snmp_trap
-  - slack                # remove any channel you have not configured
-
-check_interval_seconds: 60      # poll interval
-cooldown_minutes: 5             # no duplicate alerts within this window
-restart_threshold: 5            # restarts before "restart-loop" alert
-restart_window_minutes: 10      # rolling window for restart counting
-unhealthy_cycles_threshold: 3   # consecutive unhealthy polls before alert
-
-excluded_containers:
-  - debug-shell                 # add any containers you don't want monitored
-
-runbook_base_url: "https://wiki.radware.internal/runbooks"
-
-slack:
-  webhook_url_env: SLACK_WEBHOOK_URL    # reads from .env
-```
-
----
-
-## 5. Install and Deploy
+## 3. Install and Deploy
 
 ### Option A — Automated installation with `install.sh` (recommended)
 
@@ -179,18 +116,80 @@ chmod 600 .env
 ```
 
 Open `.env` and fill in the credentials for your chosen alert channel(s).
+## 3. Configure Environment Variables
 
-#### 3. Configure the watchdog
+```bash
+cp .env.example .env
+chmod 600 .env          # restrict to owner only — contains secrets
+```
 
-Edit `watchdog-config.yaml` — set `alert_channels`, thresholds, and any channel-specific blocks (see [How to Set Up Communication Channels](#7-how-to-set-up-communication-channels)).
+Open `.env` and fill in every value:
 
-#### 4. Start the container
+```dotenv
+# Slack
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
+
+# SMTP (only if SMTP channel is enabled)
+SMTP_USERNAME=your-smtp-username
+SMTP_PASSWORD=your-smtp-password
+
+# Tuning (optional — defaults shown)
+LOG_LEVEL=INFO
+```
+---
+
+## 4. Configure the Watchdog
+
+### Alert Channels
+
+
+| Channel | `alert_channels` identifier | What you need |
+|---|---|---|
+| Slack Webhook | `slack` | Slack incoming webhook URL |
+| Syslog | *(syslog config block)* | Syslog server reachable from the Docker host |
+| Email (SMTP) | `smtp` | SMTP relay and credentials |
+| SNMP Traps | `snmp_trap` | SNMP trap receiver (NMS / SIEM) |
+
+> For step-by-step setup of each channel, see [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels).
+
+### Configuration File (watchdog-config.yaml)
+
+Edit `watchdog-config.yaml` to match your environment:
+
+```yaml
+alert_channels:          # choose one or more: slack, smtp, snmp_trap
+  - slack                # remove any channel you have not configured
+
+check_interval_seconds: 60      # poll interval
+cooldown_minutes: 5             # no duplicate alerts within this window
+restart_threshold: 5            # restarts before "restart-loop" alert
+restart_window_minutes: 10      # rolling window for restart counting
+unhealthy_cycles_threshold: 3   # consecutive unhealthy polls before alert
+
+excluded_containers:
+  - debug-shell                 # add any containers you don't want monitored
+
+runbook_base_url: "https://test/runbooks"
+
+slack:
+  webhook_url_env: SLACK_WEBHOOK_URL    # reads from .env
+```
+
+---
+
+#### 5. Configure the watchdog
+
+Edit `watchdog-config.yaml` — set `alert_channels`, thresholds, and any channel-specific blocks (see [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels)).
+
+# instruction : clone the repository first and then run installer
+
+#### 6. Start the container
 
 ```bash
 docker compose up -d
 ```
 
-#### 5. Verify
+#### 7. Verify
 
 ```bash
 docker compose ps
@@ -226,9 +225,6 @@ docker images watchdog
 #### Step 2 — Start the container
 
 ```bash
-# v1 standalone
-docker-compose up -d
-
 # v2 plugin
 docker compose up -d
 ```
@@ -242,7 +238,7 @@ docker-compose logs -f docker-container-watchdog
 
 ---
 
-## 6. Verify Deployment
+## 4. Verify Deployment
 
 ### Check watchdog logs
 
@@ -270,7 +266,7 @@ Within 60 seconds (or immediately via the event listener) you should receive an 
 
 ---
 
-## 7. How to Set Up Communication Channels
+## 5. How to Set Up Communication Channels
 
 For each channel you want to use, follow the relevant option below. Ensure its identifier is listed under `alert_channels` in `watchdog-config.yaml`.
 
@@ -372,7 +368,7 @@ snmp_trap:
 
 ---
 
-## 8. Logs
+## 6. Logs
 
 | Location | Description |
 |---|---|
@@ -394,7 +390,7 @@ docker exec docker-container-watchdog tail -f /var/log/watchdog/watchdog.log
 
 ---
 
-## 9. Alert Types
+## 7. Alert Types
 
 | Failure Type | Severity | Trigger |
 |---|---|---|
@@ -407,7 +403,7 @@ Each alert includes: container name, container ID, host, failure type, timestamp
 
 ---
 
-## 10. Configuration Reference
+## 8. Configuration Reference
 
 All settings are in `watchdog-config.yaml`. No image rebuild is required for configuration changes — restart the watchdog container to apply updates:
 
@@ -436,7 +432,7 @@ environment:
 
 ---
 
-## 11. Lifecycle Management
+## 9. Lifecycle Management
 
 ### Stopping the Service
 
@@ -465,13 +461,12 @@ docker compose up -d
 docker build -t watchdog:latest .
 
 # Redeploy
-docker-compose up -d        # v1
 docker compose up -d        # v2
 ```
 
 ---
 
-## 12. How to Change Existing Settings
+## 10. How to Change Existing Settings
 
 No image rebuild is required for any configuration change. The type of change determines the required command:
 
@@ -485,16 +480,12 @@ No image rebuild is required for any configuration change. The type of change de
 
 ```bash
 docker compose restart docker-container-watchdog
-# or (v1 standalone)
-docker-compose restart docker-container-watchdog
 ```
 
 ### Apply .env changes (credentials / secrets)
 
 ```bash
 docker compose up -d
-# or (v1 standalone)
-docker-compose up -d
 ```
 
 ### Apply docker-compose.yaml changes (container settings)
@@ -561,7 +552,142 @@ Skips all confirmation prompts. Use in automated pipelines or when scripting rep
 
 ---
 
-## 13. Troubleshooting
+# 11. Upgrade Guide
+
+There are two ways to upgrade the Watchdog application.
+
+---
+
+## Option 1: Upgrade from Git Repository
+
+### 1. Stop the running container
+
+```bash
+docker compose down
+```
+
+### 2. Navigate to the project directory
+
+```bash
+cd Container_Alert
+```
+
+### 3. Download the latest source code
+
+> **Warning:** If you have local modifications that you don't want to keep, discard them before pulling.
+
+```bash
+git fetch origin
+git reset --hard origin/main
+```
+
+Alternatively, if you want to keep your local changes:
+
+```bash
+git pull origin main
+```
+
+### 4. Build the latest image
+
+```bash
+docker build -t watchdog:latest .
+```
+
+### 5. Start the updated container
+
+```bash
+docker compose up -d
+```
+
+### 6. Verify
+
+```bash
+docker ps
+docker logs watchdog
+```
+
+---
+
+## Option 2: Upgrade Using a Pre-built Docker Image
+
+If a newer image (`watchdog.tar.gz`) is provided:
+
+### 1. Stop the running container
+
+```bash
+docker compose down
+```
+
+### 2. Load the new image
+
+```bash
+gunzip -c watchdog.tar.gz | docker load
+```
+
+or
+
+```bash
+gzip -dc watchdog.tar.gz | docker load
+```
+
+### 3. Verify the image
+
+```bash
+docker images | grep watchdog
+```
+
+### 4. Start the updated container
+
+```bash
+docker compose up -d
+```
+
+### 5. Verify
+
+```bash
+docker ps
+docker logs watchdog
+```
+
+---
+
+# Automatic Upgrade
+
+Automatic upgrades are **not enabled** by default.
+
+To upgrade to a newer version, manually follow one of the methods above.
+
+If Watchdog is deployed using a private Docker registry, you can instead update by pulling the latest image:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+or
+
+```bash
+docker pull <registry>/watchdog:latest
+docker compose up -d
+```
+
+---
+
+# Checking the Installed Version
+
+View the running image:
+
+```bash
+docker inspect watchdog --format='{{.Config.Image}}'
+```
+
+View available images:
+
+```bash
+docker images watchdog
+```
+
+### 12. Troubleshooting
 
 ### Service Fails to Start
 

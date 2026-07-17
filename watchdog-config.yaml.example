@@ -10,10 +10,10 @@
 # ── Alert channels ────────────────────────────────────────────────────────────
 # Empty for local testing — alerts are still logged to stdout/file.
 alert_channels:
-  - slack
+  # - slack
   - smtp
   - syslog
-  - snmp_trap
+  # - snmp_trap
 
 # ── Watchdog behaviour ────────────────────────────────────────────────────────
 check_interval_seconds:     60    # how often to poll all containers
@@ -28,7 +28,7 @@ excluded_containers: []
 
 # Runbook URL — sent as-is in every alert
 runbook_base_url: 
-
+ 
 # ── Logging ───────────────────────────────────────────────────────────────────
 log_level: DEBUG    # DEBUG | INFO | WARNING | ERROR
 log_file: /var/log/watchdog/watchdog.log   # bind-mounted to ./watchdog/watchdog.log on host

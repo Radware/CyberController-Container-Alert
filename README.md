@@ -206,7 +206,7 @@ For full deployment instructions — including alert channel setup, offline inst
 **Quick start (automated):**
 
 ```bash
-sudo bash install.sh
+bash install.sh
 ```
 
 ---
@@ -491,7 +491,6 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 > **Verify what was actually cached after startup:**
 > ```bash
 > grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
 
 # Version History
 
