@@ -75,8 +75,8 @@ Open `.env` and fill in every value:
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 
 # SMTP (only if SMTP channel is enabled)
-SMTP_USERNAME=your-smtp-username-or-app-token
-SMTP_PASSWORD=your-smtp-password-or-app-token
+SMTP_USERNAME=your-smtp-username
+SMTP_PASSWORD=your-smtp-password
 
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO

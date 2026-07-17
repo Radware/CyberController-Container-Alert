@@ -281,8 +281,8 @@ configure_all() {
         SMTP_SENDER=$(_prompt     "Sender address"               "noc-alerts@radware.com")
         SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "ops-team@radware.com")
         SMTP_TLS=$(_prompt_yn     "Use TLS?"                     "yes")
-        SMTP_USERNAME=$(_prompt   "SMTP username / app token"    "")
-        SMTP_PASSWORD=$(_prompt_secret "SMTP password / app token")
+        SMTP_USERNAME=$(_prompt   "SMTP username"    "")
+        SMTP_PASSWORD=$(_prompt_secret "SMTP password")
         echo ""
     fi
 

@@ -497,6 +497,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
 | 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |
 | 1.0.0 | 2026-06-25 | Rahul Kumar | Added Slack notifications and bug fixes |
 
