@@ -16,7 +16,7 @@ version: "3.8"
 services:
 
   # ── Watchdog Agent ──────────────────────────────────────────────────────────
-  watchdog:
+  docker-container-watchdog:
     image: watchdog:latest   # pre-built image — does not require internet or build
     container_name: docker-container-watchdog
     restart: always          # always restart — watchdog must never stay down

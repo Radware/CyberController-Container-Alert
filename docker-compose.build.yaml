@@ -13,7 +13,7 @@ version: "3.8"
 
 services:
 
-  watchdog:
+  docker-container-watchdog:
     build:
       context: .
     image: watchdog:latest
