@@ -110,7 +110,10 @@ docker load -i watchdog.tar
 If `watchdog.tar` is absent, build the image from source (requires internet):
 
 ```bash
-docker build -t watchdog:latest .
+docker compose -f docker-compose.build.yaml build
+
+# equivalent — bypasses Compose entirely:
+# docker build -t watchdog:latest .
 ```
 
 #### 2. Configure Environment Variables
@@ -459,9 +462,9 @@ docker compose up -d
 
 ```bash
 # Rebuild the image (requires internet)
-docker build -t watchdog:latest .
+docker compose -f docker-compose.build.yaml build
 
-# Redeploy
+# Redeploy using the production runtime file
 docker compose up -d        # v2
 ```
 
