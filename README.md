@@ -372,11 +372,10 @@ With no exposed ports, auto-discovery skips HTTP and TCP and falls back to readi
 ```bash
 docker compose logs docker-container-watchdog
 ```
-
 Common causes:
 - **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
 - **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
-- **Image not loaded** — run `docker images watchdog`; if empty, build with `docker build -t watchdog:latest .`
+- **Image not loaded** — run `docker images watchdog`; if empty, build with `docker compose -f docker-compose.build.yaml build` (or `docker build -t watchdog:latest .` directly — see [DEPLOYMENT.md](DEPLOYMENT.md) for details)
 
 ### Alert Notifications Not Received
 
