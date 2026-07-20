@@ -107,13 +107,8 @@ If `watchdog.tar` is present (pre-built offline image):
 docker load -i watchdog.tar
 ```
 
-If `watchdog.tar` is absent, build the image from source (requires internet):
-
 ```bash
-docker compose -f docker-compose.build.yaml build
-
-# equivalent — bypasses Compose entirely:
-# docker build -t watchdog:latest .
+docker build -t watchdog:latest .
 ```
 
 #### 2. Configure Environment Variables
@@ -236,7 +231,7 @@ docker compose version
 
 ```bash
 docker ps --filter name=watchdog
-docker-compose logs -f docker-container-watchdog
+docker compose logs -f docker-container-watchdog
 ```
 
 ---
