@@ -15,10 +15,11 @@ The **CyberController Container Watchdog** is a lightweight, autonomous monitori
 7. [Testing](#testing)
 8. [Troubleshooting](#troubleshooting)
 9. [Container Probe Map](#container-probe-map)
+10. [Version History](#version-history)
 
 ---
 
-## How It Works
+## 1.How It Works
 
 The watchdog runs two parallel monitoring paths:
 
@@ -29,9 +30,9 @@ The watchdog runs two parallel monitoring paths:
 
 The watchdog selects one of **4 active probe types** per container, chosen automatically based on the container's configuration. Probe selection is cached for the container's lifetime and re-discovered on restart.
 
-1. **Docker HEALTHCHECK** *(passive)* — for containers that have a `HEALTHCHECK` directive in their Dockerfile. The watchdog reads the result from `container.attrs["State"]["Health"]` rather than running its own probe. When Docker reports `health_status: unhealthy` 3 consecutive times, an alert fires. The last health check output is included in the alert's Detection field.
+1. **Docker HEALTHCHECK** *(passive)* — for containers that have a `Docker HEALTHCHECK` directive in their Dockerfile. The watchdog reads the result from `container.attrs["State"]["Health"]` rather than running its own probe. When Docker reports `health_status: unhealthy` 3 consecutive times, an alert fires. The last health check output is included in the alert's Detection field.
 
-2. **HTTP GET** *(active)* — for containers with **no** `HEALTHCHECK` that expose HTTP ports. Auto-discovers a working endpoint by trying common paths (`/-/healthy`, `/health`, `/healthz`, `/metrics`, `/`) on each exposed internal port, and across all internal IPs when the container is attached to multiple Docker networks (configurable via `auto_health_check.paths` in `watchdog-config.yaml`). Returns healthy if `status_code < 500`. The discovered URL is cached for the container's lifetime.
+2. **HTTP GET** *(active)* — for containers with **no** `Docker HEALTHCHECK` that expose HTTP ports. Auto-discovers a working endpoint by trying common paths (`/-/healthy`, `/health`, `/healthz`, `/metrics`, `/`) on each exposed internal port, and across all internal IPs when the container is attached to multiple Docker networks (configurable via `auto_health_check.paths` in `watchdog-config.yaml`). Returns healthy if `status_code < 500`. The discovered URL is cached for the container's lifetime.
 
 3. **TCP connect** *(active)* — if no HTTP path responds on a port, falls back to a raw `socket.create_connection()` on that port. A successful connect confirms the service is listening; a refused or timed-out connection triggers an `unhealthy` alert. Used by databases, message brokers, and any non-HTTP service.
 
@@ -45,7 +46,7 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 
 ---
 
-## System Overview
+## 2.System Overview
 
 ### Project Structure
 
@@ -73,16 +74,18 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 | Running container (memory) | ~50–80 MB |
 | `watchdog.tar` export | ~170 MB |
 
-> These are approximate. Run `docker image ls watchdog` and `docker stats docker-container-watchdog` after deployment to see exact values on your host.
+> > **Note:** The values above are approximate and may vary depending on the host operating system, Docker version, and installed dependencies.
 
-### Dependencies
 
-```
+### Python Dependencies
+
+```text
 docker==7.1.0
 requests==2.32.3
 PyYAML==6.0.2
 pysnmp>=6.2
 ```
+
 
 > pysnmp 6.2+ uses the modern `pysnmp.hlapi.v3arch.asyncio` API. pysnmp 4.x is no longer supported — its synchronous generator API was removed in 5.x. `pyasn1` is a transitive dependency managed by pysnmp itself and no longer needs to be pinned separately.
 
@@ -90,7 +93,7 @@ Python 3.11+
 
 ---
 
-## Configuration
+## 3.Configuration
 
 All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, passwords) are stored in `.env` and never committed to version control. Restart the container after editing either file — no image rebuild is needed.
 
@@ -123,7 +126,7 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 
 ---
 
-## Supported Alert Channels
+## 4.Supported Alert Channels
 
 Configure at least one channel and add its identifier to `alert_channels` in `watchdog-config.yaml`. Multiple channels can be active simultaneously.
 
@@ -199,7 +202,7 @@ Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3
 
 ---
 
-## Deployment Instructions
+## 5.Deployment Instructions
 
 For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
@@ -211,7 +214,7 @@ bash install.sh
 
 ---
 
-## Failure Types & Severities
+## 6.Failure Types & Severities
 
 | Failure | Severity | Trigger |
 |---------|----------|---------|
@@ -240,7 +243,7 @@ Every alert includes two probe fields that identify exactly how and why the fail
 
 ---
 
-## Testing
+## 7.Testing
 
 The sections below describe optional manual tests that validate the watchdog's detection and alerting paths. Each creates a temporary Docker container and cleans up after itself.
 
@@ -362,14 +365,12 @@ With no exposed ports, auto-discovery skips HTTP and TCP and falls back to readi
 
 ---
 
-## Troubleshooting
+## 8.Troubleshooting
 
 ### Service Fails to Start
 
 ```bash
 docker compose logs docker-container-watchdog
-# or (v1 standalone)
-docker-compose logs docker-container-watchdog
 ```
 
 Common causes:
@@ -440,7 +441,7 @@ docker compose logs -f docker-container-watchdog
 
 ---
 
-## Container Probe Map (This Deployment)
+## 9.Container Probe Map (This Deployment)
 
 Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitored passively via events; all others get an active probe auto-discovered on the first poll and cached for the container's lifetime.
 
@@ -492,10 +493,11 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 > ```bash
 > grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
 
-# Version History
+## 10.Version History
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.3.0 | 2026-07-16 | Rahul Kumar | Added Upgrade Guide |
 | 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
 | 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |
 | 1.0.0 | 2026-06-25 | Rahul Kumar | Added Slack notifications and bug fixes |

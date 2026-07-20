@@ -18,7 +18,8 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 8. [Configuration Reference](#8-configuration-reference)
 9. [Lifecycle Management](#9-lifecycle-management)
 10. [How to Change Existing Settings](#10-how-to-change-existing-settings)
-11. [Troubleshooting](#11-troubleshooting)
+11. [Upgrade Guide](#11-upgrade-guide)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -35,7 +36,7 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 > docker compose version   # v2 plugin — "Docker Compose version v2.x.x"
 > ```
 
-> **Alert channels:** At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`. See [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels).
+
 
 
 ---
@@ -66,6 +67,8 @@ Container_Alert/
 
 Run the installer from the `Container_Alert/` directory. It guides you through every step interactively and requires no manual file editing.
 
+> Note : clone the repository first and then run installer
+
 > **Before running:** ensure `watchdog.tar` (the pre-built Docker image) is present in the same directory as `install.sh`. If it is missing the installer will offer to build the image from source (requires internet access).
 
 ```bash
@@ -94,6 +97,8 @@ The script walks through the following stages in order:
 
 Use this path when you need full control over configuration files before starting.
 
+> **alert channels:** At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`. See [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels).
+
 #### 1. Load the Docker image
 
 If `watchdog.tar` is present (pre-built offline image):
@@ -108,15 +113,7 @@ If `watchdog.tar` is absent, build the image from source (requires internet):
 docker build -t watchdog:latest .
 ```
 
-#### 2. Create and secure the secrets file
-
-```bash
-cp .env.example .env
-chmod 600 .env
-```
-
-Open `.env` and fill in the credentials for your chosen alert channel(s).
-## 3. Configure Environment Variables
+#### 2. Configure Environment Variables
 
 ```bash
 cp .env.example .env
@@ -130,15 +127,15 @@ Open `.env` and fill in every value:
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 
 # SMTP (only if SMTP channel is enabled)
-SMTP_USERNAME=your-smtp-username
-SMTP_PASSWORD=your-smtp-password
+SMTP_USERNAME/login email=your-smtp-username
+SMTP_PASSWORD/key value=your-smtp-password
 
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO
 ```
 ---
 
-## 4. Configure the Watchdog
+#### 3. Configure the Watchdog
 
 ### Alert Channels
 
@@ -150,7 +147,7 @@ LOG_LEVEL=INFO
 | Email (SMTP) | `smtp` | SMTP relay and credentials |
 | SNMP Traps | `snmp_trap` | SNMP trap receiver (NMS / SIEM) |
 
-> For step-by-step setup of each channel, see [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels).
+
 
 ### Configuration File (watchdog-config.yaml)
 
@@ -177,19 +174,19 @@ slack:
 
 ---
 
-#### 5. Configure the watchdog
+#### 4. Configure the watchdog
 
 Edit `watchdog-config.yaml` — set `alert_channels`, thresholds, and any channel-specific blocks (see [How to Set Up Communication Channels](#5-how-to-set-up-communication-channels)).
 
 # instruction : clone the repository first and then run installer
 
-#### 6. Start the container
+#### 5. Start the container
 
 ```bash
 docker compose up -d
 ```
 
-#### 7. Verify
+#### 6. Verify
 
 ```bash
 docker compose ps
@@ -209,7 +206,7 @@ docker-container-watchdog   Up (healthy)
 
 Use this when the target host has no internet access. Ensure `watchdog.tar` has already been transferred to the host before proceeding.
 
-#### Step 1 — Load the image
+#### 1 — Load the image
 
 ```bash
 docker load -i watchdog.tar
@@ -222,14 +219,17 @@ docker images watchdog
 # Expected: watchdog   latest   <id>   <size>
 ```
 
-#### Step 2 — Start the container
+#### 2 — Start the container
 
 ```bash
-# v2 plugin
 docker compose up -d
 ```
 
-#### Step 3 — Verify
+```bash
+docker compose version
+```
+
+#### 3 — verify
 
 ```bash
 docker ps --filter name=watchdog
@@ -269,6 +269,7 @@ Within 60 seconds (or immediately via the event listener) you should receive an 
 ## 5. How to Set Up Communication Channels
 
 For each channel you want to use, follow the relevant option below. Ensure its identifier is listed under `alert_channels` in `watchdog-config.yaml`.
+
 
 ### Option A — Slack Webhook
 
@@ -500,7 +501,7 @@ environment:
 Then redeploy to take effect:
 
 ```bash
-docker compose up -d
+docker compose up -d 
 ```
 
 ---
@@ -552,73 +553,93 @@ Skips all confirmation prompts. Use in automated pipelines or when scripting rep
 
 ---
 
-# 11. Upgrade Guide
+## 11. Upgrade Guide
 
 There are two ways to upgrade the Watchdog application.
 
 ---
 
-## Option 1: Upgrade from Git Repository
+### Before You Begin (Recommended)
 
-### 1. Stop the running container
+Backup your deployment-specific configuration files before upgrading.
+
+```bash
+mkdir -p backup
+
+cp .env backup/.env.bak
+cp watchdog-config.yaml backup/watchdog-config.yaml.bak
+```
+
+To restore the configuration later (if required):
+
+```bash
+cp backup/.env.bak .env
+cp backup/watchdog-config.yaml.bak watchdog-config.yaml
+```
+
+---
+
+### Option 1: Upgrade from Git Repository
+
+#### 1. Stop the running container
 
 ```bash
 docker compose down
 ```
 
-### 2. Navigate to the project directory
+#### 2. Navigate to the project directory
 
 ```bash
 cd Container_Alert
 ```
 
-### 3. Download the latest source code
+#### 3. Download the latest source code
 
-> **Warning:** If you have local modifications that you don't want to keep, discard them before pulling.
+If you do **not** want to keep any local changes:
 
 ```bash
 git fetch origin
 git reset --hard origin/main
 ```
 
-Alternatively, if you want to keep your local changes:
+If you want to keep your local commits:
 
 ```bash
 git pull origin main
 ```
 
-### 4. Build the latest image
+#### 4. Build the latest image
 
 ```bash
 docker build -t watchdog:latest .
 ```
 
-### 5. Start the updated container
+#### 5. Start the updated container
 
 ```bash
 docker compose up -d
 ```
 
-### 6. Verify
+#### 6. Verify
 
 ```bash
 docker ps
-docker logs watchdog
+docker compose logs docker-container-watchdog
 ```
 
 ---
 
-## Option 2: Upgrade Using a Pre-built Docker Image
+### Option 2: Upgrade Using a Pre-built Docker Image
 
 If a newer image (`watchdog.tar.gz`) is provided:
 
-### 1. Stop the running container
+#### 1. Stop the running container
 
 ```bash
 docker compose down
 ```
 
-### 2. Load the new image
+#### 2. Load the new image
 
 ```bash
 gunzip -c watchdog.tar.gz | docker load
@@ -630,34 +651,34 @@ or
 gzip -dc watchdog.tar.gz | docker load
 ```
 
-### 3. Verify the image
+#### 3. Verify the image
 
 ```bash
-docker images | grep watchdog
+docker images watchdog
 ```
 
-### 4. Start the updated container
+#### 4. Start the updated container
 
 ```bash
 docker compose up -d
 ```
 
-### 5. Verify
+#### 5. Verify
 
 ```bash
 docker ps
-docker logs watchdog
+docker compose logs docker-container-watchdog
 ```
 
 ---
 
-# Automatic Upgrade
+### Automatic Upgrade
 
 Automatic upgrades are **not enabled** by default.
 
-To upgrade to a newer version, manually follow one of the methods above.
+Upgrade the application manually using one of the methods above.
 
-If Watchdog is deployed using a private Docker registry, you can instead update by pulling the latest image:
+If Watchdog is deployed from a private Docker registry, you can update by pulling the latest image:
 
 ```bash
 docker compose pull
@@ -673,21 +694,21 @@ docker compose up -d
 
 ---
 
-# Checking the Installed Version
+### Checking the Installed Version
 
-View the running image:
+View the image used by the running container:
 
 ```bash
-docker inspect watchdog --format='{{.Config.Image}}'
+docker inspect docker-container-watchdog --format='{{.Config.Image}}'
 ```
 
-View available images:
+View locally available Watchdog images:
 
 ```bash
 docker images watchdog
 ```
 
-### 12. Troubleshooting
+## 12. Troubleshooting
 
 ### Service Fails to Start
 
