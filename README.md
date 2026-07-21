@@ -117,8 +117,8 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `SLACK_WEBHOOK_URL` | Yes (if Slack enabled) | Slack incoming webhook URL |
-| `SMTP_USERNAME` | Yes (if SMTP enabled) | SMTP username or app token used for login |
-| `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or app token |
+| `SMTP_USERNAME` | Yes (if SMTP enabled) | SMTP username or login email used for login |
+| `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or api key value |
 | `SNMP_V3_AUTH_KEY` | Yes (if SNMPv3 enabled) | SNMPv3 authentication passphrase — minimum 8 characters (RFC 3414) |
 | `SNMP_V3_PRIV_KEY` | Yes (if SNMPv3 authPriv) | SNMPv3 privacy passphrase — minimum 8 characters; requires auth key also set |
 | `WATCHDOG_CONFIG` | No | Path to config file (default: `/etc/watchdog/watchdog-config.yaml`) |
@@ -161,7 +161,7 @@ smtp:
   host: smtp.radware.com
   port: 587
   sender: noc-alerts@radware.com
-  username_env: SMTP_USERNAME        # env var: SMTP username or app token
+  username_env: SMTP_USERNAME     # env var: SMTP username or app token
   recipients:
     - ops-team@radware.com
     - oncall@radware.com

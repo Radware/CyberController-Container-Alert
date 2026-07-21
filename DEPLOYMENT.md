@@ -69,7 +69,7 @@ Run the installer from the `Container_Alert/` directory. It guides you through e
 
 > Note : clone the repository first and then run installer
 
-> **Before running:** ensure `watchdog.tar` (the pre-built Docker image) is present in the same directory as `install.sh`. If it is missing the installer will offer to build the image from source (requires internet access).
+> **Before running:** If internet access is available, no additional steps are required as the installer will automatically build the Docker image from source; otherwise, download the pre-built Docker image archive, watchdog.tar(https://radwareil.sharepoint.com/:f:/s/NAResidentEngineers/IgC4d3ALtPwvSrz4is6QWmnPATRCQ7g6BXbnbWO3Q0FFMSk?e=oj4WGS), from  and place it in the same directory as install.sh before starting the installation.
 
 ```bash
 cd /path/to/Container_Alert
@@ -102,6 +102,7 @@ Use this path when you need full control over configuration files before startin
 #### 1. Load the Docker image
 
 If `watchdog.tar` is present (pre-built offline image):
+(https://radwareil.sharepoint.com/:f:/s/NAResidentEngineers/IgC4d3ALtPwvSrz4is6QWmnPATRCQ7g6BXbnbWO3Q0FFMSk?e=oj4WGS)
 
 ```bash
 docker load -i watchdog.tar
@@ -460,7 +461,7 @@ docker compose up -d
 docker compose -f docker-compose.build.yaml build
 
 # Redeploy using the production runtime file
-docker compose up -d        # v2
+docker compose up -d        
 ```
 
 ---
@@ -579,6 +580,8 @@ cp backup/watchdog-config.yaml.bak watchdog-config.yaml
 
 ### Option 1: Upgrade from Git Repository
 
+#### Note : Requires internet connectivity
+
 #### 1. Stop the running container
 
 ```bash
@@ -609,7 +612,7 @@ git pull origin main
 #### 4. Build the latest image
 
 ```bash
-docker build -t watchdog:latest .
+docker compose -f docker-compose.build.yaml build
 ```
 
 #### 5. Start the updated container
@@ -627,46 +630,9 @@ docker compose logs docker-container-watchdog
 
 ---
 
-### Option 2: Upgrade Using a Pre-built Docker Image
+### Option 2: Redeploy the Application(offline)
 
-If a newer image (`watchdog.tar.gz`) is provided:
-
-#### 1. Stop the running container
-
-```bash
-docker compose down
-```
-
-#### 2. Load the new image
-
-```bash
-gunzip -c watchdog.tar.gz | docker load
-```
-
-or
-
-```bash
-gzip -dc watchdog.tar.gz | docker load
-```
-
-#### 3. Verify the image
-
-```bash
-docker images watchdog
-```
-
-#### 4. Start the updated container
-
-```bash
-docker compose up -d
-```
-
-#### 5. Verify
-
-```bash
-docker ps
-docker compose logs docker-container-watchdog
-```
+#### You can either obtain the latest archive from the RE team or download it directly from GitHub (https://github.com/Radware/CyberController-Container-Alert.git). Replace the existing files in the application directory, uninstall the current version, and then follow the standard deployment procedure to redeploy the application(#3-install-and-deploy).
 
 ---
 

@@ -282,7 +282,7 @@ configure_all() {
         SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "ops-team@radware.com")
         SMTP_TLS=$(_prompt_yn     "Use TLS?"                     "yes")
         SMTP_USERNAME=$(_prompt   "SMTP username / login email"    "")
-        SMTP_PASSWORD=$(_prompt_secret "SMTP password / key value")
+        SMTP_PASSWORD=$(_prompt_secret "SMTP password / api key value")
         echo ""
     fi
 
