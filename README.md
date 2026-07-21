@@ -6,20 +6,36 @@ The **CyberController Container Watchdog** is a lightweight, autonomous monitori
 
 ## Table of Contents
 
-1. [How It Works](#how-it-works)
-2. [System Overview](#system-overview)
-3. [Configuration](#configuration)
-4. [Supported Alert Channels](#supported-alert-channels)
-5. [Deployment Instructions](#deployment-instructions)
-6. [Failure Types & Severities](#failure-types--severities)
-7. [Testing](#testing)
-8. [Troubleshooting](#troubleshooting)
-9. [Container Probe Map](#container-probe-map)
-10. [Version History](#version-history)
+1. [How It Works](#1-how-it-works)
+2. [System Overview](#2-system-overview)
+   - [Project Structure](#project-structure)
+   - [Image Size](#image-size)
+   - [Python Dependencies](#python-dependencies)
+3. [Configuration](#3-configuration)
+   - [Configuration Keys](#configuration-keys)
+   - [Environment Variables](#environment-variables)
+4. [Supported Alert Channels](#4-supported-alert-channels)
+   - [Slack](#slack)
+   - [Syslog](#syslog)
+   - [SMTP (Email)](#smtp-email)
+   - [SNMP Traps](#snmp-traps)
+5. [Deployment Instructions](#5-deployment-instructions)
+6. [Failure Types & Severities](#6-failure-types--severities)
+7. [Testing](#7-testing)
+   - [OOM Simulation](#oom-simulation)
+   - [Probe Testing](#probe-testing)
+8. [Troubleshooting](#8-troubleshooting)
+   - [Service Fails to Start](#service-fails-to-start)
+   - [Alert Notifications Not Received](#alert-notifications-not-received)
+   - [Duplicate and Excessive Alert Notifications](#duplicate-and-excessive-alert-notifications)
+   - [Probe Type Not as Expected](#probe-type-not-as-expected)
+   - [Viewing Logs](#viewing-logs)
+9. [Container Probe Map (This Deployment)](#9-container-probe-map-this-deployment)
+10. [Version History](#10-version-history)
 
 ---
 
-## 1.How It Works
+## 1. How It Works
 
 The watchdog runs two parallel monitoring paths:
 
@@ -46,7 +62,7 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 
 ---
 
-## 2.System Overview
+## 2. System Overview
 
 ### Project Structure
 
@@ -74,7 +90,7 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 | Running container (memory) | ~50–80 MB |
 | `watchdog.tar` export | ~170 MB |
 
-> > **Note:** The values above are approximate and may vary depending on the host operating system, Docker version, and installed dependencies.
+> **Note:** The values above are approximate and may vary depending on the host operating system, Docker version, and installed dependencies.
 
 
 ### Python Dependencies
@@ -89,15 +105,15 @@ pysnmp>=6.2
 
 > pysnmp 6.2+ uses the modern `pysnmp.hlapi.v3arch.asyncio` API. pysnmp 4.x is no longer supported — its synchronous generator API was removed in 5.x. `pyasn1` is a transitive dependency managed by pysnmp itself and no longer needs to be pinned separately.
 
-Python 3.11+
+**Runtime (in container):** Python 3.11+
 
 ---
 
-## 3.Configuration
+## 3. Configuration
 
 All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, passwords) are stored in `.env` and never committed to version control. Restart the container after editing either file — no image rebuild is needed.
 
-### Configuration File (watchdog-config.yaml)
+### Configuration Keys
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -126,7 +142,7 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 
 ---
 
-## 4.Supported Alert Channels
+## 4. Supported Alert Channels
 
 Configure at least one channel and add its identifier to `alert_channels` in `watchdog-config.yaml`. Multiple channels can be active simultaneously.
 
@@ -202,7 +218,7 @@ Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3
 
 ---
 
-## 5.Deployment Instructions
+## 5. Deployment Instructions
 
 For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
 
@@ -214,7 +230,7 @@ bash install.sh
 
 ---
 
-## 6.Failure Types & Severities
+## 6. Failure Types & Severities
 
 | Failure | Severity | Trigger |
 |---------|----------|---------|
@@ -243,7 +259,7 @@ Every alert includes two probe fields that identify exactly how and why the fail
 
 ---
 
-## 7.Testing
+## 7. Testing
 
 The sections below describe optional manual tests that validate the watchdog's detection and alerting paths. Each creates a temporary Docker container and cleans up after itself.
 
@@ -292,9 +308,9 @@ Docker kills the container with exit code `137` and emits an `oom` event. The wa
 
 ---
 
-### Probe Testing *(Optional — requires internet access)*
+### Probe Testing
 
-> These tests pull images from Docker Hub and create temporary containers on the host.
+> **Optional — requires internet access.** These tests pull images from Docker Hub and create temporary containers on the host.
 > Each section includes full cleanup instructions (container + image).
 
 #### HTTP Probe
@@ -365,13 +381,14 @@ With no exposed ports, auto-discovery skips HTTP and TCP and falls back to readi
 
 ---
 
-## 8.Troubleshooting
+## 8. Troubleshooting
 
 ### Service Fails to Start
 
 ```bash
 docker compose logs docker-container-watchdog
 ```
+
 Common causes:
 - **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
 - **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
@@ -440,7 +457,7 @@ docker compose logs -f docker-container-watchdog
 
 ---
 
-## 9.Container Probe Map (This Deployment)
+## 9. Container Probe Map (This Deployment)
 
 Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitored passively via events; all others get an active probe auto-discovered on the first poll and cached for the container's lifetime.
 
@@ -491,14 +508,14 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 > **Verify what was actually cached after startup:**
 > ```bash
 > grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+> ```
 
-## 10.Version History
+## 10. Version History
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.3.1 | 2026-07-21 | Egor Egorov | Updated Readme and Deployment guides |
 | 1.3.0 | 2026-07-16 | Rahul Kumar | Added Upgrade Guide |
 | 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
 | 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |
 | 1.0.0 | 2026-06-25 | Rahul Kumar | Added Slack notifications and bug fixes |
-
-> ```

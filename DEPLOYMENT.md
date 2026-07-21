@@ -9,126 +9,92 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)
-2. [Repository Structure](#2-repository-structure)
-3. [Install and Deploy](#3-install-and-deploy)
-4. [Logs](#4-logs)
-5. [Configuration Reference](#5-configuration-reference)
-6. [Lifecycle Management](#6-lifecycle-management)
-7. [How to Change Existing Settings](#7-how-to-change-existing-settings)
-8. [Uninstalling](#8-uninstalling)
-9. [Upgrade Guide](#9-upgrade-guide)
-10. [Troubleshooting](#10-troubleshooting)
+   - [1.1 Pre-flight Checks](#11-pre-flight-checks)
+2. [Environment Setup](#2-environment-setup)
+   - [2.1 Clone the Repository](#21-clone-the-repository)
+   - [2.2 Configure Environment Variables (.env)](#22-configure-environment-variables-env)
+   - [2.3 Configure Watchdog Global Settings](#23-configure-watchdog-global-settings)
+   - [2.4 Configure Alert Channels](#24-configure-alert-channels)
+3. [Deployment Steps](#3-deployment-steps)
+   - [3.1 Option A: Automated Installation (install.sh) (Recommended)](#31-option-a-automated-installation-installsh-recommended)
+   - [3.2 Option B: Manual Installation](#32-option-b-manual-installation)
+4. [Verification](#4-verification)
+   - [4.1 Confirm Container Status and Health](#41-confirm-container-status-and-health)
+   - [4.2 Reviewing Logs](#42-reviewing-logs)
+5. [Rollback](#5-rollback)
+   - [5.1 Roll Back a Failed Deployment](#51-roll-back-a-failed-deployment)
+   - [5.2 Roll Back an Image Upgrade](#52-roll-back-an-image-upgrade)
+   - [5.3 Roll Back an Application Upgrade (Git)](#53-roll-back-an-application-upgrade-git)
+6. [Operations and Maintenance](#6-operations-and-maintenance)
+   - [6.1 Lifecycle Management](#61-lifecycle-management)
+   - [6.2 Applying Configuration Changes](#62-applying-configuration-changes)
+   - [6.3 Upgrade Guide](#63-upgrade-guide)
+   - [6.4 Uninstalling](#64-uninstalling)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Appendix and Reference](#8-appendix-and-reference)
+   - [8.1 Repository Structure](#81-repository-structure)
+   - [8.2 Configuration Reference](#82-configuration-reference)
+   - [8.3 SNMP Trap Var-Binds](#83-snmp-trap-var-binds)
+   - [8.4 Support Contacts](#84-support-contacts)
 
 ---
 
 ## 1. Prerequisites
 
-| Requirement | Minimum Version |
+| Requirement | Minimum Version / Notes |
 |---|---|
 | Docker Engine | 20.10+ |
-| Docker Compose plugin **or** standalone | v2 plugin (`docker compose`)
-| Linux host (for Docker socket) | Ubuntu 20.04 / RHEL 8 or later |
-
-
-```bash
-docker compose version  
-```
----
-
-## 2. Repository Structure
-
-```
-Container_Alert/
-├── docker-compose.yaml        # Production stack — uses pre-built image
-├── docker-compose.build.yaml  # Developer build stack — requires internet
-├── Dockerfile                 # Watchdog image definition
-├── requirements-watchdog.txt  # Python deps: docker, requests, PyYAML
-├── watchdog.py                # Watchdog agent
-├── watchdog-config.yaml       # Watchdog behaviour & channel settings
-├── install.sh                 # Install helper script
-├── uninstall.sh               # Uninstall helper script
-├── README.md                  # Quick-start reference
-└── .env.example               # Template — copy to .env and fill in
-```
-
----
-
-
-
-## 3. Install and Deploy
-
-### Option A — Automated installation with `install.sh` (recommended)
-
-#### 1. Clone the repository 
-```bash
-cd /path/to/Container_Alert
-git clone https://github.com/Radware/CyberController-Container-Alert
-```
-#### 2. Run the installer from the `Container_Alert/` directory. It guides you through every step interactively and requires no manual file editing.
-
-> **Before running:** If internet access is available, no additional steps are required as the installer will automatically build the Docker image from source; otherwise, download the pre-built Docker image archive [watchdog.tar](https://radwareil.sharepoint.com/:f:/s/NAResidentEngineers/IgC4d3ALtPwvSrz4is6QWmnPATRCQ7g6BXbnbWO3Q0FFMSk?e=oj4WGS) and place it in the same directory as install.sh before starting the installation.
+| Docker Compose | v2 plugin (`docker compose`) or standalone `docker-compose` |
+| Linux host | Ubuntu 20.04 / RHEL 8 or later (required for Docker socket access) |
+| Git | Required to clone the repository |
+| Host permissions | Root, or membership in the `docker` group (to read `/var/run/docker.sock`) |
 
 ```bash
-bash install.sh
+docker compose version
 ```
 
-The script walks through the following stages in order:
+### 1.1 Pre-flight Checks
 
-| Stage | What happens |
-|---|---|
-| **Prerequisites** | Verifies Docker and Docker Compose are installed and running |
-| **Log directory** | Creates `./watchdog/` for persistent log storage |
-| **Load image** | Loads `watchdog.tar` into Docker (`watchdog:latest`); builds from source if archive is absent |
-| **Host identification** | `WATCHDOG_HOST` is hardcoded to `CyberController-Server` in `docker-compose.yaml` |
-| **Configuration wizard** | Selects channels and prompts for Slack/SMTP/SNMP/Syslog values interactively |
-| **Credentials + config write** | Generates/updates `.env` and `watchdog-config.yaml` from wizard answers |
-| **Start** | Runs `docker compose up -d` in the background |
-| **Verify** | Checks the container is running and prints a summary with common commands |
+Run these checks before starting the deployment. Do not proceed if any of them fail.
 
-> **Re-running `install.sh` on an existing installation is safe.** If configuration files already exist, the installer asks whether to reconfigure from scratch. Choose `N` to keep existing files unchanged.
+```bash
+# Docker daemon is running and reachable
+docker info
+
+# Current user can talk to the Docker socket without sudo
+docker ps
+
+# Compose plugin is installed
+docker compose version
+
+# Sufficient free disk space for the image and log files
+df -h .
+```
+
+Image and container size is documented in [README.md § Image Size](README.md#image-size).
+
+If you plan to use an alert channel that requires outbound network access (Slack webhook, SMTP relay, or SNMP trap receiver), confirm the host can reach that endpoint before deployment.
+
+> Repository layout is documented in [8.1 Repository Structure](#81-repository-structure).
 
 ---
 
-### Option B — Manual installation
+## 2. Environment Setup
 
-Use this path when you need full control over configuration files before starting.
-This procedure (Option B) is optional, skip this if you completed option A.
+> If you plan to use the automated installer ([3.1 Option A: Automated Installation (install.sh)](#31-option-a-automated-installation-installsh-recommended), recommended), the configuration wizard creates `.env` and `watchdog-config.yaml` for you interactively — you may skip 2.2–2.4 and go directly to [3. Deployment Steps](#3-deployment-steps). Complete 2.2–2.4 only if you are installing manually ([3.2 Option B: Manual Installation](#32-option-b-manual-installation)) or want to pre-stage configuration before running the installer.
 
-#### Online Installation
-
-*Note* - If internet access is available proceed to step 1 and 2(skip steps 3 and 4).
-
-#### 1. Clone the repository 
-```bash
-cd /path/to/Container_Alert
-git clone https://github.com/Radware/CyberController-Container-Alert
-```
-#### 2. Build the image (requires internet)
-```bash
-docker compose -f docker-compose.build.yaml build
-```
-#### Offline Installation
-
-*Note* - If internet access is unavailable proceed to step 3 and 4(skip steps 1 and 2).
-
-#### 3. Manually Download the repository and upload to your local path.
-
-Download repository: https://github.com/Radware/CyberController-Container-Alert
-Upload to: /path/to/Container_Alert
-
-#### 4. Load the Docker image
-
-Download [`watchdog.tar`- pre-built Docker image for offline installation](https://radwareil.sharepoint.com/:f:/s/NAResidentEngineers/IgC4d3ALtPwvSrz4is6QWmnPATRCQ7g6BXbnbWO3Q0FFMSk?e=oj4WGS):
-
-> **Note:** If you have trouble accessing the download link, contact:
-> - rahulku@radware.com
-> - Egore@radware.com
-> - northamericare@radware.com
+### 2.1 Clone the Repository
 
 ```bash
-docker load -i watchdog.tar
+git clone https://github.com/Radware/CyberController-Container-Alert Container_Alert
+cd Container_Alert
 ```
-#### 5. Configure Environment Variables
+
+All remaining commands in this guide are run from inside the `Container_Alert/` directory.
+
+---
+
+### 2.2 Configure Environment Variables (.env)
 
 ```bash
 cp .env.example .env
@@ -148,22 +114,12 @@ SMTP_PASSWORD=your-smtp-password/api key value
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO
 ```
+
+Only credentials and secrets belong in `.env`. Hosts, ports, recipients, and thresholds are configured in `watchdog-config.yaml`, never hardcoded in this guide or in scripts.
+
 ---
 
-#### 6. Configure the Alert Channel/s
-
-| Channel | `alert_channels` identifier | What you need |
-|---|---|---|
-| Slack Webhook | `slack` | Slack incoming webhook URL |
-| Syslog | `syslog` | Syslog server reachable from the Docker host |
-| Email (SMTP) | `smtp` | SMTP relay and credentials |
-| SNMP Traps | `snmp_trap` | SNMP trap receiver (NMS / SIEM) |
-
- At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`.
-
-For each channel you want to use, follow the relevant option below. Ensure its identifier is listed under `alert_channels` in `watchdog-config.yaml`.
-
-#### Configure the Watchdog global settings
+### 2.3 Configure Watchdog Global Settings
 
 ```yaml
 # ── Watchdog global settings ────────────────────────────────────────────────────────
@@ -176,11 +132,23 @@ unhealthy_cycles_threshold: 3   # consecutive unhealthy polls before alert
 excluded_containers:
   - debug-shell                 # add any containers you don't want monitored
 ```
-### Configuration File (watchdog-config.yaml)
 
+---
 
+### 2.4 Configure Alert Channels
 
-### Option A — Slack Webhook
+| Channel | `alert_channels` identifier | What you need |
+|---|---|---|
+| Slack Webhook | `slack` | Slack incoming webhook URL |
+| Syslog | `syslog` | Syslog server reachable from the Docker host |
+| Email (SMTP) | `smtp` | SMTP relay and credentials |
+| SNMP Traps | `snmp_trap` | SNMP trap receiver (NMS / SIEM) |
+
+At least one communication channel must be configured before the watchdog can send alerts. Choose from Slack, SMTP, SNMP Trap, or Syslog, then obtain the required credentials or endpoint details for your chosen channel(s) and configure them in `watchdog-config.yaml` and `.env`.
+
+For each channel you want to use, follow the relevant option below. Ensure its identifier is listed under `alert_channels` in `watchdog-config.yaml`.
+
+#### 2.4.1 Slack Webhook
 
 1. Go to [https://api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
 2. Name it `Container Watchdog`, select your workspace
@@ -191,21 +159,19 @@ excluded_containers:
 
 Edit `watchdog-config.yaml` to match your environment:
 ```yaml
-# ── Alert channels ────────────────────────────────────────────────────────────
-# Empty for local testing — alerts are still logged to stdout/file.
-alert_channels:
-  - slack
-
 # ── Slack ─────────────────────────────────────────────────────────────────────
 slack:
   enabled: true                        # set to true to enable
   webhook_url_env: SLACK_WEBHOOK_URL   # env var: https://hooks.slack.com/services/...
 
+# ── Alert channels ────────────────────────────────────────────────────────────
+# Empty for local testing — alerts are still logged to stdout/file.
+alert_channels:
+  - slack
 ```
----
 
 
-### Option B — Syslog Forwarding
+#### 2.4.2 Syslog Forwarding
 
 Enable the syslog block in `watchdog-config.yaml`:
 
@@ -226,7 +192,7 @@ alert_channels:
 
 ---
 
-### Option C — SMTP (Email)
+#### 2.4.3 SMTP (Email)
 
 Add `smtp` to `alert_channels` in `watchdog-config.yaml` and configure the block:
 
@@ -260,7 +226,7 @@ SMTP_PASSWORD=your-smtp-password/ api key value
 
 ---
 
-### Option D — SNMP Traps
+#### 2.4.4 SNMP Traps
 
 Add `snmp_trap` to `alert_channels` in `watchdog-config.yaml` and configure the block:
 
@@ -293,32 +259,78 @@ alert_channels:
   - snmp_trap
 ```
 
-**Trap var-binds (enterprise OID arc `1.3.6.1.4.1.89.110`):**
+> **Security note:** `public` is the well-known default SNMPv1/v2c community string and provides no real access control — anyone who can reach the trap receiver on UDP/162 with that string can be trusted implicitly. Change it to a non-default value, restrict network access to the trap receiver, or use SNMPv3 with authentication and encryption for production deployments.
 
-| OID | Object | Value |
-|-----|--------|-------|
-| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
-| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
-| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` |
-| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
-
-**SNMPv3 notes:**
-
-- **Engine ID:** On the first run the watchdog logs an auto-stable engine ID derived from the hostname (look for `SNMP engine ID: 0x...` in the logs). Copy it into `v3_local_engine_id` and register it in `snmptrapd.conf` with `createUser -e 0x<id> watchdog-user SHA "..." AES "..."`. This keeps the ID stable across container restarts.
-- **Key length:** Both auth and priv passphrases must be at least 8 characters (RFC 3414 §11.2). The watchdog rejects shorter keys with a clear error.
-- **No privacy-only mode:** Setting a priv key without an auth key is rejected — SNMPv3 has no `privNoAuth` security level. Both keys must be set together for encrypted traps.
-- **Protocol names:** Auth: `MD5`, `SHA`, `SHA256`, `SHA384`, `SHA512`. Priv: `AES` (AES-128, recommended), `AES192`, `AES256`, `DES` (weak — logs a warning). An unrecognised name is rejected with an error listing the supported values.
+Trap var-binds and SNMPv3 setup notes are documented in [8.3 SNMP Trap Var-Binds](#83-snmp-trap-var-binds).
 
 ---
 
-#### 7. Start the container
+## 3. Deployment Steps
+
+### 3.1 Option A: Automated Installation (install.sh) (Recommended)
+
+Run the installer from the `Container_Alert/` directory created in [2.1 Clone the Repository](#21-clone-the-repository). It guides you through every step interactively — including environment and alert-channel configuration — and requires no manual file editing.
+
+> **Before running:** If internet access is available, no additional steps are required as the installer will automatically build the Docker image from source; otherwise, download the pre-built Docker image archive [watchdog.tar](https://radwareil.sharepoint.com/:f:/s/NAResidentEngineers/IgC4d3ALtPwvSrz4is6QWmnPATRCQ7g6BXbnbWO3Q0FFMSk?e=oj4WGS) and place it in the same directory as install.sh before starting the installation.
+If you have trouble accessing the download link, see [8.4 Support Contacts](#84-support-contacts).
+
+```bash
+bash install.sh
+```
+
+The script walks through the following stages in order:
+
+| Stage | What happens |
+|---|---|
+| **Prerequisites** | Verifies Docker and Docker Compose are installed and running |
+| **Log directory** | Creates `./watchdog/` for persistent log storage |
+| **Load image** | Loads `watchdog.tar` into Docker (`watchdog:latest`); builds from source if archive is absent |
+| **Host identification** | `WATCHDOG_HOST` is hardcoded to `CyberController-Server` in `docker-compose.yaml` |
+| **Configuration wizard** | Selects channels and prompts for Slack/SMTP/SNMP/Syslog values interactively |
+| **Credentials + config write** | Generates/updates `.env` and `watchdog-config.yaml` from wizard answers |
+| **Start** | Runs `docker compose up -d` in the background |
+| **Verify** | Checks the container is running and prints a summary with common commands |
+
+> **Re-running `install.sh` on an existing installation is safe.** If configuration files already exist, the installer asks whether to reconfigure from scratch. Choose `N` to keep existing files unchanged.
+
+Continue to [4. Verification](#4-verification).
+
+---
+
+### 3.2 Option B: Manual Installation
+
+Use this path when you need full control over configuration files before starting. This procedure is optional — skip it if you completed Option A. It assumes you already completed [2.1 Clone the Repository](#21-clone-the-repository) and [2.2–2.4 Environment Setup](#2-environment-setup).
+
+#### Online Installation
+
+*Note* - If internet access is available, build the image and skip to [Start the container](#start-the-container) below.
+
+```bash
+docker compose -f docker-compose.build.yaml build
+```
+
+#### Offline Installation
+
+*Note* - If internet access is unavailable, load the pre-built image instead of building it.
+
+Download [`watchdog.tar` — pre-built Docker image for offline installation](https://radwareil.sharepoint.com/:f:/s/NAResidentEngineers/IgC4d3ALtPwvSrz4is6QWmnPATRCQ7g6BXbnbWO3Q0FFMSk?e=oj4WGS). If you have trouble accessing the download link, see [8.4 Support Contacts](#84-support-contacts).
+```bash
+docker load -i watchdog.tar
+```
+
+#### Start the container
 
 ```bash
 docker compose up -d
 ```
 
-#### 8. Verify
+Continue to [4. Verification](#4-verification).
+
+---
+
+## 4. Verification
+
+### 4.1 Confirm Container Status and Health
 
 ```bash
 docker compose ps
@@ -332,10 +344,11 @@ NAME                        STATUS
 docker-container-watchdog   Up (healthy)
 ```
 
+If the status does not reach `Up (healthy)` within a couple of minutes, see [7. Troubleshooting](#7-troubleshooting), or follow [5. Rollback](#5-rollback) to back out the deployment.
+
 ---
 
-
-## 4. Logs
+### 4.2 Reviewing Logs
 
 | Location | Description |
 |---|---|
@@ -357,38 +370,63 @@ docker exec docker-container-watchdog tail -f /var/log/watchdog/watchdog.log
 
 ---
 
-## 5. Configuration Reference
+## 5. Rollback
 
-All settings are in `watchdog-config.yaml`. No image rebuild is required for configuration changes — restart the watchdog container to apply updates:
+### 5.1 Roll Back a Failed Deployment
+
+If verification fails immediately after `docker compose up -d` — the container will not start, restarts in a loop, or the health check never turns healthy:
 
 ```bash
-docker compose restart docker-container-watchdog
+docker compose down
 ```
 
-| Setting | Default | Description |
-|---|---|---|
-| `check_interval_seconds` | `60` | How often to poll all containers |
-| `cooldown_minutes` | `5` | Suppress duplicate alerts per container |
-| `restart_threshold` | `5` | Restarts within the window to trigger restart-loop alert |
-| `restart_window_minutes` | `10` | Rolling window for restart counting |
-| `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy polls before alerting |
-| `excluded_containers` | `[debug-shell, load-test]` | Containers that are never alerted on |
-| `log_level` | `INFO` | Logging verbosity: `INFO` (recommended for production) or `DEBUG` |
+Diagnose the cause using [4.2 Reviewing Logs](#42-reviewing-logs) and [7. Troubleshooting](#7-troubleshooting), correct the configuration, then redeploy:
 
-### Host Identification in Alerts
-
-Set `WATCHDOG_HOST` in `docker-compose.yaml` under the watchdog service environment:
-
-```yaml
-environment:
-  WATCHDOG_HOST: my-server-name
+```bash
+docker compose up -d
 ```
+
+Re-run [4.1 Confirm Container Status and Health](#41-confirm-container-status-and-health) before considering the deployment complete.
+
+### 5.2 Roll Back an Image Upgrade
+
+The runtime image is always tagged `watchdog:latest`, so loading or pulling a new image overwrites the previous one. Before upgrading the image (see [6.3 Upgrade Guide](#63-upgrade-guide)), tag the current working image so it can be restored:
+
+```bash
+docker tag watchdog:latest watchdog:rollback
+```
+
+If the new image misbehaves after `docker load -i watchdog.tar` or `docker compose pull`, restore the previous image and redeploy:
+
+```bash
+docker tag watchdog:rollback watchdog:latest
+docker compose up -d
+```
+
+### 5.3 Roll Back an Application Upgrade (Git)
+
+Before running `git pull` (see [6.3 Upgrade Guide](#63-upgrade-guide)), record the current commit so you can return to it:
+
+```bash
+git rev-parse HEAD > backup/previous-commit.txt
+```
+
+To roll back to the previous version after a failed upgrade:
+
+```bash
+git checkout "$(cat backup/previous-commit.txt)"
+docker compose up -d
+```
+
+Also restore the `.env` and `watchdog-config.yaml` files backed up before the upgrade — see [6.3 Upgrade Guide](#63-upgrade-guide).
 
 ---
 
-## 6. Lifecycle Management
+## 6. Operations and Maintenance
 
-### Stopping the Service
+### 6.1 Lifecycle Management
+
+#### Stopping the Service
 
 ```bash
 # Pause the container — restartable with `docker compose start`
@@ -398,7 +436,7 @@ docker compose stop
 docker compose down
 ```
 
-### Restarting After Configuration Changes
+#### Restarting After Configuration Changes
 
 ```bash
 # Pick up watchdog-config.yaml changes (no rebuild needed)
@@ -408,19 +446,19 @@ docker compose restart docker-container-watchdog
 docker compose up -d
 ```
 
-### Updating the Watchdog Image
+#### Updating the Watchdog Image
 
 ```bash
 # Rebuild the image (requires internet)
 docker compose -f docker-compose.build.yaml build
 
 # Redeploy using the production runtime file
-docker compose up -d        
+docker compose up -d
 ```
 
 ---
 
-## 7. How to Change Existing Settings
+### 6.2 Applying Configuration Changes
 
 No image rebuild is required for any configuration change. The type of change determines the required command:
 
@@ -430,19 +468,19 @@ No image rebuild is required for any configuration change. The type of change de
 | `.env` (secrets, credentials) | `docker compose up -d` |
 | `docker-compose.yaml` (host name, resource limits) | `docker compose up -d` |
 
-### Apply watchdog-config.yaml changes
+#### Apply watchdog-config.yaml changes
 
 ```bash
 docker compose restart docker-container-watchdog
 ```
 
-### Apply .env changes (credentials / secrets)
+#### Apply .env changes (credentials / secrets)
 
 ```bash
 docker compose up -d
 ```
 
-### Apply docker-compose.yaml changes (container settings)
+#### Apply docker-compose.yaml changes (container settings)
 
 For example, edit the `WATCHDOG_HOST` value in `docker-compose.yaml`:
 
@@ -454,12 +492,146 @@ environment:
 Then redeploy to take effect:
 
 ```bash
-docker compose up -d 
+docker compose up -d
 ```
 
 ---
 
-## 8. Uninstalling
+### 6.3 Upgrade Guide
+
+There are two ways to upgrade the Watchdog: the application code, or the Docker image only.
+
+#### Before You Begin (Recommended)
+
+Back up your deployment-specific configuration files before upgrading. These backups are also used for [5. Rollback](#5-rollback) if the upgrade fails.
+
+```bash
+mkdir -p backup
+
+cp .env backup/.env.bak
+cp watchdog-config.yaml backup/watchdog-config.yaml.bak
+```
+
+To restore the configuration later (if required):
+
+```bash
+cp backup/.env.bak .env
+cp backup/watchdog-config.yaml.bak watchdog-config.yaml
+```
+
+---
+
+#### Upgrade Application Only
+
+##### Option A: Upgrade from Git Repository
+
+*Note* - Requires internet connectivity.
+
+1. Navigate to the project directory:
+
+   ```bash
+   cd Container_Alert
+   ```
+
+2. Record the current commit, for [rollback](#53-roll-back-an-application-upgrade-git) if needed:
+
+   ```bash
+   mkdir -p backup
+   git rev-parse HEAD > backup/previous-commit.txt
+   ```
+
+3. Stop the running container:
+
+   ```bash
+   docker compose down
+   ```
+
+4. Download the latest source code:
+
+   ```bash
+   git fetch origin
+   git pull origin main
+   ```
+
+5. Start the updated container:
+
+   ```bash
+   docker compose up -d
+   ```
+
+6. Verify:
+
+   ```bash
+   docker ps
+   docker compose logs docker-container-watchdog
+   ```
+
+   If verification fails, see [5.3 Roll Back an Application Upgrade (Git)](#53-roll-back-an-application-upgrade-git).
+
+---
+
+##### Option B: Upgrade Application Only (Offline)
+
+1. Obtain the latest version of the application. You can either obtain the latest archive from the RE team or download it directly from GitHub (https://github.com/Radware/CyberController-Container-Alert.git).
+2. Uninstall the current version — see [6.4 Uninstalling](#64-uninstalling).
+3. Replace the existing files in the application directory:
+
+   ```bash
+   cd /path/to/Container_Alert
+   ```
+
+4. Redeploy the latest version — see [3. Deployment Steps](#3-deployment-steps).
+
+---
+
+#### Upgrade Docker Image Only
+
+Automatic upgrades are **not enabled** by default. Before upgrading, tag the current image so it can be [rolled back](#52-roll-back-an-image-upgrade) if the new image misbehaves:
+
+```bash
+docker tag watchdog:latest watchdog:rollback
+```
+
+There are two ways to upgrade the image — online or offline. Follow only one of the options.
+
+##### Option A: Online Image Upgrade
+
+If you have internet access, pull the latest image:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+##### Option B: Offline Image Upgrade
+
+1. Request the Radware RE team to create an updated pre-built Docker image for offline installation. See [8.4 Support Contacts](#84-support-contacts).
+2. Load the image. Make sure the new image uses the same name, `watchdog:latest`.
+
+   ```bash
+   docker load -i watchdog.tar
+   docker compose up -d
+   ```
+
+---
+
+#### Checking the Installed Version
+
+View the image used by the running container:
+
+```bash
+docker inspect docker-container-watchdog --format='{{.Config.Image}}'
+```
+
+View locally available Watchdog images:
+
+```bash
+docker images watchdog
+```
+
+---
+
+### 6.4 Uninstalling
 
 Run `uninstall.sh` from the `Container_Alert/` directory. Choose the option that matches how much you want removed:
 
@@ -494,7 +666,7 @@ bash uninstall.sh --remove-all
 
 Removes the container, image, and the entire `./watchdog/` log directory. Prompts for confirmation before proceeding.
 
-#### Fully non-interactive 
+#### Fully non-interactive
 
 ```bash
 bash uninstall.sh --remove-all --force
@@ -506,137 +678,7 @@ Skips all confirmation prompts. Use in automated pipelines or when scripting rep
 
 ---
 
-## 9. Upgrade Guide
-
-There are two ways to upgrade the Watchdog application.
-
----
-
-### Before You Begin (Recommended)
-
-Backup your deployment-specific configuration files before upgrading.
-
-```bash
-mkdir -p backup
-
-cp .env backup/.env.bak
-cp watchdog-config.yaml backup/watchdog-config.yaml.bak
-```
-
-To restore the configuration later (if required):
-
-```bash
-cp backup/.env.bak .env
-cp backup/watchdog-config.yaml.bak watchdog-config.yaml
-```
-
----
-
-### Upgrade application only 
-
-#### Option A - Upgrade from Git Repository
-
-#### Note : Requires internet connectivity
-
-#### 1. Stop the running container
-
-```bash
-docker compose down
-```
-
-#### 2. Navigate to the project directory
-
-```bash
-cd Container_Alert
-```
-
-#### 3. Download the latest source code
-
-
-```bash
-git fetch origin
-git pull origin main
-```
-
-#### 4. Start the updated container
-
-```bash
-docker compose up -d
-```
-
-#### 5. Verify
-
-```bash
-docker ps
-docker compose logs docker-container-watchdog
-```
-
----
-
-### Option B - Upgrade application only (offline)
-
-#### 1. Obtain the latest version of application 
-You can either obtain the latest archive from the RE team or download it directly from GitHub (https://github.com/Radware/CyberController-Container-Alert.git).
-
-#### 2. Uninstall the current version
-Please refer to [Uninstalling](#11-uninstalling) section.
-
-#### 3. Replace the existing files in the application directory
-cd /path/to/Container_Alert
-
-#### 4. Redeploy the latest version
-Please refer to [Install and Deploy](#3-install-and-deploy) [Install and Deploy](#3-install-and-deploy) section.
-
----
-
-### Upgrade Docker Image Only
-
-Automatic upgrades are **not enabled** by default.
-
-*Note* - There are two ways to upgarde the image - Online or Offline. Follow only one of the options.
-
-#### Option A - Online Image Upgrade
-
-If you have internet access, you can pull the latest image:
-
-```bash
-docker compose pull
-docker compose up -d
-```
-#### Option B - Offline Image Upgrade
-
-#### 1. Request Radware RE team to create an updated version of pre-built Docker image for offline installation:
-
- Please contact:
- - rahulku@radware.com
- - Egore@radware.com
- - northamericare@radware.com
- 
- #### 2. Load the image
- *Note* - Please make sure the new image have same name watchdog:latest.
-
-```bash
-docker load -i watchdog.tar
-docker compose up -d
-```
-
----
-
-### Checking the Installed Version
-
-View the image used by the running container:
-
-```bash
-docker inspect docker-container-watchdog --format='{{.Config.Image}}'
-```
-
-View locally available Watchdog images:
-
-```bash
-docker images watchdog
-```
-
-## 10. Troubleshooting
+## 7. Troubleshooting
 
 ### Service Fails to Start
 
@@ -673,3 +715,87 @@ excluded_containers:
   - load-test
   - my-noisy-container
 ```
+
+If none of the above resolves the issue, see [5. Rollback](#5-rollback) to back out a recent change and redeploy from a known-good state.
+
+---
+
+## 8. Appendix and Reference
+
+### 8.1 Repository Structure
+
+```
+Container_Alert/
+├── docker-compose.yaml        # Production stack — uses pre-built image
+├── docker-compose.build.yaml  # Developer build stack — requires internet
+├── Dockerfile                 # Watchdog image definition
+├── requirements-watchdog.txt  # Python deps: docker, requests, PyYAML
+├── watchdog.py                # Watchdog agent
+├── watchdog-config.yaml       # Watchdog behaviour & channel settings
+├── install.sh                 # Install helper script
+├── uninstall.sh               # Uninstall helper script
+├── README.md                  # Quick-start reference
+└── .env.example               # Template — copy to .env and fill in
+```
+
+---
+
+### 8.2 Configuration Reference
+
+All settings are in `watchdog-config.yaml`. No image rebuild is required for configuration changes — restart the watchdog container to apply updates:
+
+```bash
+docker compose restart docker-container-watchdog
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `check_interval_seconds` | `60` | How often to poll all containers |
+| `cooldown_minutes` | `5` | Suppress duplicate alerts per container |
+| `restart_threshold` | `5` | Restarts within the window to trigger restart-loop alert |
+| `restart_window_minutes` | `10` | Rolling window for restart counting |
+| `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy polls before alerting |
+| `excluded_containers` | `[]` | Containers that are never alerted on |
+| `log_level` | `INFO` | Logging verbosity: `INFO` (recommended for production) or `DEBUG` |
+
+#### Host Identification in Alerts
+
+Set `WATCHDOG_HOST` in `docker-compose.yaml` under the watchdog service environment:
+
+```yaml
+environment:
+  WATCHDOG_HOST: my-server-name
+```
+
+---
+
+### 8.3 SNMP Trap Var-Binds
+
+Configuration for the SNMP Traps channel is in [2.4.4 SNMP Traps](#244-snmp-traps).
+
+**Trap var-binds (enterprise OID arc `1.3.6.1.4.1.89.110`):**
+
+| OID | Object | Value |
+|-----|--------|-------|
+| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
+| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
+| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` |
+| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
+
+**SNMPv3 notes:**
+
+- **Engine ID:** On the first run the watchdog logs an auto-stable engine ID derived from the hostname (look for `SNMP engine ID: 0x...` in the logs). Copy it into `v3_local_engine_id` and register it in `snmptrapd.conf` with `createUser -e 0x<id> watchdog-user SHA "..." AES "..."`. This keeps the ID stable across container restarts.
+- **Key length:** Both auth and priv passphrases must be at least 8 characters (RFC 3414 §11.2). The watchdog rejects shorter keys with a clear error.
+- **No privacy-only mode:** Setting a priv key without an auth key is rejected — SNMPv3 has no `privNoAuth` security level. Both keys must be set together for encrypted traps.
+- **Protocol names:** Auth: `MD5`, `SHA`, `SHA256`, `SHA384`, `SHA512`. Priv: `AES` (AES-128, recommended), `AES192`, `AES256`, `DES` (weak — logs a warning). An unrecognised name is rejected with an error listing the supported values.
+
+---
+
+### 8.4 Support Contacts
+
+If you have trouble accessing the `watchdog.tar` download link, or need an updated offline image from the Radware RE team, contact:
+
+- rahulku@radware.com
+- Egore@radware.com
+- northamericare@radware.com

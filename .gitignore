@@ -1,6 +1,8 @@
 watchdog-config.yaml
-watchdog/watchdog.log
+watchdog/
+*.log
 *.pyc
 .env
 *.tar
 *.tar.gz
+backup/
