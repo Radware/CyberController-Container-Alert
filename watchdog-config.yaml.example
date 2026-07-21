@@ -15,7 +15,7 @@ alert_channels:
   - syslog
   # - snmp_trap
 
-# ── Watchdog behaviour ────────────────────────────────────────────────────────
+# ── Watchdog global settings ────────────────────────────────────────────────────────
 check_interval_seconds:     60    # how often to poll all containers
 cooldown_minutes:            5    # suppress duplicate alerts per container
 restart_threshold:           5    # number of restarts within the window triggers alert
@@ -26,8 +26,6 @@ unhealthy_cycles_threshold:  3    # consecutive unhealthy cycles before alerting
 excluded_containers: []
   # - my-temp-container
 
-# Runbook URL — sent as-is in every alert
-runbook_base_url: 
  
 # ── Logging ───────────────────────────────────────────────────────────────────
 log_level: DEBUG    # DEBUG | INFO | WARNING | ERROR
