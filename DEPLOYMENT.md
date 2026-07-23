@@ -313,7 +313,7 @@ docker compose -f docker-compose.build.yaml build
 
 *Note* - If internet access is unavailable, load the pre-built image instead of building it.
 
-Download [`watchdog.tar` — pre-built Docker image for offline installation](https://radwareil.sharepoint.com/:f:/s/NAResidentEngineers/IgC4d3ALtPwvSrz4is6QWmnPATRCQ7g6BXbnbWO3Q0FFMSk?e=oj4WGS). If you have trouble accessing the download link, see [8.4 Support Contacts](#84-support-contacts).
+Download [`watchdog.tar` — pre-built Docker image for offline installation](https://radwareil.sharepoint.com/:u:/s/NAResidentEngineers/IQASPcHrYh6ATqPzBOvz_TgnAYi1knv7GbmwctN7m1JWtOM?e=YKrQP0). If you have trouble accessing the download link, see [8.4 Support Contacts](#84-support-contacts).
 ```bash
 docker load -i watchdog.tar
 ```
