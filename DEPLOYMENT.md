@@ -85,6 +85,9 @@ If you plan to use an alert channel that requires outbound network access (Slack
 
 ### 2.1 Clone the Repository
 
+# Navigate to your target installation directory
+cd /path/to/Container_Alert
+
 ```bash
 git clone https://github.com/Radware/CyberController-Container-Alert Container_Alert
 cd Container_Alert
@@ -93,6 +96,7 @@ cd Container_Alert
 All remaining commands in this guide are run from inside the `Container_Alert/` directory.
 
 ---
+*Note*: If you use the automated installation method in Section 2.1, skip Sections 2.2, 2.3 and 2.4 and proceed directly to Section 3.
 
 ### 2.2 Configure Environment Variables (.env)
 
@@ -210,6 +214,27 @@ smtp:
     - oncall@radware.com
   tls: true
   password_env: SMTP_PASSWORD        # env var: SMTP password or app token
+
+#### SMTP Relay (No Authentication)
+# ── Email (SMTP Relay - No Authentication) ───────────────────────────────────
+# Use this configuration only when your SMTP relay accepts unauthenticated
+# connections from trusted hosts.
+
+smtp:
+  enabled: true
+
+  # SMTP server settings
+  host: your-relay.internal
+  port: 25
+  tls: false                 # Enable only if your relay requires STARTTLS
+
+  # Authentication
+  auth: false
+
+  # Email settings
+  sender: watchdog@yourdomain.com
+  recipients:
+    - ops@yourdomain.com
 
 # ── Alert channels ────────────────────────────────────────────────────────────
 # Empty for local testing — alerts are still logged to stdout/file.

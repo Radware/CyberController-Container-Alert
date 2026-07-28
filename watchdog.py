@@ -309,6 +309,10 @@ def send_smtp(payload: AlertPayload, cfg: dict) -> None:
     password_env = smtp_cfg.get("password_env", "SMTP_PASSWORD")
     username     = os.environ.get(username_env, "").strip()
     password     = os.environ.get(password_env, "").strip()
+    # Authentication is ON by default (backwards compatible). Set `auth: false`
+    # in the smtp config block for relays that don't require — or actively reject —
+    # SMTP AUTH (common on internal / open relays).
+    use_auth     = smtp_cfg.get("auth", True)
 
     # ── Validate configuration
     if not host:
@@ -329,8 +333,13 @@ def send_smtp(payload: AlertPayload, cfg: dict) -> None:
         log.error("SMTP: no recipients configured")
         return
 
-    if not username or not password:
-        log.error("SMTP: credentials not set in environment (%s, %s)", username_env, password_env)
+    if use_auth and (not username or not password):
+        log.error(
+            "SMTP: authentication is enabled but credentials are not set (%s, %s). "
+            "Set them in .env, or set `auth: false` in the smtp config block if this "
+            "relay does not require authentication.",
+            username_env, password_env,
+        )
         return
 
     # ── Build message
@@ -368,9 +377,12 @@ Exit Code: {payload.exit_code if payload.exit_code is not None else 'N/A'}
                 if use_tls:
                     server.starttls(context=context)
                     log.debug("SMTP: TLS handshake completed")
-                log.debug(f"SMTP: logging in as {username_env}")
-                server.login(username, password)
-                log.debug(f"SMTP: authenticated, sending to {recipients}")
+                if use_auth:
+                    log.debug(f"SMTP: logging in as {username_env}")
+                    server.login(username, password)
+                    log.debug(f"SMTP: authenticated, sending to {recipients}")
+                else:
+                    log.debug(f"SMTP: no-auth mode (auth disabled) — sending to {recipients}")
                 server.sendmail(sender, recipients, message)
                 log.debug("SMTP: sendmail completed")
             
@@ -1445,3 +1457,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -286,7 +286,7 @@ docker rmi polinux/stress
 
 #### Option B — `watchdog:latest` *(no internet required)*
 
-> Uses the watchdog image already present on the host — no pull needed.
+> Uses the Watchdog image that is already present on the host, avoiding the need to pull the image during deployment.
 
 ```bash
 docker run -d --name oom-test --memory=32m --memory-swap=32m watchdog:latest \

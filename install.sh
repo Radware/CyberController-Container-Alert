@@ -272,7 +272,7 @@ configure_all() {
     # ── SMTP ──────────────────────────────────────────────────────────────────
     local SMTP_HOST="smtp.radware.com" SMTP_PORT="587"
     local SMTP_SENDER="noc-alerts@radware.com" SMTP_RECIPIENTS="ops-team@radware.com"
-    local SMTP_TLS="true" SMTP_USERNAME="" SMTP_PASSWORD="" SMTP_ENABLED="false"
+    local SMTP_TLS="true" SMTP_AUTH="true" SMTP_USERNAME="" SMTP_PASSWORD="" SMTP_ENABLED="false"
     if _in_array "smtp" "${SELECTED_CHANNELS[@]}"; then
         SMTP_ENABLED="true"
         print_info "SMTP (email)"
@@ -281,8 +281,13 @@ configure_all() {
         SMTP_SENDER=$(_prompt     "Sender address"               "noc-alerts@radware.com")
         SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "ops-team@radware.com")
         SMTP_TLS=$(_prompt_yn     "Use TLS?"                     "yes")
-        SMTP_USERNAME=$(_prompt   "SMTP username / login email"    "")
-        SMTP_PASSWORD=$(_prompt_secret "SMTP password / api key value")
+        SMTP_AUTH=$(_prompt_yn    "Server requires authentication (login)?" "yes")
+        if [ "$SMTP_AUTH" = "true" ]; then
+            SMTP_USERNAME=$(_prompt   "SMTP username / login email"    "")
+            SMTP_PASSWORD=$(_prompt_secret "SMTP password / api key value")
+        else
+            print_info "  No-auth relay — skipping username/password"
+        fi
         echo ""
     fi
 
@@ -336,7 +341,7 @@ configure_all() {
         if [ "$SLACK_ENABLED" = "true" ]; then
             printf "# Slack\nSLACK_WEBHOOK_URL=%s\n\n" "$SLACK_WEBHOOK"
         fi
-        if [ "$SMTP_ENABLED" = "true" ]; then
+        if [ "$SMTP_ENABLED" = "true" ] && [ "$SMTP_AUTH" = "true" ]; then
             printf "# SMTP\nSMTP_USERNAME=%s\nSMTP_PASSWORD=%s\n\n" "$SMTP_USERNAME" "$SMTP_PASSWORD"
         fi
         if [ "$SNMP_ENABLED" = "true" ] && [ "${SNMP_VERSION,,}" = "v3" ]; then
@@ -387,6 +392,7 @@ configure_all() {
         printf "  facility: %s\n" "$SYSLOG_FACILITY"
         printf "\nsmtp:\n"
         printf "  enabled:      %s\n" "$SMTP_ENABLED"
+        printf "  auth:         %s\n" "$SMTP_AUTH"
         printf "  host:         %s\n" "$SMTP_HOST"
         printf "  port:         %s\n" "$SMTP_PORT"
         printf "  sender:       %s\n" "$SMTP_SENDER"
@@ -523,3 +529,4 @@ main() {
 }
 
 main "$@"
+
