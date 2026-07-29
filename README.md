@@ -514,6 +514,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.3.2 | 2026-07-28 | Rahul Kumar | Fixed SMTP Auth issue |
 | 1.3.1 | 2026-07-21 | Egor Egorov | Updated Readme and Deployment guides |
 | 1.3.0 | 2026-07-16 | Rahul Kumar | Added Upgrade Guide |
 | 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
