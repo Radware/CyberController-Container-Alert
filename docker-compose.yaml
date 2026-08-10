@@ -1,5 +1,3 @@
-version: "3.8"
-
 # ── PRODUCTION / OFFLINE RUNTIME ─────────────────────────────────────────────
 # Uses a pre-built image. No internet access required.
 # The image must be loaded first:

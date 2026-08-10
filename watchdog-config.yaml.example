@@ -43,6 +43,7 @@ syslog:
 # Add "smtp" to alert_channels above to enable.
 smtp:
   enabled: true                      # set to true to enable
+  auth: false
   host: smtp.radware.com
   port: 587
   sender: noc-alerts@radware.com

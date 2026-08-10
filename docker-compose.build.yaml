@@ -1,5 +1,3 @@
-version: "3.8"
-
 # ── DEVELOPER / ONLINE BUILD ──────────────────────────────────────────────────
 # Use this file when you have internet access and want to build a fresh image.
 #
