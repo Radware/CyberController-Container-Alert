@@ -21,6 +21,7 @@ cooldown_minutes:            5    # suppress duplicate alerts per container
 restart_threshold:           5    # number of restarts within the window triggers alert
 restart_window_minutes:     10    # rolling window for restart counting
 unhealthy_cycles_threshold:  3    # consecutive unhealthy cycles before alerting
+alert_on_recovery:        true    # send an INFO "recovered" alert when a container returns to normal
 
 # Containers to never alert on (debug, test, or one-shot containers)
 excluded_containers: []

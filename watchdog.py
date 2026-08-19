@@ -78,6 +78,7 @@ DEFAULT_CONFIG = {
     "restart_threshold": 5,
     "restart_window_minutes": 10,
     "unhealthy_cycles_threshold": 3,
+    "alert_on_recovery": True,
     "excluded_containers": [],
     "log_file": "/var/log/watchdog/watchdog.log",
     "log_level": "INFO",
@@ -212,7 +213,7 @@ class AlertPayload:
 
 
 # ── Alert channels ────────────────────────────────────────────────────────────
-_SLACK_COLORS = {"CRITICAL": "#C0392B", "HIGH": "#E67E22", "WARNING": "#F1C40F"}
+_SLACK_COLORS = {"CRITICAL": "#C0392B", "HIGH": "#E67E22", "WARNING": "#F1C40F", "INFO": "#2ECC71"}
 
 # Radware enterprise arc (PEN 89) for the container watchdog notification objects.
 _ENTERPRISE_ARC = "1.3.6.1.4.1.89.110"
@@ -278,7 +279,8 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
 def dispatch_alert(payload: AlertPayload, cfg: dict) -> None:
     """Send alert to all configured channels."""
     channels = cfg.get("alert_channels", ["slack"])
-    log.warning(
+    log_fn = log.info if payload.failure_type == "recovered" else log.warning
+    log_fn(
         "ALERT [%s] %s — %s (channels: %s)",
         payload.severity, payload.container_name,
         payload.failure_type, channels,
@@ -869,6 +871,10 @@ ACTIONS = {
         "Container is in a restart loop. Check logs for crash reason. "
         "Consider increasing RestartSec or investigating root cause.",
     ),
+    "recovered": (
+        "INFO",
+        "Container is back to normal operation. No action required.",
+    ),
 }
 
 
@@ -990,6 +996,19 @@ class Watchdog:
         self.client = docker.from_env()
         self._stop_event = threading.Event()
 
+    # ── Recovery alert ─────────────────────────────────────────────────────────
+    def _maybe_alert_recovery(self, container, state: ContainerState) -> None:
+        """Fire a one-time RECOVERED alert when a previously-alarmed container is healthy again."""
+        if not self.cfg.get("alert_on_recovery", True):
+            return
+        if not state.alerted_for or state.alerted_for == "recovered":
+            return
+        payload = build_payload(container, "recovered", self.host, self.runbook_base,
+                                 probe_detail=f"Recovered from '{state.alerted_for}'")
+        dispatch_alert(payload, self.cfg)
+        state.alerted_for = ""
+        state.last_alert_time = time.time()
+
     # ── Event stream listener ─────────────────────────────────────────────────
     def _event_listener(self) -> None:
         log.info("Docker event listener started")
@@ -1083,7 +1102,7 @@ class Watchdog:
             if state.unhealthy_cycles > 0:
                 log.info("%s recovered — resetting unhealthy counter", name)
             state.unhealthy_cycles = 0
-            state.alerted_for = ""
+            self._maybe_alert_recovery(container, state)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
     def _poll_loop(self) -> None:
@@ -1180,6 +1199,8 @@ class Watchdog:
                     if state.unhealthy_cycles > 0:
                         log.info("%s: check recovered — resetting counters", name)
                     state.unhealthy_cycles = 0
+                    state.restart_times = []
+                    self._maybe_alert_recovery(container, state)
 
             else:
                 log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)

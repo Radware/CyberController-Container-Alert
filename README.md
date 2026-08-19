@@ -1,6 +1,6 @@
 # CyberController Container Watchdog
 
-The **CyberController Container Watchdog** is a lightweight, autonomous monitoring service that continuously tracks the health of all Docker containers on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**).
+The **CyberController Container Watchdog** is a lightweight, autonomous monitoring service that continuously tracks the health of all Docker containers on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**). It also sends a one-time INFO **recovered** alert through the same channels once a previously-alarmed container returns to normal operation.
 
 ---
 
@@ -24,6 +24,7 @@ The **CyberController Container Watchdog** is a lightweight, autonomous monitori
 7. [Testing](#7-testing)
    - [OOM Simulation](#oom-simulation)
    - [Probe Testing](#probe-testing)
+   - [Recovery Alert Test](#recovery-alert-test)
 8. [Troubleshooting](#8-troubleshooting)
    - [Service Fails to Start](#service-fails-to-start)
    - [Alert Notifications Not Received](#alert-notifications-not-received)
@@ -59,6 +60,8 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 Two additional deduplication rules suppress redundant alerts at the event level:
 - **OOM → die suppression**: when a container is OOM-killed, Docker emits both an `oom` event and an immediately following `die` event. The watchdog fires the `oom` CRITICAL alert and suppresses the subsequent `crashed` alert to avoid a duplicate for the same incident.
 - **Restart-loop → die suppression**: once a `restart-loop` HIGH alert is active for a container, subsequent per-cycle `die` events are suppressed — the restart-loop alert is the primary signal until the container stabilises.
+
+**Recovery alerts**: once a container that was previously alarmed (`crashed`, `oom`, `unhealthy`, or `restart-loop`) is observed running and healthy again, the watchdog dispatches a one-time INFO `recovered` alert through the same channels and clears its alarm state. Controlled by `alert_on_recovery` (default `true`). Detection depends on the same probe path used for the original failure — a container with a Docker `HEALTHCHECK` recovers via the `health_status: healthy` event; containers on active probes (HTTP/TCP/`/proc`) recover on the next successful poll cycle.
 
 ---
 
@@ -123,6 +126,7 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |
 | `restart_window_minutes` | `10` | Rolling window for restart counting |
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy cycles before alerting |
+| `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
 | `excluded_containers` | `[]` | Container names to never alert on |
 | `log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `log_file` | `/var/log/watchdog/watchdog.log` | Bind-mounted to `./watchdog/watchdog.log` on host. Rotates at 10 MB, 5 backups. Set to `null` to disable |
@@ -213,7 +217,7 @@ Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3
 | `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
 | `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
 | `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` |
 | `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
 
 ---
@@ -238,6 +242,7 @@ bash install.sh
 | `oom` | CRITICAL | Container was OOM-killed by the kernel |
 | `unhealthy` | HIGH | Health probe failing for N consecutive cycles |
 | `restart-loop` | HIGH | Container restarted ≥ threshold times within window |
+| `recovered` | INFO | Previously-alarmed container (`crashed`/`oom`/`unhealthy`/`restart-loop`) is healthy/running again. Fires once per incident; controlled by `alert_on_recovery` (default `true`) |
 
 OOM alerts include **memory stats** (usage / limit / peak) prepended to the log snippet.
 
@@ -381,6 +386,32 @@ With no exposed ports, auto-discovery skips HTTP and TCP and falls back to readi
 
 ---
 
+### Recovery Alert Test
+
+Validates the INFO `recovered` alert fires once a previously-alarmed container is healthy again. Use any real, already-monitored container — no throwaway container needed.
+
+```bash
+# 1. Force a failure (SIGKILL → non-zero exit code → CRITICAL "crashed" alert)
+docker kill <container-name>
+
+# 2. Confirm the crashed alert was logged/dispatched
+grep "<container-name>" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log | grep CRITICAL
+
+# 3. Bring it back
+docker start <container-name>
+
+# 4. Wait for it to report healthy again, then confirm the recovery alert:
+grep "<container-name>" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log | grep -i recovered
+```
+
+Expected log line: `ALERT [INFO] <container-name> — recovered (channels: [...])`.
+
+- Containers with a Docker `HEALTHCHECK` recover via the `health_status: healthy` **event** — near-instant once Docker reports healthy (subject to the image's own `start_period`/`interval`).
+- Containers on HTTP/TCP/`/proc` active probes recover on the **next poll cycle** (`check_interval_seconds`).
+- No alert fires if `alert_on_recovery: false` is set, or if the container was never in an alarmed state (`state.alerted_for` empty).
+
+---
+
 ## 8. Troubleshooting
 
 ### Service Fails to Start
@@ -407,6 +438,12 @@ Common causes:
      --data '{"text":"Watchdog test"}' "$SLACK_WEBHOOK_URL"
    ```
    Expected response: `ok`
+
+**Recovery alert (`recovered`) specifically not received:**
+- Confirm `alert_on_recovery` is not set to `false` in the live `watchdog-config.yaml`.
+- Confirm the container was actually alarmed first — `state.alerted_for` must be non-empty; a container that was never flagged won't generate a recovery alert.
+- For containers with a Docker `HEALTHCHECK`, confirm Docker actually reports `healthy` — `docker inspect <name> --format '{{json .State.Health}}'`. If it's stuck on `starting`, the watchdog is waiting on Docker, not the other way around.
+- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, the probe (often `auto_health_check`) is misjudging the service; add a manual entry under `container_health_checks` instead.
 
 ### Duplicate and Excessive Alert Notifications
 
@@ -514,6 +551,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.4.0 | 2026-08-17 | Rahul Kumar | Added INFO "recovered" alert |
 | 1.3.3 | 2026-08-05 | Rahul Kumar | Added Auth True/false |
 | 1.3.2 | 2026-07-28 | Rahul Kumar | Fixed SMTP Auth issue |
 | 1.3.1 | 2026-07-21 | Egor Egorov | Updated Readme and Deployment guides |

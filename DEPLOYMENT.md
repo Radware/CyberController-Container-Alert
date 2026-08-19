@@ -1,6 +1,6 @@
 # CyberController Container Watchdog — Deployment Guide
 
-The **CyberController Container Watchdog** is an autonomous monitoring service that provides continuous health visibility across all Docker containers running on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**).
+The **CyberController Container Watchdog** is an autonomous monitoring service that provides continuous health visibility across all Docker containers running on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**). It also sends a one-time INFO **recovered** alert once a previously-alarmed container returns to normal operation.
 
 This guide covers initial deployment, alert channel configuration, and ongoing operational management of the watchdog service.
 
@@ -132,6 +132,7 @@ cooldown_minutes: 5             # no duplicate alerts within this window
 restart_threshold: 5            # restarts before "restart-loop" alert
 restart_window_minutes: 10      # rolling window for restart counting
 unhealthy_cycles_threshold: 3   # consecutive unhealthy polls before alert
+alert_on_recovery: true          # send an INFO "recovered" alert when a container returns to normal
 
 excluded_containers:
   - debug-shell                 # add any containers you don't want monitored
@@ -780,6 +781,7 @@ docker compose restart docker-container-watchdog
 | `restart_threshold` | `5` | Restarts within the window to trigger restart-loop alert |
 | `restart_window_minutes` | `10` | Rolling window for restart counting |
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy polls before alerting |
+| `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
 | `excluded_containers` | `[]` | Containers that are never alerted on |
 | `log_level` | `INFO` | Logging verbosity: `INFO` (recommended for production) or `DEBUG` |
 
@@ -805,7 +807,7 @@ Configuration for the SNMP Traps channel is in [2.4.4 SNMP Traps](#244-snmp-trap
 | `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
 | `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
 | `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` |
 | `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
 
 **SNMPv3 notes:**
