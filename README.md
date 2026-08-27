@@ -128,9 +128,14 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy cycles before alerting |
 | `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
 | `excluded_containers` | `[]` | Container names to never alert on |
+| `ignored_container_events` | MariaDB syntax-check label rule | Label-based event suppressions for intentional temporary containers |
 | `log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `log_file` | `/var/log/watchdog/watchdog.log` | Bind-mounted to `./watchdog/watchdog.log` on host. Rotates at 10 MB, 5 backups. Set to `null` to disable |
 | `runbook_base_url` | — | URL included in every alert |
+
+Preferred suppression: Temporary MariaDB HA syntax-check containers should be created with Docker label `com.radware.cybercontroller.role=mariadb-ha-syntax-check`. The watchdog ignores only configured events for containers carrying that explicit label; normal service containers still alert.
+
+Temporary fallback: until that label exists, dynamic MariaDB dump helper containers are not alerted as crashes only when all identifying signals match together: image `kvision_infra_mariadb`, container name is not `config_kvision-infra-mariadb_1`, Docker `AutoRemove` is `true`, a mount contains `/mnt/cli/tmp/mariadb_dump.sql.gz`, and the exit code is `137`. The primary MariaDB container remains monitored.
 
 ### Environment Variables
 
@@ -551,6 +556,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.5.0 | 2026-08-27 | Rahul Kumar | Added ignore Dynamic container crash alert |
 | 1.4.0 | 2026-08-17 | Rahul Kumar | Added INFO "recovered" alert |
 | 1.3.3 | 2026-08-05 | Rahul Kumar | Added Auth True/false |
 | 1.3.2 | 2026-07-28 | Rahul Kumar | Fixed SMTP Auth issue |

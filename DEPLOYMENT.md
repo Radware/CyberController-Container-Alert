@@ -136,7 +136,17 @@ alert_on_recovery: true          # send an INFO "recovered" alert when a contain
 
 excluded_containers:
   - debug-shell                 # add any containers you don't want monitored
+
+ignored_container_events:
+   - label:
+         com.radware.cybercontroller.role: mariadb-ha-syntax-check
+      events:
+         - die                     # ignore only R&D-designated temporary syntax-check dies
 ```
+
+Radware R&D to add `--label com.radware.cybercontroller.role=mariadb-ha-syntax-check` when creating the temporary MariaDB HA syntax-check container. That explicit label is the preferred contract: normal service container dies alert; R&D-designated temporary helper dies are ignored for the configured event.
+
+Until that label exists, the watchdog also has a built-in fallback for dynamic MariaDB dump helper crashes. It suppresses the alert only when image `kvision_infra_mariadb`, container name is not `config_kvision-infra-mariadb_1`, Docker `AutoRemove` is `true`, a mount contains `/mnt/cli/tmp/mariadb_dump.sql.gz`, and the exit code is `137` all match together.
 
 ---
 

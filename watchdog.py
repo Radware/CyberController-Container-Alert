@@ -71,6 +71,9 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
+_KVISION_MARIADB_SYNTAX_CHECK_LABEL = "com.radware.cybercontroller.role"
+_KVISION_MARIADB_SYNTAX_CHECK_ROLE = "mariadb-ha-syntax-check"
+
 DEFAULT_CONFIG = {
     "alert_channels": ["slack"],
     "check_interval_seconds": 60,
@@ -80,6 +83,14 @@ DEFAULT_CONFIG = {
     "unhealthy_cycles_threshold": 3,
     "alert_on_recovery": True,
     "excluded_containers": [],
+    "ignored_container_events": [
+        {
+            "label": {
+                _KVISION_MARIADB_SYNTAX_CHECK_LABEL: _KVISION_MARIADB_SYNTAX_CHECK_ROLE,
+            },
+            "events": ["die"],
+        },
+    ],
     "log_file": "/var/log/watchdog/watchdog.log",
     "log_level": "INFO",
     "syslog": {
@@ -218,6 +229,9 @@ _SLACK_COLORS = {"CRITICAL": "#C0392B", "HIGH": "#E67E22", "WARNING": "#F1C40F",
 # Radware enterprise arc (PEN 89) for the container watchdog notification objects.
 _ENTERPRISE_ARC = "1.3.6.1.4.1.89.110"
 _HEX_RE = re.compile(r'^[0-9a-fA-F]+$')
+_KVISION_MARIADB_DUMP_HELPER_IMAGE = "kvision_infra_mariadb"
+_KVISION_MARIADB_PRIMARY_CONTAINER = "config_kvision-infra-mariadb_1"
+_KVISION_MARIADB_DUMP_MOUNT = "/mnt/cli/tmp/mariadb_dump.sql.gz"
 
 
 def send_slack(payload: AlertPayload, cfg: dict) -> None:
@@ -926,6 +940,105 @@ def get_container_id(container) -> str:
         return "N/A"
 
 
+def _image_name_without_tag(image_name: str) -> str:
+    image_name = image_name.strip().split("@", 1)[0]
+    last_slash = image_name.rfind("/")
+    last_colon = image_name.rfind(":")
+    if last_colon > last_slash:
+        return image_name[:last_colon]
+    return image_name
+
+
+def _container_image_names(container, event_attributes: dict) -> list[str]:
+    names: list[str] = []
+    event_image = event_attributes.get("image")
+    if event_image:
+        names.append(str(event_image))
+    try:
+        config_image = container.attrs.get("Config", {}).get("Image")
+        if config_image:
+            names.append(str(config_image))
+    except Exception:
+        pass
+    try:
+        for tag in getattr(getattr(container, "image", None), "tags", []) or []:
+            if tag:
+                names.append(str(tag))
+    except Exception:
+        pass
+    return names
+
+
+def _container_has_mount_containing(container, path: str) -> bool:
+    try:
+        mounts = container.attrs.get("Mounts", []) or []
+    except Exception:
+        return False
+    for mount in mounts:
+        if isinstance(mount, dict):
+            if any(path in str(value) for value in mount.values()):
+                return True
+        elif path in str(mount):
+            return True
+    return False
+
+
+def _container_labels(container, event_attributes: dict) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    try:
+        container_labels = getattr(container, "labels", None) or {}
+        labels.update({str(key): str(value) for key, value in container_labels.items()})
+    except Exception:
+        pass
+    try:
+        config_labels = container.attrs.get("Config", {}).get("Labels") or {}
+        labels.update({str(key): str(value) for key, value in config_labels.items()})
+    except Exception:
+        pass
+    for key, value in event_attributes.items():
+        if key.startswith("label."):
+            labels[key[6:]] = str(value)
+    return labels
+
+
+def is_ignored_container_event(container, event_attributes: dict, action: str, rules: list[dict]) -> bool:
+    labels = _container_labels(container, event_attributes)
+    for rule in rules or []:
+        # Tolerate malformed YAML rules — a bad entry must not crash the event listener.
+        if not isinstance(rule, dict):
+            continue
+        events = rule.get("events") or []
+        if events and action not in events:
+            continue
+        label_rule = rule.get("label") or rule.get("labels") or {}
+        if not isinstance(label_rule, dict):
+            continue
+        if label_rule and all(labels.get(str(key)) == str(value) for key, value in label_rule.items()):
+            return True
+    return False
+
+
+def is_kvision_mariadb_dump_helper_crash(container, event_attributes: dict, exit_code: int | None) -> bool:
+    if exit_code != 137:
+        return False
+    name = str(event_attributes.get("name") or getattr(container, "name", ""))
+    if name == _KVISION_MARIADB_PRIMARY_CONTAINER:
+        return False
+    image_matches = any(
+        _image_name_without_tag(image_name) == _KVISION_MARIADB_DUMP_HELPER_IMAGE
+        for image_name in _container_image_names(container, event_attributes)
+    )
+    if not image_matches:
+        return False
+    try:
+        auto_remove = container.attrs.get("HostConfig", {}).get("AutoRemove")
+    except Exception:
+        auto_remove = False
+    return auto_remove is True and _container_has_mount_containing(
+        container, _KVISION_MARIADB_DUMP_MOUNT
+    )
+
+
 def build_payload(
     container,
     failure_type: str,
@@ -989,6 +1102,7 @@ class Watchdog:
         self._restart_window_secs = cfg.get("restart_window_minutes", 10) * 60
         self._unhealthy_threshold = cfg.get("unhealthy_cycles_threshold", 3)
         self._cooldown_minutes    = cfg.get("cooldown_minutes", 5)
+        self._ignored_events: list[dict] = cfg.get("ignored_container_events") or []
         self._discovered_checks: dict[str, dict | None] = {}  # auto-discovery cache
         self._oom_containers: set[str] = set()  # suppress die alert when oom already fired
         self._auto_cfg: dict = cfg.get("auto_health_check", {})
@@ -1040,6 +1154,10 @@ class Watchdog:
             log.warning("Container %s not found for event %s", name, action)
             return
 
+        if is_ignored_container_event(container, attributes, action, self._ignored_events):
+            log.info("%s: ignoring Docker %s event due to configured label rule", name, action)
+            return
+
         state = self.state.get(name)
 
         if action == "die":
@@ -1061,6 +1179,13 @@ class Watchdog:
                 exit_code = int(exit_code_str)
             except (ValueError, TypeError):
                 exit_code = None
+            if is_kvision_mariadb_dump_helper_crash(container, attributes, exit_code):
+                log.info(
+                    "%s: suppressing dynamic MariaDB dump helper crash alert "
+                    "(image=%s, AutoRemove=true, mount=%s, exit_code=137)",
+                    name, _KVISION_MARIADB_DUMP_HELPER_IMAGE, _KVISION_MARIADB_DUMP_MOUNT,
+                )
+                return
             # exit 0 = graceful stop, no alert
             if exit_code == 0:
                 log.info("%s exited cleanly (code 0) — no alert", name)
