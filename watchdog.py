@@ -1024,8 +1024,10 @@ def is_kvision_mariadb_dump_helper_crash(container, event_attributes: dict, exit
     name = str(event_attributes.get("name") or getattr(container, "name", ""))
     if name == _KVISION_MARIADB_PRIMARY_CONTAINER:
         return False
+    # Compare the repository basename so a registry/namespace prefix
+    # (reg.radware.com:18442/kvision/kvision_infra_mariadb) still matches.
     image_matches = any(
-        _image_name_without_tag(image_name) == _KVISION_MARIADB_DUMP_HELPER_IMAGE
+        _image_name_without_tag(image_name).rsplit("/", 1)[-1] == _KVISION_MARIADB_DUMP_HELPER_IMAGE
         for image_name in _container_image_names(container, event_attributes)
     )
     if not image_matches:
@@ -1037,6 +1039,28 @@ def is_kvision_mariadb_dump_helper_crash(container, event_attributes: dict, exit
     return auto_remove is True and _container_has_mount_containing(
         container, _KVISION_MARIADB_DUMP_MOUNT
     )
+
+
+def _mariadb_helper_signals(container, event_attributes: dict) -> dict:
+    """Snapshot the signals the suppression predicate evaluates, for diagnostics."""
+    try:
+        auto_remove = container.attrs.get("HostConfig", {}).get("AutoRemove")
+    except Exception:
+        auto_remove = None
+    try:
+        mounts = [
+            (m.get("Source") or m.get("Name") or "", m.get("Destination") or "")
+            for m in (container.attrs.get("Mounts", []) or [])
+            if isinstance(m, dict)
+        ]
+    except Exception:
+        mounts = []
+    return {
+        "images": _container_image_names(container, event_attributes),
+        "auto_remove": auto_remove,
+        "mounts": mounts,
+        "labels": _container_labels(container, event_attributes),
+    }
 
 
 def build_payload(
@@ -1190,6 +1214,11 @@ class Watchdog:
             if exit_code == 0:
                 log.info("%s exited cleanly (code 0) — no alert", name)
                 return
+            if exit_code == 137:
+                # Suppression did not match — surface the real signals so the
+                # mismatched one (image / AutoRemove / mount) is visible in logs.
+                log.warning("%s: exit 137 not suppressed — signals: %s",
+                            name, _mariadb_helper_signals(container, attributes))
             failure_type = "crashed"
             if should_alert(state, failure_type, self._cooldown_minutes):
                 payload = build_payload(container, failure_type, self.host,
