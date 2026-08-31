@@ -556,7 +556,8 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| 1.5.1 | 2026-08-27 | Rahul Kumar | fixed ignore Dynamic container crash alert |
+| 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
+| 1.5.1 | 2026-08-31 | Rahul Kumar | fixed ignore Dynamic container crash alert |
 | 1.5.0 | 2026-08-27 | Rahul Kumar | Added ignore Dynamic container crash alert |
 | 1.4.0 | 2026-08-17 | Rahul Kumar | Added INFO "recovered" alert |
 | 1.3.3 | 2026-08-05 | Rahul Kumar | Added Auth True/false |

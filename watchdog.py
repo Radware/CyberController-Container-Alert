@@ -1205,7 +1205,7 @@ class Watchdog:
                 exit_code = None
             if is_kvision_mariadb_dump_helper_crash(container, attributes, exit_code):
                 log.info(
-                    "%s: suppressing dynamic MariaDB dump helper crash alert "
+                    "%s: Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert "
                     "(image=%s, AutoRemove=true, mount=%s, exit_code=137)",
                     name, _KVISION_MARIADB_DUMP_HELPER_IMAGE, _KVISION_MARIADB_DUMP_MOUNT,
                 )
