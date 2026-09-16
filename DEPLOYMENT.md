@@ -49,6 +49,8 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 | Git | Required to clone the repository |
 | Host permissions | Root, or membership in the `docker` group (to read `/var/run/docker.sock`) |
 
+> The watchdog container itself runs as a non-root user and joins the host's `docker` group at runtime (via the `DOCKER_GID` value in `.env`, auto-detected by `install.sh`) to read the socket — see [2.2 Configure Environment Variables (.env)](#22-configure-environment-variables-env).
+
 ```bash
 docker compose version
 ```
@@ -114,6 +116,10 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 # SMTP (only if SMTP channel is enabled)
 SMTP_USERNAME=your-smtp-username/login email
 SMTP_PASSWORD=your-smtp-password/api key value
+
+# Docker socket access (non-root container) — GID of the group that owns
+# /var/run/docker.sock on this host. Find it with: stat -c '%g' /var/run/docker.sock
+DOCKER_GID=999
 
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO
@@ -723,7 +729,7 @@ docker compose logs docker-container-watchdog
 ```
 
 Common causes:
-- `/var/run/docker.sock` is not accessible — ensure the host socket exists and the container has read access
+- `/var/run/docker.sock` is not accessible — ensure the host socket exists and the container has read access. The container runs as a non-root user and needs `DOCKER_GID` in `.env` to match the socket's actual group (`stat -c '%g' /var/run/docker.sock`) — see [2.2 Configure Environment Variables (.env)](#22-configure-environment-variables-env)
 - Missing `.env` file — run `cp .env.example .env` and fill in values
 
 ### Alert Notifications Not Received
