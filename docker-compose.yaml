@@ -35,7 +35,9 @@ services:
     # ── Hardening ────────────────────────────────────────────────────────────
     user: "1000:1000"          # non-root
     group_add:
-      - "${DOCKER_GID:-999}"   # host docker.sock group GID — auto-detected into .env by install.sh
+      # host docker.sock group GID — auto-detected into .env by install.sh.
+      # Required (no fallback): a wrong/guessed GID silently breaks socket access.
+      - "${DOCKER_GID:?Set DOCKER_GID in .env to the docker.sock GID - run install.sh or see DEPLOYMENT.md}"
     read_only: true             # immutable root filesystem
     tmpfs:
       - /tmp
@@ -47,6 +49,7 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
     memswap_limit: 256m         # no swap beyond mem_limit — hits the limit and restarts instead of degrading the host
+                                 # must stay >= mem_limit if you raise it, or Docker rejects this config
     mem_swappiness: 0           # avoid swapping this container's pages — needed when host kernel lacks swap accounting (memswap_limit is then unenforceable)
     cpus: "0.50"
     pids_limit: 200

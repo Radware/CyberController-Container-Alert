@@ -119,7 +119,9 @@ SMTP_PASSWORD=your-smtp-password/api key value
 
 # Docker socket access (non-root container) — GID of the group that owns
 # /var/run/docker.sock on this host. Find it with: stat -c '%g' /var/run/docker.sock
-DOCKER_GID=999
+# Replace the placeholder below with that number — docker compose refuses to
+# start the container while DOCKER_GID is unset or left as this placeholder.
+DOCKER_GID=REPLACE_WITH_DOCKER_SOCKET_GID
 
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO

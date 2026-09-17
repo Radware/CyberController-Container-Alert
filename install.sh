@@ -118,12 +118,18 @@ setup_log_directory() {
     else
         print_info "Log directory already exists: ${LOG_DIR}"
     fi
-    # Container runs as non-root (UID 1000) — own it directly instead of opening it to all local users
-    if chown 1000:1000 "$LOG_DIR" 2>/dev/null; then
+    # Container runs as non-root (UID 1000:GID 1000) — must own the dir and any
+    # pre-existing files (e.g. log/rotated files left by an older root-run
+    # version) directly; group-writable permissions don't help unless the
+    # container's GID is actually a member of that group.
+    if chown -R 1000:1000 "$LOG_DIR" 2>/dev/null; then
         chmod 750 "$LOG_DIR"
     else
-        print_warning "Could not chown ${LOG_DIR} to UID 1000 (not running as root?) — falling back to group-writable permissions"
-        chmod 775 "$LOG_DIR"
+        print_error "Could not chown ${LOG_DIR} to UID 1000:GID 1000 (not running as root?)"
+        echo ""
+        echo "  Re-run this script with sudo, or fix ownership manually:"
+        echo "    sudo chown -R 1000:1000 ${LOG_DIR}"
+        exit 1
     fi
     print_info "Logs will be written to: ${LOG_DIR}/watchdog.log"
 }
@@ -135,11 +141,19 @@ setup_log_directory() {
 detect_docker_gid() {
     # GID that owns /var/run/docker.sock — the non-root container joins this
     # group (via group_add in docker-compose.yaml) to read the socket.
-    if [ -S /var/run/docker.sock ]; then
-        stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null || echo "999"
-    else
-        echo "999"
+    # No silent fallback: a wrong guessed GID breaks socket access at container
+    # start with a confusing error, so treat detection failure as fatal here.
+    if [ ! -S /var/run/docker.sock ]; then
+        print_error "/var/run/docker.sock not found — cannot determine its group GID"
+        return 1
     fi
+    local gid
+    gid=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null)
+    if [ -z "$gid" ]; then
+        print_error "Could not determine the GID that owns /var/run/docker.sock"
+        return 1
+    fi
+    echo "$gid"
 }
 
 ################################################################################
@@ -241,6 +255,15 @@ configure_all() {
         IFS= read -r RECONFIG
         if [[ ! "$RECONFIG" =~ ^[Yy]$ ]]; then
             print_info "Keeping existing configuration"
+            # Upgrade path: older installs may predate DOCKER_GID — add it now
+            # rather than silently starting with the unset/wrong-GID fallback.
+            if [ -f "$ENV_FILE" ] && ! grep -q '^DOCKER_GID=' "$ENV_FILE"; then
+                print_warning "Existing .env is missing DOCKER_GID — detecting and adding it"
+                local MIGRATED_GID
+                MIGRATED_GID=$(detect_docker_gid) || exit 1
+                printf "\n# Docker socket access (non-root container)\nDOCKER_GID=%s\n" "$MIGRATED_GID" >> "$ENV_FILE"
+                print_success "Added DOCKER_GID=${MIGRATED_GID} to ${ENV_FILE}"
+            fi
             return 0
         fi
         echo ""
@@ -357,7 +380,7 @@ configure_all() {
 
     # ── Docker socket GID (container runs non-root; needs group access to the socket) ──
     local DOCKER_GID
-    DOCKER_GID=$(detect_docker_gid)
+    DOCKER_GID=$(detect_docker_gid) || exit 1
     print_info "Docker socket GID detected: ${DOCKER_GID}"
 
     # ── Write .env ────────────────────────────────────────────────────────────
