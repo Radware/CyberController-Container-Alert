@@ -362,6 +362,16 @@ Download [`watchdog.tar` — pre-built Docker image for offline installation](ht
 docker load -i watchdog.tar
 ```
 
+#### Prepare the log directory
+
+The container runs as UID/GID 1000 and writes to the bind-mounted `./watchdog` directory. Create it and set ownership **before** the first `docker compose up`, otherwise Compose creates it as `root` and the non-root container cannot create `watchdog.log` — `RotatingFileHandler` fails at startup and the `restart: always` container loops. (Option A's `install.sh` does this for you.)
+
+```bash
+mkdir -p watchdog
+sudo chown -R 1000:1000 watchdog
+sudo chmod 750 watchdog
+```
+
 #### Start the container
 
 ```bash

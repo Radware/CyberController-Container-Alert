@@ -118,19 +118,30 @@ setup_log_directory() {
     else
         print_info "Log directory already exists: ${LOG_DIR}"
     fi
-    # Container runs as non-root (UID 1000:GID 1000) — must own the dir and any
-    # pre-existing files (e.g. log/rotated files left by an older root-run
-    # version) directly; group-writable permissions don't help unless the
-    # container's GID is actually a member of that group.
-    if chown -R 1000:1000 "$LOG_DIR" 2>/dev/null; then
-        chmod 750 "$LOG_DIR"
-    else
-        print_error "Could not chown ${LOG_DIR} to UID 1000:GID 1000 (not running as root?)"
+    # Container runs as non-root (UID 1000:GID 1000) — it must own the dir and any
+    # pre-existing files (logs left by an older root-run version), or
+    # RotatingFileHandler cannot create/append watchdog.log and the container
+    # restart-loops. Elevate with sudo when we are not already root.
+    local PRIV=""
+    if [ "$EUID" -ne 0 ]; then
+        if command -v sudo &>/dev/null; then
+            PRIV="sudo"
+        else
+            print_error "Not running as root and sudo is not available — cannot set ${LOG_DIR} ownership to UID 1000:GID 1000"
+            echo ""
+            echo "  Re-run this script as root, or fix ownership manually before starting:"
+            echo "    chown -R 1000:1000 ${LOG_DIR} && chmod 750 ${LOG_DIR}"
+            exit 1
+        fi
+    fi
+    if ! $PRIV chown -R 1000:1000 "$LOG_DIR"; then
+        print_error "Failed to set ownership of ${LOG_DIR} to UID 1000:GID 1000"
         echo ""
-        echo "  Re-run this script with sudo, or fix ownership manually:"
-        echo "    sudo chown -R 1000:1000 ${LOG_DIR}"
+        echo "  Fix ownership manually before starting:"
+        echo "    sudo chown -R 1000:1000 ${LOG_DIR} && sudo chmod 750 ${LOG_DIR}"
         exit 1
     fi
+    $PRIV chmod 750 "$LOG_DIR"
     print_info "Logs will be written to: ${LOG_DIR}/watchdog.log"
 }
 
@@ -255,14 +266,24 @@ configure_all() {
         IFS= read -r RECONFIG
         if [[ ! "$RECONFIG" =~ ^[Yy]$ ]]; then
             print_info "Keeping existing configuration"
-            # Upgrade path: older installs may predate DOCKER_GID — add it now
-            # rather than silently starting with the unset/wrong-GID fallback.
-            if [ -f "$ENV_FILE" ] && ! grep -q '^DOCKER_GID=' "$ENV_FILE"; then
-                print_warning "Existing .env is missing DOCKER_GID — detecting and adding it"
-                local MIGRATED_GID
-                MIGRATED_GID=$(detect_docker_gid) || exit 1
-                printf "\n# Docker socket access (non-root container)\nDOCKER_GID=%s\n" "$MIGRATED_GID" >> "$ENV_FILE"
-                print_success "Added DOCKER_GID=${MIGRATED_GID} to ${ENV_FILE}"
+            # Upgrade path: older installs predate DOCKER_GID, and `cp .env.example .env`
+            # leaves a non-numeric placeholder. Treat anything that isn't a bare number
+            # as "not configured" and (re)detect it, or group_add gets a bad value and
+            # the container fails to start.
+            if [ -f "$ENV_FILE" ]; then
+                local CURRENT_GID
+                CURRENT_GID=$(grep -E '^DOCKER_GID=' "$ENV_FILE" | tail -n1 | cut -d= -f2 | tr -d '[:space:]')
+                if ! [[ "$CURRENT_GID" =~ ^[0-9]+$ ]]; then
+                    print_warning "Existing .env has a missing or invalid DOCKER_GID ('${CURRENT_GID}') — detecting and setting it"
+                    local MIGRATED_GID
+                    MIGRATED_GID=$(detect_docker_gid) || exit 1
+                    if grep -qE '^DOCKER_GID=' "$ENV_FILE"; then
+                        sed -i.bak -E "s|^DOCKER_GID=.*|DOCKER_GID=${MIGRATED_GID}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
+                    else
+                        printf "\n# Docker socket access (non-root container)\nDOCKER_GID=%s\n" "$MIGRATED_GID" >> "$ENV_FILE"
+                    fi
+                    print_success "Set DOCKER_GID=${MIGRATED_GID} in ${ENV_FILE}"
+                fi
             fi
             return 0
         fi
