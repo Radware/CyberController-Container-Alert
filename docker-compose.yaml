@@ -28,16 +28,18 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Config file (read-only mount)
       - ./watchdog-config.yaml:/etc/watchdog/watchdog-config.yaml:ro
-      # Watchdog script — mount so code changes take effect without image rebuild
-      - ./watchdog.py:/app/watchdog.py:ro
+      # watchdog.py is deliberately NOT bind-mounted: this container holds the
+      # Docker socket, so write access to the host copy would be host root.
+      # Code ships inside the image — rebuild to pick up changes.
       # Persistent log storage — written directly to host folder
       - ./watchdog:/var/log/watchdog
     # ── Hardening ────────────────────────────────────────────────────────────
-    user: "1000:1000"          # non-root
+    # Defaults to root (0:0) for zero-config manual installs — the socket is
+    # host-root-equivalent for any user anyway. install.sh instead populates
+    # WATCHDOG_UID/WATCHDOG_GID/DOCKER_GID in .env to run this non-root.
+    user: "${WATCHDOG_UID:-0}:${WATCHDOG_GID:-0}"
     group_add:
-      # host docker.sock group GID — auto-detected into .env by install.sh.
-      # Required (no fallback): a wrong/guessed GID silently breaks socket access.
-      - "${DOCKER_GID:?Set DOCKER_GID in .env to the docker.sock GID - run install.sh or see DEPLOYMENT.md}"
+      - "${DOCKER_GID:-0}"
     read_only: true             # immutable root filesystem
     tmpfs:
       - /tmp

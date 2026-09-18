@@ -49,7 +49,7 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 | Git | Required to clone the repository |
 | Host permissions | Root, or membership in the `docker` group (to read `/var/run/docker.sock`) |
 
-> The watchdog container itself runs as a non-root user and joins the host's `docker` group at runtime (via the `DOCKER_GID` value in `.env`, auto-detected by `install.sh`) to read the socket — see [2.2 Configure Environment Variables (.env)](#22-configure-environment-variables-env).
+> By default the container runs as root so a manual install needs no host-specific group setup. The automated installer ([3.1 Option A](#31-option-a-automated-installation-installsh-recommended)) instead hardens it to run non-root (UID/GID 1000, joined to the docker.sock group) automatically, with no input required. Either way it's still contained by a read-only root filesystem, dropped Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID limits (see [Container Hardening in the README](README.md#container-hardening)).
 
 ```bash
 docker compose version
@@ -117,17 +117,13 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 SMTP_USERNAME=your-smtp-username/login email
 SMTP_PASSWORD=your-smtp-password/api key value
 
-# Docker socket access (non-root container) — GID of the group that owns
-# /var/run/docker.sock on this host. Find it with: stat -c '%g' /var/run/docker.sock
-# Replace the placeholder below with that number — docker compose refuses to
-# start the container while DOCKER_GID is unset or left as this placeholder.
-DOCKER_GID=REPLACE_WITH_DOCKER_SOCKET_GID
-
 # Tuning (optional — defaults shown)
 LOG_LEVEL=INFO
 ```
 
 Only credentials and secrets belong in `.env`. Hosts, ports, recipients, and thresholds are configured in `watchdog-config.yaml`, never hardcoded in this guide or in scripts.
+
+The container runs as root by default for a zero-configuration manual install. If you want the non-root hardening that [Option A](#31-option-a-automated-installation-installsh-recommended) applies automatically, uncomment the `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` lines in `.env.example` and fill in `DOCKER_GID` (`stat -c '%g' /var/run/docker.sock`).
 
 ---
 
@@ -360,16 +356,6 @@ docker compose -f docker-compose.build.yaml build
 Download [`watchdog.tar` — pre-built Docker image for offline installation](https://radwareil.sharepoint.com/:u:/s/NAResidentEngineers/IQASPcHrYh6ATqPzBOvz_TgnAYi1knv7GbmwctN7m1JWtOM?e=YKrQP0). If you have trouble accessing the download link, see [8.4 Support Contacts](#84-support-contacts).
 ```bash
 docker load -i watchdog.tar
-```
-
-#### Prepare the log directory
-
-The container runs as UID/GID 1000 and writes to the bind-mounted `./watchdog` directory. Create it and set ownership **before** the first `docker compose up`, otherwise Compose creates it as `root` and the non-root container cannot create `watchdog.log` — `RotatingFileHandler` fails at startup and the `restart: always` container loops. (Option A's `install.sh` does this for you.)
-
-```bash
-mkdir -p watchdog
-sudo chown -R 1000:1000 watchdog
-sudo chmod 750 watchdog
 ```
 
 #### Start the container
@@ -741,7 +727,7 @@ docker compose logs docker-container-watchdog
 ```
 
 Common causes:
-- `/var/run/docker.sock` is not accessible — ensure the host socket exists and the container has read access. The container runs as a non-root user and needs `DOCKER_GID` in `.env` to match the socket's actual group (`stat -c '%g' /var/run/docker.sock`) — see [2.2 Configure Environment Variables (.env)](#22-configure-environment-variables-env)
+- `/var/run/docker.sock` is not accessible — ensure the host socket exists and Docker is running. Manual installs run the container as root, so no host-side group configuration is required; if you opted into non-root hardening (`WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env`), verify `DOCKER_GID` matches `stat -c '%g' /var/run/docker.sock`.
 - Missing `.env` file — run `cp .env.example .env` and fill in values
 
 ### Alert Notifications Not Received
