@@ -49,6 +49,8 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 | Git | Required to clone the repository |
 | Host permissions | Root, or membership in the `docker` group (to read `/var/run/docker.sock`) |
 
+> By default the container runs as root so a manual install needs no host-specific group setup. The automated installer ([3.1 Option A](#31-option-a-automated-installation-installsh-recommended)) instead hardens it to run non-root (UID/GID 1000, joined to the docker.sock group) automatically, with no input required. Either way it's still contained by a read-only root filesystem, dropped Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID limits (see [Container Hardening in the README](README.md#container-hardening)).
+
 ```bash
 docker compose version
 ```
@@ -120,6 +122,8 @@ LOG_LEVEL=INFO
 ```
 
 Only credentials and secrets belong in `.env`. Hosts, ports, recipients, and thresholds are configured in `watchdog-config.yaml`, never hardcoded in this guide or in scripts.
+
+The container runs as root by default for a zero-configuration manual install. If you want the non-root hardening that [Option A](#31-option-a-automated-installation-installsh-recommended) applies automatically, uncomment the `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` lines in `.env.example` and fill in `DOCKER_GID` (`stat -c '%g' /var/run/docker.sock`).
 
 ---
 
@@ -723,7 +727,7 @@ docker compose logs docker-container-watchdog
 ```
 
 Common causes:
-- `/var/run/docker.sock` is not accessible — ensure the host socket exists and the container has read access
+- `/var/run/docker.sock` is not accessible — ensure the host socket exists and Docker is running. Manual installs run the container as root, so no host-side group configuration is required; if you opted into non-root hardening (`WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env`), verify `DOCKER_GID` matches `stat -c '%g' /var/run/docker.sock`.
 - Missing `.env` file — run `cp .env.example .env` and fill in values
 
 ### Alert Notifications Not Received

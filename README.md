@@ -90,10 +90,14 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 | Item | Size |
 |------|------|
 | Docker image (`watchdog:latest`) | ~180 MB (python:3.11-slim base + dependencies) |
-| Running container (memory) | ~50–80 MB |
+| Running container (memory) | ~50–80 MB baseline; capped at `mem_limit: 256m` in `docker-compose.yaml` |
 | `watchdog.tar` export | ~170 MB |
 
-> **Note:** The values above are approximate and may vary depending on the host operating system, Docker version, and installed dependencies.
+> **Note:** The values above are approximate and may vary depending on the host operating system, Docker version, and installed dependencies. If usage approaches the 256 MB limit (check with `docker stats docker-container-watchdog`), raise `mem_limit`/`mem_reservation` in `docker-compose.yaml` rather than removing the limit — and raise `memswap_limit` to at least the new `mem_limit` in **both** `docker-compose.yaml` and `docker-compose.build.yaml`, since Docker rejects a config where `memswap_limit` is lower than `mem_limit`.
+
+### Container Hardening
+
+By default the container runs as **root** so `docker compose up` works with zero configuration — no host-specific group setup needed to read `/var/run/docker.sock`. [install.sh](install.sh) instead auto-detects the socket's GID and opts into running the container as **non-root UID/GID 1000** (joined to that group via `group_add`), with no manual input required; manual installs can do the same by setting `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env` (see [DEPLOYMENT.md](DEPLOYMENT.md#22-configure-environment-variables-env)). Either way, the container is constrained by a read-only root filesystem, no extra Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID caps (`cpus: "0.50"`, `pids_limit: 200`, `mem_limit: 256m`), which contain a leak or runaway condition to this container instead of the host. Note that access to `/var/run/docker.sock` is effectively host-root-equivalent for **any** user (root or not): anything that can reach the socket can create privileged containers or bind-mount the host filesystem, so a compromise of the watchdog process is **not** contained by these controls — treat `docker.sock` access as the primary trust boundary when deciding who/what can reach this host.
 
 
 ### Python Dependencies
@@ -556,6 +560,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
 | 1.5.1 | 2026-08-31 | Rahul Kumar | fixed ignore Dynamic container crash alert |
 | 1.5.0 | 2026-08-27 | Rahul Kumar | Added ignore Dynamic container crash alert |

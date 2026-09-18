@@ -118,7 +118,56 @@ setup_log_directory() {
     else
         print_info "Log directory already exists: ${LOG_DIR}"
     fi
+    # This installer hardens the container to run as UID/GID 1000 (see
+    # detect_docker_gid below) instead of the compose file's root default, so
+    # it must own the dir and any pre-existing files up front. Elevate with
+    # sudo when we are not already root.
+    local PRIV=""
+    if [ "$EUID" -ne 0 ]; then
+        if command -v sudo &>/dev/null; then
+            PRIV="sudo"
+        else
+            print_error "Not running as root and sudo is not available — cannot set ${LOG_DIR} ownership to UID 1000:GID 1000"
+            echo ""
+            echo "  Re-run this script as root, or fix ownership manually before starting:"
+            echo "    chown -R 1000:1000 ${LOG_DIR} && chmod 750 ${LOG_DIR}"
+            exit 1
+        fi
+    fi
+    if ! $PRIV chown -R 1000:1000 "$LOG_DIR"; then
+        print_error "Failed to set ownership of ${LOG_DIR} to UID 1000:GID 1000"
+        echo ""
+        echo "  Fix ownership manually before starting:"
+        echo "    sudo chown -R 1000:1000 ${LOG_DIR} && sudo chmod 750 ${LOG_DIR}"
+        exit 1
+    fi
+    if ! $PRIV chmod 750 "$LOG_DIR"; then
+        print_error "Failed to set permissions on ${LOG_DIR}"
+        exit 1
+    fi
     print_info "Logs will be written to: ${LOG_DIR}/watchdog.log"
+}
+
+################################################################################
+# Docker Socket Group Detection
+################################################################################
+
+detect_docker_gid() {
+    # GID that owns /var/run/docker.sock — the non-root container joins this
+    # group (via group_add in docker-compose.yaml) to read the socket.
+    # No silent fallback: a wrong guessed GID breaks socket access at container
+    # start with a confusing error, so treat detection failure as fatal here.
+    if [ ! -S /var/run/docker.sock ]; then
+        print_error "/var/run/docker.sock not found — cannot determine its group GID"
+        return 1
+    fi
+    local gid
+    gid=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock 2>/dev/null)
+    if [ -z "$gid" ]; then
+        print_error "Could not determine the GID that owns /var/run/docker.sock"
+        return 1
+    fi
+    echo "$gid"
 }
 
 ################################################################################
@@ -131,6 +180,10 @@ load_docker_image() {
     # Check if image is already present
     if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
         print_info "Image ${IMAGE_NAME} already exists locally — using existing image"
+        # watchdog.py is baked into the image, not bind-mounted, so a stale image
+        # keeps running old code even after the host copy is updated.
+        print_warning "Agent code runs from the image, not ${INSTALL_DIR}/watchdog.py"
+        print_info "  To pick up code changes: docker rmi ${IMAGE_NAME} && bash install.sh"
         return 0
     fi
 
@@ -220,6 +273,27 @@ configure_all() {
         IFS= read -r RECONFIG
         if [[ ! "$RECONFIG" =~ ^[Yy]$ ]]; then
             print_info "Keeping existing configuration"
+            # Upgrade path: installs from before non-root hardening existed
+            # predate these vars, which would silently fall back to the
+            # compose file's root default instead of the intended hardening.
+            if [ -f "$ENV_FILE" ]; then
+                local CURRENT_GID
+                CURRENT_GID=$(grep -E '^DOCKER_GID=' "$ENV_FILE" | tail -n1 | cut -d= -f2 | tr -d '[:space:]')
+                if ! [[ "$CURRENT_GID" =~ ^[0-9]+$ ]]; then
+                    print_warning "Existing .env predates non-root hardening — detecting and adding it"
+                    local MIGRATED_GID
+                    MIGRATED_GID=$(detect_docker_gid) || exit 1
+                    for kv in "WATCHDOG_UID=1000" "WATCHDOG_GID=1000" "DOCKER_GID=${MIGRATED_GID}"; do
+                        local key="${kv%%=*}"
+                        if grep -qE "^${key}=" "$ENV_FILE"; then
+                            sed -i.bak -E "s|^${key}=.*|${kv}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
+                        else
+                            printf "%s\n" "$kv" >> "$ENV_FILE"
+                        fi
+                    done
+                    print_success "Set WATCHDOG_UID=1000, WATCHDOG_GID=1000, DOCKER_GID=${MIGRATED_GID} in ${ENV_FILE}"
+                fi
+            fi
             return 0
         fi
         echo ""
@@ -334,6 +408,11 @@ configure_all() {
     WATCHDOG_HOST=$(_prompt "Hostname to display in alerts" "$HOST_DEFAULT")
     echo ""
 
+    # ── Non-root hardening (manual `docker compose up` defaults to root instead) ──
+    local WATCHDOG_UID="1000" WATCHDOG_GID="1000" DOCKER_GID
+    DOCKER_GID=$(detect_docker_gid) || exit 1
+    print_info "Docker socket GID detected: ${DOCKER_GID} — running non-root as UID/GID ${WATCHDOG_UID}"
+
     # ── Write .env ────────────────────────────────────────────────────────────
     {
         printf "# .env — generated by install.sh on %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -349,6 +428,8 @@ configure_all() {
                    "$SNMP_V3_AUTH_KEY" "$SNMP_V3_PRIV_KEY"
         fi
         printf "# Alert identity\nWATCHDOG_HOST=%s\n\n" "$WATCHDOG_HOST"
+        printf "# Non-root hardening\nWATCHDOG_UID=%s\nWATCHDOG_GID=%s\nDOCKER_GID=%s\n\n" \
+               "$WATCHDOG_UID" "$WATCHDOG_GID" "$DOCKER_GID"
         printf "# Tuning\nLOG_LEVEL=INFO\n"
     } > "$ENV_FILE"
     chmod 600 "$ENV_FILE"
