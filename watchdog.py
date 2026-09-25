@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import logging.handlers
 import os
@@ -50,20 +51,25 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
         proto = syslog_cfg.get("protocol", "udp").lower()
         socktype = socket.SOCK_DGRAM if proto == "udp" else socket.SOCK_STREAM
         facility_name = syslog_cfg.get("facility", "local0").upper()
-        facility = getattr(
-            logging.handlers.SysLogHandler,
-            f"LOG_{facility_name}",
-            logging.handlers.SysLogHandler.LOG_LOCAL0,
-        )
-        syslog_handler = logging.handlers.SysLogHandler(
-            address=(host, port),
-            facility=facility,
-            socktype=socktype,
-        )
-        syslog_handler.setFormatter(logging.Formatter(SYSLOG_FORMAT))
-        handlers.append(syslog_handler)
-        # Use a plain formatter for other handlers, syslog gets its own
-        log.info("Syslog handler added: %s:%d (%s)", host, port, proto)
+        facility = getattr(logging.handlers.SysLogHandler, f"LOG_{facility_name}", None)
+        if facility is None:
+            log.warning("Unknown syslog facility %r — falling back to local0", facility_name)
+            facility = logging.handlers.SysLogHandler.LOG_LOCAL0
+        # SysLogHandler resolves (and for TCP connects to) the destination in its
+        # constructor. An unreachable log sink must not stop container monitoring.
+        try:
+            syslog_handler = logging.handlers.SysLogHandler(
+                address=(host, port),
+                facility=facility,
+                socktype=socktype,
+            )
+        except Exception as exc:
+            log.warning("Syslog disabled — cannot reach %s:%d (%s): %s", host, port, proto, exc)
+        else:
+            syslog_handler.setFormatter(logging.Formatter(SYSLOG_FORMAT))
+            handlers.append(syslog_handler)
+            # Use a plain formatter for other handlers, syslog gets its own
+            log.info("Syslog handler added: %s:%d (%s)", host, port, proto)
     logging.basicConfig(level=numeric, format=LOG_FORMAT, handlers=handlers, force=True)
     # Suppress noisy third-party debug chatter (urllib3 Docker socket calls, etc.)
     for noisy in ("urllib3", "urllib3.connectionpool", "docker", "requests"):
@@ -93,6 +99,10 @@ DEFAULT_CONFIG = {
     ],
     "log_file": "/var/log/watchdog/watchdog.log",
     "log_level": "INFO",
+    # Alert state survives restarts so recovery alerts still fire after a reboot.
+    "state_file": "/var/log/watchdog/state.json",
+    # After a host reboot, hold alerts this long and emit one summary instead.
+    "boot_grace_seconds": 180,
     "syslog": {
         "enabled": False,
         "host": "localhost",
@@ -127,21 +137,40 @@ def load_config(path: str) -> dict:
 
 
 # ── Container state tracking ──────────────────────────────────────────────────
+_STATE_VERSION = 1
+
+
+def _host_boot_time() -> int:
+    """Host boot timestamp from /proc/stat btime — not namespaced, so this is the host's."""
+    try:
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    return int(line.split()[1])
+    except Exception as exc:
+        log.debug("Could not read host boot time: %s", exc)
+    return 0
+
+
 class ContainerState:
-    __slots__ = ("name", "unhealthy_cycles", "restart_times", "last_alert_time", "alerted_for")
+    __slots__ = ("name", "lock", "unhealthy_cycles", "restart_times", "last_alert_time",
+                 "alerted_for", "last_restart_count")
 
     def __init__(self, name: str):
         self.name = name
+        self.lock = threading.Lock()  # event thread and poll thread both mutate this
         self.unhealthy_cycles: int = 0
         self.restart_times: list[float] = []
         self.last_alert_time: float = 0.0
         self.alerted_for: str = ""
+        self.last_restart_count: int = -1  # -1 = no baseline taken yet
 
 
 class WatchdogState:
-    def __init__(self):
+    def __init__(self, state_file: str = ""):
         self._lock = threading.Lock()
         self._states: dict[str, ContainerState] = {}
+        self._state_file = state_file
 
     def get(self, name: str) -> ContainerState:
         with self._lock:
@@ -149,13 +178,64 @@ class WatchdogState:
                 self._states[name] = ContainerState(name)
             return self._states[name]
 
-    def cleanup_stale(self, active_names: set) -> None:
+    def cleanup_stale(self, active_names: set, retain_open: bool = False) -> None:
         with self._lock:
-            stale = [n for n in list(self._states) if n not in active_names]
+            stale = [
+                n for n, st in list(self._states.items())
+                if n not in active_names and not (retain_open and st.alerted_for)
+            ]
             for n in stale:
                 self._states.pop(n, None)
         for n in stale:
             log.debug("Removing stale state for container: %s", n)
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+    def load(self) -> tuple[dict, int]:
+        """Return (persisted alert entries, host boot time recorded at last save)."""
+        if not self._state_file or not os.path.exists(self._state_file):
+            return {}, 0
+        try:
+            with open(self._state_file) as f:
+                data = json.load(f)
+            if data.get("version") != _STATE_VERSION:
+                log.warning("State file %s has version %s (expected %d) — ignoring",
+                            self._state_file, data.get("version"), _STATE_VERSION)
+                return {}, 0
+            return data.get("containers") or {}, int(data.get("boot_time") or 0)
+        except Exception as exc:
+            # A corrupt state file must never stop monitoring.
+            log.warning("Could not read state file %s (%s) — starting with empty state",
+                        self._state_file, exc)
+            return {}, 0
+
+    def save(self, boot_time: int) -> None:
+        if not self._state_file:
+            return
+        with self._lock:
+            containers = {
+                st.name: {
+                    "alerted_for": st.alerted_for,
+                    "last_alert_time": st.last_alert_time,
+                }
+                for st in self._states.values()
+                if st.alerted_for
+            }
+        record = {
+            "version": _STATE_VERSION,
+            "boot_time": boot_time,
+            "saved_at": time.time(),
+            "containers": containers,
+        }
+        tmp = f"{self._state_file}.tmp"
+        try:
+            parent = os.path.dirname(self._state_file)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(tmp, "w") as f:
+                json.dump(record, f)
+            os.replace(tmp, self._state_file)  # atomic: never leave a half-written file
+        except Exception as exc:
+            log.warning("Could not write state file %s: %s", self._state_file, exc)
 
 
 # ── Alert payload ─────────────────────────────────────────────────────────────
@@ -167,6 +247,8 @@ def _probe_type_label(detail: str) -> str:
         return "TCP connect"
     if detail.startswith("Docker health probe failed"):
         return "Docker HEALTHCHECK"
+    if detail.startswith("Exec probe failed"):
+        return "Exec command"
     if detail.startswith("/proc alive check failed"):
         return "/proc alive check"
     if detail.startswith("Crash probe failed"):
@@ -889,6 +971,10 @@ ACTIONS = {
         "INFO",
         "Container is back to normal operation. No action required.",
     ),
+    "reboot-summary": (
+        "INFO",
+        "Post-reboot status summary. No action required unless containers are listed as still failing.",
+    ),
 }
 
 
@@ -1116,7 +1202,8 @@ def record_alert(state: ContainerState, failure_type: str) -> None:
 class Watchdog:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.state = WatchdogState()
+        self._state_file = cfg.get("state_file") or ""
+        self.state = WatchdogState(self._state_file)
         self.host = os.environ.get("WATCHDOG_HOST", socket.gethostname())
         self.runbook_base = cfg.get(
             "runbook_base_url", "https://wiki.radware.internal/runbooks"
@@ -1130,22 +1217,137 @@ class Watchdog:
         self._discovered_checks: dict[str, dict | None] = {}  # auto-discovery cache
         self._oom_containers: set[str] = set()  # suppress die alert when oom already fired
         self._auto_cfg: dict = cfg.get("auto_health_check", {})
+        _manual = cfg.get("container_health_checks") or {}
+        self._manual_checks: dict = _manual if isinstance(_manual, dict) else {}
         self._session = requests.Session()  # reuse connections for health probes
         self.client = docker.from_env()
         self._stop_event = threading.Event()
+        self._boot_time = _host_boot_time()
+        self._boot_grace_secs = max(0, int(cfg.get("boot_grace_seconds", 180) or 0))
+        self._grace_until: float = 0.0
+        self._folded: list[AlertPayload] = []  # alerts held during the post-reboot window
+        self._restore_state()
+
+    # ── State restore ─────────────────────────────────────────────────────────
+    def _restore_state(self) -> None:
+        """Reload alert state so recovery alerts still fire after a watchdog or host restart."""
+        persisted, saved_boot_time = self.state.load()
+        for name, entry in persisted.items():
+            if not isinstance(entry, dict):
+                continue
+            failure_type = str(entry.get("alerted_for") or "")
+            if not failure_type:
+                continue
+            st = self.state.get(str(name))
+            st.alerted_for = failure_type
+            # unhealthy_cycles and restart_times stay at zero on purpose: they are
+            # rolling observation windows, and a stale count would alert instantly.
+            try:
+                st.last_alert_time = float(entry.get("last_alert_time") or 0.0)
+            except (TypeError, ValueError):
+                st.last_alert_time = 0.0
+            log.info("Restored open '%s' alert for %s", failure_type, name)
+
+        rebooted = bool(saved_boot_time and self._boot_time and saved_boot_time != self._boot_time)
+        if rebooted:
+            # Armed even when the grace window is 0: the window only controls how
+            # long alerts are held, not whether the reboot is reported.
+            self._grace_until = time.time() + self._boot_grace_secs
+            log.info(
+                "Host rebooted since last run (boot time %d → %d) — holding alerts "
+                "for %ds and reporting one summary",
+                saved_boot_time, self._boot_time, self._boot_grace_secs,
+            )
+        elif persisted:
+            log.info("Watchdog restarted without a host reboot — resuming %d open alert(s)",
+                     len(persisted))
+
+    # ── Alert gating ──────────────────────────────────────────────────────────
+    def _claim_alert(self, state: ContainerState, failure_type: str) -> bool:
+        """Atomically take the alert slot so both threads cannot fire the same alert."""
+        with state.lock:
+            if not should_alert(state, failure_type, self._cooldown_minutes):
+                return False
+            record_alert(state, failure_type)
+        self.state.save(self._boot_time)
+        return True
+
+    def _dispatch(self, payload: AlertPayload) -> None:
+        """Send an alert, or hold it for the summary during the post-reboot window."""
+        if self._grace_until and time.time() < self._grace_until:
+            self._folded.append(payload)
+            log.info("%s: %s held for post-reboot summary",
+                     payload.container_name, payload.failure_type)
+            return
+        dispatch_alert(payload, self.cfg)
+
+    def _container_tally(self) -> tuple[int, int]:
+        """(running, not-running) counts of monitored containers, for the reboot summary."""
+        running = not_running = 0
+        try:
+            for c in self.client.containers.list(all=True):
+                if c.name in self._excluded:
+                    continue
+                if c.status == "running":
+                    running += 1
+                else:
+                    not_running += 1
+        except Exception as exc:
+            log.debug("Could not tally containers for the reboot summary: %s", exc)
+        return running, not_running
+
+    def _flush_boot_summary(self) -> None:
+        """Emit the single post-reboot status alert once the grace window closes."""
+        if not self._grace_until or time.time() < self._grace_until:
+            return
+        self._grace_until = 0.0
+        recovered  = sorted({p.container_name for p in self._folded if p.failure_type == "recovered"})
+        still_down = sorted({p.container_name for p in self._folded if p.failure_type != "recovered"})
+        self._folded.clear()
+        # Sent even when nothing was held: after a reboot, silence is
+        # indistinguishable from the watchdog itself having failed to come back.
+        if not recovered and not still_down:
+            log.info("Post-reboot grace window closed — no alerts were held")
+        booted_at = (
+            datetime.fromtimestamp(self._boot_time, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if self._boot_time else "unknown"
+        )
+        running, not_running = self._container_tally()
+        detail = (
+            f"Host booted {booted_at}. "
+            f"Containers: {running} running, {not_running} not running. "
+            f"Recovered since last alert: {', '.join(recovered) or 'none'}. "
+            f"Still failing: {', '.join(still_down) or 'none'}."
+        )
+        payload = AlertPayload(
+            severity="HIGH" if still_down else "INFO",
+            container_name="(post-reboot summary)",
+            container_id="",
+            host=self.host,
+            failure_type="reboot-summary",
+            exit_code=None,
+            log_tail="",
+            recommended_action=ACTIONS["reboot-summary"][1],
+            runbook_url=self.runbook_base,
+            probe_detail=detail,
+        )
+        dispatch_alert(payload, self.cfg)
 
     # ── Recovery alert ─────────────────────────────────────────────────────────
     def _maybe_alert_recovery(self, container, state: ContainerState) -> None:
         """Fire a one-time RECOVERED alert when a previously-alarmed container is healthy again."""
         if not self.cfg.get("alert_on_recovery", True):
             return
-        if not state.alerted_for or state.alerted_for == "recovered":
-            return
+        with state.lock:
+            previous = state.alerted_for
+            if not previous or previous == "recovered":
+                return
+            state.alerted_for = ""
+            state.last_alert_time = time.time()
+        self.state.save(self._boot_time)
         payload = build_payload(container, "recovered", self.host, self.runbook_base,
-                                 probe_detail=f"Recovered from '{state.alerted_for}'")
-        dispatch_alert(payload, self.cfg)
-        state.alerted_for = ""
-        state.last_alert_time = time.time()
+                                 probe_detail=f"Recovered from '{previous}'")
+        self._dispatch(payload)
 
     # ── Event stream listener ─────────────────────────────────────────────────
     def _event_listener(self) -> None:
@@ -1220,42 +1422,42 @@ class Watchdog:
                 log.warning("%s: exit 137 not suppressed — signals: %s",
                             name, _mariadb_helper_signals(container, attributes))
             failure_type = "crashed"
-            if should_alert(state, failure_type, self._cooldown_minutes):
+            if self._claim_alert(state, failure_type):
                 payload = build_payload(container, failure_type, self.host,
                                         self.runbook_base, exit_code,
                                         probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
-                dispatch_alert(payload, self.cfg)
-                record_alert(state, failure_type)
+                self._dispatch(payload)
 
         elif action == "oom":
             failure_type = "oom"
             self._oom_containers.add(name)  # mark so the imminent die event is suppressed
-            if should_alert(state, failure_type, self._cooldown_minutes):
+            if self._claim_alert(state, failure_type):
                 payload = build_payload(container, failure_type, self.host,
                                         self.runbook_base,
                                         extra_context=get_memory_stats(container),
                                         probe_detail="OOM probe failed - container was OOM-killed by the kernel")
-                dispatch_alert(payload, self.cfg)
-                record_alert(state, failure_type)
+                self._dispatch(payload)
 
         elif action == "health_status: unhealthy":
-            state.unhealthy_cycles += 1
+            with state.lock:
+                state.unhealthy_cycles += 1
+                cycles = state.unhealthy_cycles
             threshold = self._unhealthy_threshold
-            log.debug("%s unhealthy cycle %d/%d", name, state.unhealthy_cycles, threshold)
-            if state.unhealthy_cycles >= threshold:
+            log.debug("%s unhealthy cycle %d/%d", name, cycles, threshold)
+            if cycles >= threshold:
                 failure_type = "unhealthy"
-                if should_alert(state, failure_type, self._cooldown_minutes):
+                if self._claim_alert(state, failure_type):
                     probe_detail = get_docker_health_log(container) or "Docker health probe failed - health_status: unhealthy event"
                     payload = build_payload(container, failure_type, self.host,
                                             self.runbook_base,
                                             probe_detail=probe_detail)
-                    dispatch_alert(payload, self.cfg)
-                    record_alert(state, failure_type)
+                    self._dispatch(payload)
 
         elif action == "health_status: healthy":
-            if state.unhealthy_cycles > 0:
-                log.info("%s recovered — resetting unhealthy counter", name)
-            state.unhealthy_cycles = 0
+            with state.lock:
+                if state.unhealthy_cycles > 0:
+                    log.info("%s recovered — resetting unhealthy counter", name)
+                state.unhealthy_cycles = 0
             self._maybe_alert_recovery(container, state)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
@@ -1270,6 +1472,7 @@ class Watchdog:
             self._stop_event.wait(interval)
 
     def _poll_all_containers(self) -> None:
+        self._flush_boot_summary()
         excluded            = self._excluded
         restart_threshold   = self._restart_threshold
         restart_window      = self._restart_window_secs
@@ -1292,41 +1495,61 @@ class Watchdog:
             health = self._get_health(container)    # healthy, unhealthy, none
             state  = self.state.get(name)
 
-            # Track restarts within rolling window
-            state.restart_times = [t for t in state.restart_times
-                                   if now - t < restart_window]
+            # Restart tracking reads Docker's RestartCount rather than counting
+            # polls that observe status == "restarting": one slow restart seen on
+            # several polls used to look like a loop, while restarts that began
+            # and finished between two polls were never counted at all.
+            try:
+                restart_count = int(container.attrs.get("RestartCount", 0) or 0)
+            except (TypeError, ValueError):
+                restart_count = 0
 
-            # Detect restart loop via poll (supplement to event stream)
+            with state.lock:
+                state.restart_times = [t for t in state.restart_times
+                                       if now - t < restart_window]
+                if state.last_restart_count < 0 or restart_count < state.last_restart_count:
+                    # First sighting, or the container was recreated (count resets):
+                    # take a baseline instead of alerting on history we never saw.
+                    state.last_restart_count = restart_count
+                elif restart_count > state.last_restart_count:
+                    new_restarts = restart_count - state.last_restart_count
+                    state.restart_times.extend([now] * min(new_restarts, restart_threshold))
+                    state.last_restart_count = restart_count
+                restarts = len(state.restart_times)
+
+            if restarts >= restart_threshold:
+                failure_type = "restart-loop"
+                if self._claim_alert(state, failure_type):
+                    payload = build_payload(container, failure_type,
+                                            self.host, self.runbook_base,
+                                            probe_detail=f"Restart-loop probe failed - {restarts} restarts in {int(self._restart_window_secs // 60)}min window")
+                    self._dispatch(payload)
+
             if status == "restarting":
                 log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
-                state.restart_times.append(now)
-                if len(state.restart_times) >= restart_threshold:
-                    failure_type = "restart-loop"
-                    if should_alert(state, failure_type, self._cooldown_minutes):
-                        payload = build_payload(container, failure_type,
-                                                self.host, self.runbook_base,
-                                                probe_detail=f"Restart-loop probe failed - {len(state.restart_times)} restarts in {int(self._restart_window_secs // 60)}min window")
-                        dispatch_alert(payload, self.cfg)
-                        record_alert(state, failure_type)
 
             # Detect stuck containers missed by event stream
             elif status == "running" and health == "unhealthy":
                 log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
-                state.unhealthy_cycles += 1
-                if state.unhealthy_cycles >= unhealthy_threshold:
+                with state.lock:
+                    state.unhealthy_cycles += 1
+                    cycles = state.unhealthy_cycles
+                if cycles >= unhealthy_threshold:
                     failure_type = "unhealthy"
-                    if should_alert(state, failure_type, self._cooldown_minutes):
+                    if self._claim_alert(state, failure_type):
                         probe_detail = get_docker_health_log(container) or "Docker health probe failed - health_status: unhealthy (poll-detected)"
                         payload = build_payload(container, failure_type,
                                                 self.host, self.runbook_base,
                                                 probe_detail=probe_detail)
-                        dispatch_alert(payload, self.cfg)
-                        record_alert(state, failure_type)
+                        self._dispatch(payload)
 
             elif status == "running" and health in ("healthy", "none"):
                 # Determine which health check to run and get result first
                 probe_detail = ""
-                if health == "none" and self.cfg.get("auto_health_check", {}).get("enabled"):
+                manual_spec = self._manual_checks.get(name) if health == "none" else None
+                if isinstance(manual_spec, dict):
+                    is_healthy, probe_detail = self._manual_health_check(container, manual_spec)
+                elif health == "none" and self._auto_cfg.get("enabled"):
                     is_healthy, probe_detail = self._auto_discover_health_check(container)
                 else:
                     is_healthy = True  # Docker-native healthy, or no check configured
@@ -1336,33 +1559,45 @@ class Watchdog:
                 log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, display_health)
 
                 if not is_healthy:
-                    state.unhealthy_cycles += 1
+                    with state.lock:
+                        state.unhealthy_cycles += 1
+                        cycles = state.unhealthy_cycles
                     log.debug(
                         "%s: health check failed — cycle %d/%d",
-                        name, state.unhealthy_cycles, unhealthy_threshold,
+                        name, cycles, unhealthy_threshold,
                     )
-                    if state.unhealthy_cycles >= unhealthy_threshold:
+                    if cycles >= unhealthy_threshold:
                         failure_type = "unhealthy"
-                        if should_alert(state, failure_type, self._cooldown_minutes):
+                        if self._claim_alert(state, failure_type):
                             payload = build_payload(container, failure_type,
                                                     self.host, self.runbook_base,
                                                     probe_detail=probe_detail)
-                            dispatch_alert(payload, self.cfg)
-                            record_alert(state, failure_type)
+                            self._dispatch(payload)
                 else:
-                    if state.unhealthy_cycles > 0:
-                        log.info("%s: check recovered — resetting counters", name)
-                    state.unhealthy_cycles = 0
-                    state.restart_times = []
-                    self._maybe_alert_recovery(container, state)
+                    with state.lock:
+                        if state.unhealthy_cycles > 0:
+                            log.info("%s: check recovered — resetting counters", name)
+                        state.unhealthy_cycles = 0
+                        # restart_times ages out on its own. Clearing it here would
+                        # declare recovery for a container merely caught healthy
+                        # between two crashes of an ongoing restart loop.
+                        still_looping = (state.alerted_for == "restart-loop"
+                                         and len(state.restart_times) >= restart_threshold)
+                    if not still_looping:
+                        self._maybe_alert_recovery(container, state)
 
             else:
                 log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
 
-        self.state.cleanup_stale(seen_names)
+        # During the post-reboot window a restored container may not exist yet —
+        # keep its open alert so the recovery still fires once it comes back.
+        self.state.cleanup_stale(seen_names, retain_open=bool(self._grace_until))
         # Clean up discovery cache for containers no longer running
         for _name in self._discovered_checks.keys() - seen_names:
             self._discovered_checks.pop(_name, None)
+        # Refresh the stored boot time every cycle: otherwise a host that never
+        # alerted has no baseline, and an unclean reboot goes unreported.
+        self.state.save(self._boot_time)
 
     @staticmethod
     def _get_health(container) -> str:
@@ -1434,6 +1669,57 @@ class Watchdog:
         except Exception:
             pass
         return sorted(ports)
+
+    def _manual_health_check(self, container, spec: dict) -> tuple[bool, str]:
+        """
+        Run an operator-defined check from container_health_checks, which takes
+        precedence over auto-discovery for containers with health=none.
+        type: http  — GET http://<container-ip>:<internal_port><path>, healthy = status < 500.
+        type: exec  — run `command` inside the container, healthy = exit code 0.
+        Returns (healthy, probe_detail).
+        """
+        name       = container.name
+        check_type = str(spec.get("type", "http")).lower()
+        timeout    = max(1, int(spec.get("timeout_seconds", 5)))
+
+        if check_type == "exec":
+            command = spec.get("command")
+            if not command:
+                log.warning("%s: manual exec check has no 'command' — skipping", name)
+                return True, ""
+            try:
+                result = container.exec_run(command)
+            except Exception as exc:
+                log.debug("%s: manual exec check error: %s", name, exc)
+                return True, ""  # can't run the probe — don't false-alarm
+            if result.exit_code == 0:
+                return True, ""
+            output = (result.output or b"").decode(errors="replace").strip()
+            return False, (f"Exec probe failed - '{command}' exited {result.exit_code}: "
+                           f"{output or '(no output)'}")
+
+        if check_type != "http":
+            log.warning("%s: unknown manual check type %r — skipping", name, check_type)
+            return True, ""
+
+        port = spec.get("internal_port")
+        if not port:
+            log.warning("%s: manual http check has no 'internal_port' — skipping", name)
+            return True, ""
+        ip = self._get_container_ip(container)
+        if not ip:
+            log.debug("%s: manual http check — no container IP available, skipping", name)
+            return True, ""
+        url = f"http://{ip}:{port}{spec.get('path', '/')}"
+        try:
+            r = self._session.get(url, timeout=timeout)
+        except Exception as exc:
+            # An explicitly configured endpoint that cannot be reached is a failure.
+            return False, f"HTTP probe failed - {exc}, URI {url}"
+        if r.status_code < 500:
+            return True, ""
+        return False, (f"HTTP probe failed - error response {r.status_code} "
+                       f"{r.reason or 'FAIL'}, URI {url}")
 
     def _auto_discover_health_check(self, container) -> tuple[bool, str]:
         """
@@ -1598,6 +1884,7 @@ class Watchdog:
     def stop(self) -> None:
         log.info("Watchdog shutting down")
         self._stop_event.set()
+        self.state.save(self._boot_time)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

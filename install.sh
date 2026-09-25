@@ -2,7 +2,6 @@
 
 ################################################################################
 # CyberController Container Watchdog - Installation Script
-# Version: 1.0.0
 #
 # Installs the watchdog Docker container that monitors all containers on the
 # host and fires alerts (Slack, SMTP, SNMP) on crashes, OOM-kills,
@@ -30,8 +29,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$SCRIPT_DIR"          # package is already extracted to the install directory
 IMAGE_ARCHIVE="${SCRIPT_DIR}/watchdog.tar"
 CONTAINER_NAME="docker-container-watchdog"
-IMAGE_NAME="watchdog:latest"
-VERSION="1.0.0"
+VERSION_FILE="${SCRIPT_DIR}/VERSION"
+
+# Single source of truth for the release: the packaged VERSION file. The image
+# is pinned to it so an upgrade can never silently keep serving the previous
+# build that also happens to be tagged :latest.
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || true)"
+if [ -z "$VERSION" ]; then
+    echo "ERROR: VERSION file missing or empty: ${VERSION_FILE}" >&2
+    echo "       Re-extract the installation package and try again." >&2
+    exit 1
+fi
+IMAGE_NAME="watchdog:${VERSION}"
+IMAGE_LATEST="watchdog:latest"     # convenience tag only — never the deployed reference
+RUN_UID="1000"                     # non-root runtime user baked in by this installer
+RUN_GID="1000"
 DC=""  # compose command — set automatically in check_prerequisites
 
 ################################################################################
@@ -55,6 +67,155 @@ print_section() {
     echo ""
     echo -e "${BLUE}═══${NC} $1"
     echo ""
+}
+
+################################################################################
+# Privileged File Helpers
+#
+# Config files left behind by an older, root-run installation are commonly
+# 600 root:root. A docker-group user re-running this installer must still be
+# able to migrate them, so every write goes through these helpers: attempt
+# unprivileged first, escalate to sudo, and fail loudly instead of leaving a
+# half-migrated file behind.
+################################################################################
+
+# Prints the privilege prefix to use ("sudo" or nothing); non-zero if elevation
+# is needed but unavailable.
+_priv_prefix() {
+    [ "$EUID" -eq 0 ] && return 0
+    command -v sudo &>/dev/null && { printf 'sudo'; return 0; }
+    return 1
+}
+
+# Usage: _run_priv <cmd...> — run unprivileged, retry with sudo on failure.
+_run_priv() {
+    "$@" 2>/dev/null && return 0
+    local priv
+    priv=$(_priv_prefix) || return 1
+    [ -z "$priv" ] && return 1      # already root: retrying changes nothing
+    $priv "$@"
+}
+
+# Usage: _publish_file SRC DST MODE [OWNER:GROUP]
+# Replaces DST with SRC's contents, then applies MODE/OWNER.
+_publish_file() {
+    local src="$1" dst="$2" mode="$3" owner="${4:-}"
+    if ! _run_priv cp "$src" "$dst"; then
+        print_error "Failed to write ${dst}"
+        echo ""
+        echo "  The file is not writable by $(id -un) and sudo is unavailable."
+        echo "  Re-run this installer as root."
+        return 1
+    fi
+    if [ -n "$owner" ] && ! _run_priv chown "$owner" "$dst"; then
+        print_error "Failed to set ownership ${owner} on ${dst}"
+        return 1
+    fi
+    if ! _run_priv chmod "$mode" "$dst"; then
+        print_error "Failed to set permissions ${mode} on ${dst}"
+        return 1
+    fi
+    return 0
+}
+
+# Usage: _read_file_priv FILE — cat a file, escalating if it is not readable.
+_read_file_priv() {
+    local file="$1"
+    [ -e "$file" ] || return 1      # never prompt for sudo just to miss a file
+    [ -r "$file" ] && { cat "$file"; return $?; }
+    local priv
+    priv=$(_priv_prefix) || return 1
+    [ -z "$priv" ] && return 1
+    $priv cat "$file"
+}
+
+# Usage: update_env_vars FILE KEY=VALUE...
+# Upserts each KEY=VALUE, preserving the file's existing owner, then verifies
+# every value really landed on disk before returning success.
+update_env_vars() {
+    local file="$1"; shift
+    local tmp tmp2 kv key rc=0
+
+    tmp=$(mktemp) || { print_error "Could not create a temporary file"; return 1; }
+    tmp2=$(mktemp) || { rm -f "$tmp"; print_error "Could not create a temporary file"; return 1; }
+    chmod 600 "$tmp" "$tmp2"
+
+    if ! _read_file_priv "$file" > "$tmp"; then
+        print_error "Cannot read ${file} — not readable by $(id -un) and sudo is unavailable"
+        rm -f "$tmp" "$tmp2"
+        return 1
+    fi
+
+    for kv in "$@"; do
+        key="${kv%%=*}"
+        if grep -q -e "^${key}=" "$tmp"; then
+            # index() instead of sed: values may contain / & \ and other
+            # characters that would be interpreted in a substitution.
+            awk -v key="$key" -v line="$kv" \
+                'index($0, key "=") == 1 { print line; next } { print }' "$tmp" > "$tmp2" \
+                && cat "$tmp2" > "$tmp"
+        else
+            printf '%s\n' "$kv" >> "$tmp"
+        fi
+    done
+
+    if ! _publish_file "$tmp" "$file" 600; then
+        rm -f "$tmp" "$tmp2"
+        return 1
+    fi
+
+    # Read back: a successful cp is not proof the values are present, and
+    # silently continuing here is what left upgrades running as root before.
+    if ! _read_file_priv "$file" > "$tmp2"; then
+        print_error "Cannot verify ${file} after writing it"
+        rm -f "$tmp" "$tmp2"
+        return 1
+    fi
+    for kv in "$@"; do
+        if ! grep -qxF "$kv" "$tmp2"; then
+            print_error "Failed to save ${kv%%=*} in ${file}"
+            rc=1
+        fi
+    done
+    rm -f "$tmp" "$tmp2"
+
+    if [ "$rc" -ne 0 ]; then
+        echo ""
+        echo "  Add the following lines to ${file} manually and re-run:"
+        printf '    %s\n' "$@"
+        return 1
+    fi
+
+    # Compose reads .env as the user running it — that is this user, right now.
+    if [ ! -r "$file" ]; then
+        print_warning "${file} is not readable by $(id -un) — handing it to this user"
+        if ! _run_priv chown "$(id -u):$(id -g)" "$file"; then
+            print_error "Could not make ${file} readable by $(id -un) — docker compose will fail"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# watchdog-config.yaml is bind-mounted read-only into a container running as
+# RUN_UID:RUN_GID. A config left 600 root:root by an older install makes the
+# agent exit on startup, so normalise ownership/mode on every run.
+harden_config_permissions() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    if ! _run_priv chown "${RUN_UID}:${RUN_GID}" "$file"; then
+        print_error "Failed to set ownership of ${file} to UID ${RUN_UID}:GID ${RUN_GID}"
+        echo ""
+        echo "  The container runs as ${RUN_UID}:${RUN_GID} and could not read it. Fix manually:"
+        echo "    sudo chown ${RUN_UID}:${RUN_GID} ${file} && sudo chmod 640 ${file}"
+        return 1
+    fi
+    if ! _run_priv chmod 640 "$file"; then
+        print_error "Failed to set permissions 640 on ${file}"
+        return 1
+    fi
+    print_success "Config readable by the container runtime user (${RUN_UID}:${RUN_GID}, mode 640)"
+    return 0
 }
 
 ################################################################################
@@ -120,28 +281,15 @@ setup_log_directory() {
     fi
     # This installer hardens the container to run as UID/GID 1000 (see
     # detect_docker_gid below) instead of the compose file's root default, so
-    # it must own the dir and any pre-existing files up front. Elevate with
-    # sudo when we are not already root.
-    local PRIV=""
-    if [ "$EUID" -ne 0 ]; then
-        if command -v sudo &>/dev/null; then
-            PRIV="sudo"
-        else
-            print_error "Not running as root and sudo is not available — cannot set ${LOG_DIR} ownership to UID 1000:GID 1000"
-            echo ""
-            echo "  Re-run this script as root, or fix ownership manually before starting:"
-            echo "    chown -R 1000:1000 ${LOG_DIR} && chmod 750 ${LOG_DIR}"
-            exit 1
-        fi
-    fi
-    if ! $PRIV chown -R 1000:1000 "$LOG_DIR"; then
-        print_error "Failed to set ownership of ${LOG_DIR} to UID 1000:GID 1000"
+    # it must own the dir and any pre-existing files up front.
+    if ! _run_priv chown -R "${RUN_UID}:${RUN_GID}" "$LOG_DIR"; then
+        print_error "Failed to set ownership of ${LOG_DIR} to UID ${RUN_UID}:GID ${RUN_GID}"
         echo ""
         echo "  Fix ownership manually before starting:"
-        echo "    sudo chown -R 1000:1000 ${LOG_DIR} && sudo chmod 750 ${LOG_DIR}"
+        echo "    sudo chown -R ${RUN_UID}:${RUN_GID} ${LOG_DIR} && sudo chmod 750 ${LOG_DIR}"
         exit 1
     fi
-    if ! $PRIV chmod 750 "$LOG_DIR"; then
+    if ! _run_priv chmod 750 "$LOG_DIR"; then
         print_error "Failed to set permissions on ${LOG_DIR}"
         exit 1
     fi
@@ -177,40 +325,67 @@ detect_docker_gid() {
 load_docker_image() {
     print_section "Loading Docker Image"
 
-    # Check if image is already present
-    if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
-        print_info "Image ${IMAGE_NAME} already exists locally — using existing image"
-        # watchdog.py is baked into the image, not bind-mounted, so a stale image
-        # keeps running old code even after the host copy is updated.
-        print_warning "Agent code runs from the image, not ${INSTALL_DIR}/watchdog.py"
-        print_info "  To pick up code changes: docker rmi ${IMAGE_NAME} && bash install.sh"
-        return 0
-    fi
+    # Always load the packaged archive first. The previous behaviour — skipping
+    # the load whenever any watchdog image already existed — meant an upgrade
+    # kept running the old code, because watchdog.py ships inside the image.
+    if [ -f "$IMAGE_ARCHIVE" ]; then
+        print_info "Loading image from archive: $(basename "$IMAGE_ARCHIVE")"
+        local load_output
+        if ! load_output=$(docker load -i "$IMAGE_ARCHIVE" 2>&1); then
+            print_error "Failed to load ${IMAGE_ARCHIVE}"
+            echo "$load_output"
+            exit 1
+        fi
+        echo "$load_output"
 
-    if [ ! -f "$IMAGE_ARCHIVE" ]; then
+        # The archive must carry the release tag. Promoting whatever it happened
+        # to contain would silently relabel an older build as this version, and
+        # the post-install image check would then confirm the wrong release.
+        if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+            print_error "${IMAGE_ARCHIVE} does not contain ${IMAGE_NAME}"
+            echo ""
+            echo "  The archive loaded:"
+            printf '%s\n' "$load_output" \
+                | sed -n -e 's/^Loaded image: */    /p' -e 's/^Loaded image ID: */    /p'
+            echo ""
+            echo "  This package is version ${VERSION} (from ${VERSION_FILE})."
+            echo "  Obtain a watchdog.tar built for ${VERSION}, or rebuild it:"
+            echo "    docker build -t ${IMAGE_NAME} ."
+            echo "    docker tag ${IMAGE_NAME} ${IMAGE_LATEST}"
+            echo "    docker save ${IMAGE_NAME} ${IMAGE_LATEST} -o watchdog.tar"
+            exit 1
+        fi
+    else
         print_warning "Image archive not found: ${IMAGE_ARCHIVE}"
-        echo ""
+
+        # No archive — build from source if the Dockerfile shipped.
         if [ -f "${INSTALL_DIR}/Dockerfile" ]; then
-            print_info "Building image from source — this may take a few minutes..."
+            print_info "Building ${IMAGE_NAME} from source — this may take a few minutes..."
             # Use a clean temp dir so any .dockerignore in INSTALL_DIR is bypassed
             local tmpdir
             tmpdir=$(mktemp -d)
             trap "rm -rf '${tmpdir}'" EXIT
             cp "${INSTALL_DIR}/Dockerfile"   "${tmpdir}/"
             cp "${INSTALL_DIR}/watchdog.py"  "${tmpdir}/"
-            docker build -t "${IMAGE_NAME}" "${tmpdir}"
+            if ! docker build -t "${IMAGE_NAME}" "${tmpdir}"; then
+                print_error "Build failed — cannot produce ${IMAGE_NAME}"
+                exit 1
+            fi
             print_success "Image built: ${IMAGE_NAME}"
-            return 0
+        else
+            print_error "Cannot proceed: ${IMAGE_NAME} is not available"
+            echo ""
+            echo "  watchdog.tar not found and Dockerfile not found."
+            echo "  Copy watchdog.tar into: $(dirname "$IMAGE_ARCHIVE") and re-run."
+            exit 1
         fi
-        print_error "Cannot proceed: watchdog.tar not found and Dockerfile not found"
-        echo ""
-        echo "  Copy watchdog.tar into: $(dirname "$IMAGE_ARCHIVE") and re-run."
-        exit 1
     fi
 
-    print_info "Loading image from archive: $(basename "$IMAGE_ARCHIVE")"
-    docker load -i "$IMAGE_ARCHIVE"
-    print_success "Image loaded: ${IMAGE_NAME}"
+    # Convenience alias only — docker-compose.yaml deploys ${IMAGE_NAME}.
+    docker tag "$IMAGE_NAME" "$IMAGE_LATEST" &>/dev/null || \
+        print_warning "Could not update the ${IMAGE_LATEST} convenience tag"
+
+    print_success "Image ready: ${IMAGE_NAME}"
 }
 
 ################################################################################
@@ -262,12 +437,20 @@ configure_all() {
     ENV_FILE="${INSTALL_DIR}/.env"
     CONFIG_FILE="${INSTALL_DIR}/watchdog-config.yaml"
 
+    # Keeping a half-present configuration breaks the deployment: a missing .env
+    # aborts compose on env_file, and a missing watchdog-config.yaml makes Docker
+    # create a directory at the bind-mount path. Only offer to keep when both exist.
+    if { [ -f "$ENV_FILE" ] || [ -f "$CONFIG_FILE" ]; } && \
+       { [ ! -f "$ENV_FILE" ] || [ ! -f "$CONFIG_FILE" ]; }; then
+        local missing=""
+        [ -f "$ENV_FILE" ]    || missing+=" .env"
+        [ -f "$CONFIG_FILE" ] || missing+=" watchdog-config.yaml"
+        print_warning "Incomplete configuration — missing:${missing}"
+        print_warning "The wizard regenerates both files — re-enter your settings when prompted"
+        echo ""
     # Offer to reconfigure if files already exist
-    if [ -f "$ENV_FILE" ] || [ -f "$CONFIG_FILE" ]; then
-        local existing=""
-        [ -f "$ENV_FILE" ]    && existing+=" .env"
-        [ -f "$CONFIG_FILE" ] && existing+=" watchdog-config.yaml"
-        print_info "Existing configuration detected:${existing}"
+    elif [ -f "$ENV_FILE" ] && [ -f "$CONFIG_FILE" ]; then
+        print_info "Existing configuration detected: .env watchdog-config.yaml"
         printf "  Reconfigure from scratch? [y/N]: "
         local RECONFIG
         IFS= read -r RECONFIG
@@ -276,24 +459,29 @@ configure_all() {
             # Upgrade path: installs from before non-root hardening existed
             # predate these vars, which would silently fall back to the
             # compose file's root default instead of the intended hardening.
+            # WATCHDOG_VERSION is refreshed on every run so the container is
+            # redeployed on the release that was just loaded.
             if [ -f "$ENV_FILE" ]; then
-                local CURRENT_GID
-                CURRENT_GID=$(grep -E '^DOCKER_GID=' "$ENV_FILE" | tail -n1 | cut -d= -f2 | tr -d '[:space:]')
-                if ! [[ "$CURRENT_GID" =~ ^[0-9]+$ ]]; then
+                local CURRENT_GID MIGRATED_GID
+                CURRENT_GID=$(_read_file_priv "$ENV_FILE" | grep -E '^DOCKER_GID=' | tail -n1 | cut -d= -f2 | tr -d '[:space:]')
+                if [[ "$CURRENT_GID" =~ ^[0-9]+$ ]]; then
+                    MIGRATED_GID="$CURRENT_GID"
+                else
                     print_warning "Existing .env predates non-root hardening — detecting and adding it"
-                    local MIGRATED_GID
                     MIGRATED_GID=$(detect_docker_gid) || exit 1
-                    for kv in "WATCHDOG_UID=1000" "WATCHDOG_GID=1000" "DOCKER_GID=${MIGRATED_GID}"; do
-                        local key="${kv%%=*}"
-                        if grep -qE "^${key}=" "$ENV_FILE"; then
-                            sed -i.bak -E "s|^${key}=.*|${kv}|" "$ENV_FILE" && rm -f "${ENV_FILE}.bak"
-                        else
-                            printf "%s\n" "$kv" >> "$ENV_FILE"
-                        fi
-                    done
-                    print_success "Set WATCHDOG_UID=1000, WATCHDOG_GID=1000, DOCKER_GID=${MIGRATED_GID} in ${ENV_FILE}"
                 fi
+                if ! update_env_vars "$ENV_FILE" \
+                        "WATCHDOG_UID=${RUN_UID}" \
+                        "WATCHDOG_GID=${RUN_GID}" \
+                        "DOCKER_GID=${MIGRATED_GID}" \
+                        "WATCHDOG_VERSION=${VERSION}"; then
+                    exit 1
+                fi
+                print_success "Set WATCHDOG_UID=${RUN_UID}, WATCHDOG_GID=${RUN_GID}, DOCKER_GID=${MIGRATED_GID}, WATCHDOG_VERSION=${VERSION} in ${ENV_FILE}"
             fi
+            # An older install may have left the config root-owned and 600,
+            # which the non-root container cannot read.
+            harden_config_permissions "$CONFIG_FILE" || exit 1
             return 0
         fi
         echo ""
@@ -409,11 +597,16 @@ configure_all() {
     echo ""
 
     # ── Non-root hardening (manual `docker compose up` defaults to root instead) ──
-    local WATCHDOG_UID="1000" WATCHDOG_GID="1000" DOCKER_GID
+    local WATCHDOG_UID="$RUN_UID" WATCHDOG_GID="$RUN_GID" DOCKER_GID
     DOCKER_GID=$(detect_docker_gid) || exit 1
     print_info "Docker socket GID detected: ${DOCKER_GID} — running non-root as UID/GID ${WATCHDOG_UID}"
 
     # ── Write .env ────────────────────────────────────────────────────────────
+    # Staged in a temp file so a root-owned .env from a previous install can
+    # still be replaced (via sudo) instead of failing on an unwritable target.
+    local ENV_TMP
+    ENV_TMP=$(mktemp) || { print_error "Could not create a temporary file"; exit 1; }
+    chmod 600 "$ENV_TMP"
     {
         printf "# .env — generated by install.sh on %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
         printf "# Secrets only. All other settings are in watchdog-config.yaml.\n\n"
@@ -430,9 +623,15 @@ configure_all() {
         printf "# Alert identity\nWATCHDOG_HOST=%s\n\n" "$WATCHDOG_HOST"
         printf "# Non-root hardening\nWATCHDOG_UID=%s\nWATCHDOG_GID=%s\nDOCKER_GID=%s\n\n" \
                "$WATCHDOG_UID" "$WATCHDOG_GID" "$DOCKER_GID"
+        printf "# Deployed release — docker-compose.yaml pins watchdog:\${WATCHDOG_VERSION}\n"
+        printf "WATCHDOG_VERSION=%s\n\n" "$VERSION"
         printf "# Tuning\nLOG_LEVEL=INFO\n"
-    } > "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
+    } > "$ENV_TMP"
+    if ! _publish_file "$ENV_TMP" "$ENV_FILE" 600 "$(id -u):$(id -g)"; then
+        rm -f "$ENV_TMP"
+        exit 1
+    fi
+    rm -f "$ENV_TMP"
     print_success ".env written: ${ENV_FILE}"
 
     # ── Build alert_channels YAML list ────────────────────────────────────────
@@ -451,6 +650,8 @@ configure_all() {
     [ -z "$RECIPIENTS_YAML" ] && RECIPIENTS_YAML="    - ops-team@radware.com"$'\n'
 
     # ── Write watchdog-config.yaml ────────────────────────────────────────────
+    local CONFIG_TMP
+    CONFIG_TMP=$(mktemp) || { print_error "Could not create a temporary file"; exit 1; }
     {
         printf "# watchdog-config.yaml — generated by install.sh on %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
         printf "# Edit values, then restart: %s -f %s/docker-compose.yaml restart\n\n" \
@@ -473,6 +674,8 @@ configure_all() {
         printf "\nrunbook_base_url: \"\"\n"
         printf "\nlog_level: INFO\n"
         printf "log_file: /var/log/watchdog/watchdog.log\n"
+        printf "state_file: /var/log/watchdog/state.json\n"
+        printf "boot_grace_seconds: 180\n"
         printf "\nsyslog:\n"
         printf "  enabled:  %s\n" "$SYSLOG_ENABLED"
         printf "  host:     %s\n" "${SYSLOG_HOST:-127.0.0.1}"
@@ -516,7 +719,14 @@ configure_all() {
         printf "    - /\n"
         printf "  timeout_seconds: 2\n"
         printf "\ncontainer_health_checks: {}\n"
-    } > "$CONFIG_FILE"
+    } > "$CONFIG_TMP"
+    # Owned by the container's runtime user: it is bind-mounted read-only and
+    # the agent cannot start if it is unreadable at UID/GID 1000.
+    if ! _publish_file "$CONFIG_TMP" "$CONFIG_FILE" 640 "${RUN_UID}:${RUN_GID}"; then
+        rm -f "$CONFIG_TMP"
+        exit 1
+    fi
+    rm -f "$CONFIG_TMP"
     print_success "watchdog-config.yaml written: ${CONFIG_FILE}"
 }
 
@@ -527,16 +737,28 @@ configure_all() {
 start_watchdog() {
     print_section "Starting Watchdog"
 
-    cd "${INSTALL_DIR}"
+    if ! cd "${INSTALL_DIR}"; then
+        print_error "Cannot enter installation directory: ${INSTALL_DIR}"
+        exit 1
+    fi
 
     # Stop and remove existing container if present
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         print_info "Stopping existing container..."
-        $DC down
+        if ! $DC down; then
+            print_error "Failed to stop the existing container — aborting before redeploy"
+            exit 1
+        fi
     fi
 
     print_info "Starting container with docker compose..."
-    $DC up -d
+    if ! $DC up -d; then
+        print_error "docker compose up failed — the watchdog was not deployed"
+        echo ""
+        echo "  Inspect the failure with:"
+        echo "    $DC -f ${INSTALL_DIR}/docker-compose.yaml logs"
+        exit 1
+    fi
     print_success "Watchdog container started"
 }
 
@@ -553,8 +775,26 @@ verify_deployment() {
     if [ -n "$STATUS" ]; then
         print_success "Container is running: ${STATUS}"
     else
-        print_warning "Container does not appear to be running — check logs for errors:"
-        print_info "  $DC logs watchdog"
+        print_error "Container ${CONTAINER_NAME} is not running — the installation did not succeed"
+        echo ""
+        echo "  Check the logs for the reason:"
+        echo "    $DC -f ${INSTALL_DIR}/docker-compose.yaml logs"
+        echo "    docker logs ${CONTAINER_NAME}"
+        exit 1
+    fi
+
+    # Confirm the deployed release, not just that something is up: a stale
+    # image left over from a previous version would otherwise look healthy.
+    local RUNNING_IMAGE
+    RUNNING_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
+    if [ "$RUNNING_IMAGE" = "$IMAGE_NAME" ]; then
+        print_success "Container is running the expected image: ${IMAGE_NAME}"
+    else
+        print_error "Container is running '${RUNNING_IMAGE:-unknown}', expected '${IMAGE_NAME}'"
+        echo ""
+        echo "  Check WATCHDOG_VERSION in ${INSTALL_DIR}/.env, then redeploy:"
+        echo "    $DC -f ${INSTALL_DIR}/docker-compose.yaml up -d --force-recreate"
+        exit 1
     fi
 }
 

@@ -5,8 +5,11 @@
 #   docker compose -f docker-compose.build.yaml build
 #   docker compose -f docker-compose.build.yaml up -d
 #
-# After a successful build, export the image for offline customers:
-#   docker save watchdog:latest -o watchdog.tar
+# After a successful build, export the image for offline customers — always
+# ship the versioned tag so install.sh can pin the deployment to it:
+#   VERSION=$(cat VERSION)
+#   docker tag watchdog:"$VERSION" watchdog:latest
+#   docker save watchdog:"$VERSION" watchdog:latest -o watchdog.tar
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -14,14 +17,14 @@ services:
   docker-container-watchdog:
     build:
       context: .
-    image: watchdog:latest
+    image: watchdog:${WATCHDOG_VERSION:-latest}
     container_name: docker-container-watchdog
     restart: always
     network_mode: host
     env_file: .env
     environment:
       WATCHDOG_CONFIG: /etc/watchdog/watchdog-config.yaml
-      WATCHDOG_HOST:   cyber-controller-server
+      WATCHDOG_HOST:   ${WATCHDOG_HOST:-CyberController-Server}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./watchdog-config.yaml:/etc/watchdog/watchdog-config.yaml:ro

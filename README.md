@@ -79,8 +79,9 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 ├── requirements-watchdog.txt    # Python dependencies (reference; Dockerfile pip-installs inline)
 ├── install.sh                   # Offline install script
 ├── uninstall.sh                 # Stop + remove script
-├── watchdog.tar                 # Pre-built Docker image (provided, no internet needed)
-└── .env                         # Secrets — NOT committed to git
+├── VERSION                       # Release version — drives the image tag and installer
+├── watchdog.tar                  # Pre-built Docker image (provided, no internet needed)
+└── .env                          # Secrets — NOT committed to git
 ```
 
 ---
@@ -89,7 +90,7 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 
 | Item | Size |
 |------|------|
-| Docker image (`watchdog:latest`) | ~180 MB (python:3.11-slim base + dependencies) |
+| Docker image (`watchdog:<VERSION>`) | ~180 MB (python:3.11-slim base + dependencies) |
 | Running container (memory) | ~50–80 MB baseline; capped at `mem_limit: 256m` in `docker-compose.yaml` |
 | `watchdog.tar` export | ~170 MB |
 
@@ -133,8 +134,12 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
 | `excluded_containers` | `[]` | Container names to never alert on |
 | `ignored_container_events` | MariaDB syntax-check label rule | Label-based event suppressions for intentional temporary containers |
+| `auto_health_check` | enabled | Probe containers reporting `health=none` by discovering an HTTP/TCP endpoint |
+| `container_health_checks` | `{}` | Per-container probe overrides (`type: http` or `type: exec`) for `health=none` containers; takes precedence over `auto_health_check` |
 | `log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `log_file` | `/var/log/watchdog/watchdog.log` | Bind-mounted to `./watchdog/watchdog.log` on host. Rotates at 10 MB, 5 backups. Set to `null` to disable |
+| `state_file` | `/var/log/watchdog/state.json` | Persists open alerts and the host boot time so recovery and reboot reporting survive a restart. Set to `""` to disable |
+| `boot_grace_seconds` | `180` | After a detected host reboot, hold alerts this long while services start, then send one `reboot-summary`. `0` alerts immediately and sends the summary on the first poll |
 | `runbook_base_url` | — | URL included in every alert |
 
 Preferred suppression: Temporary MariaDB HA syntax-check containers should be created with Docker label `com.radware.cybercontroller.role=mariadb-ha-syntax-check`. The watchdog ignores only configured events for containers carrying that explicit label; normal service containers still alert.
@@ -252,6 +257,7 @@ bash install.sh
 | `unhealthy` | HIGH | Health probe failing for N consecutive cycles |
 | `restart-loop` | HIGH | Container restarted ≥ threshold times within window |
 | `recovered` | INFO | Previously-alarmed container (`crashed`/`oom`/`unhealthy`/`restart-loop`) is healthy/running again. Fires once per incident; controlled by `alert_on_recovery` (default `true`) |
+| `reboot-summary` | INFO / HIGH | Sent once after a host reboot is detected, when the `boot_grace_seconds` window closes. Reports boot time, how many containers are running, which recovered, and which are still failing. Always sent after a reboot — an INFO summary confirms the node came back cleanly. HIGH if any container is still failing |
 
 OOM alerts include **memory stats** (usage / limit / peak) prepended to the log snippet.
 
@@ -560,6 +566,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
 | 1.5.1 | 2026-08-31 | Rahul Kumar | fixed ignore Dynamic container crash alert |

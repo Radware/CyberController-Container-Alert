@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate shell scripts
+        run: |
+          bash -n install.sh
+          bash -n uninstall.sh
+
+      - name: Validate Python syntax
+        run: |
+          python3 -m py_compile watchdog.py
+
+      - name: Validate VERSION file
+        run: |
+          test -f VERSION
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          echo "Repository version: ${VERSION}"
+          echo "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          grep -q "| ${VERSION} |" README.md
+
+      - name: Prepare CI environment
+        run: |
+          cp .env.example .env
+
+      - name: Validate Docker Compose
+        run: |
+          docker compose -f docker-compose.yaml config -q
+          docker compose -f docker-compose.build.yaml config -q
