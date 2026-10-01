@@ -22,6 +22,14 @@ jobs:
         run: |
           python3 -m py_compile watchdog.py
 
+      - name: Install test dependencies
+        run: |
+          python3 -m pip install docker==7.1.0 requests==2.32.3 PyYAML==6.0.2
+
+      - name: Run regression tests
+        run: |
+          python3 -m unittest discover -s tests -v
+
       - name: Validate VERSION file
         run: |
           test -f VERSION
@@ -33,8 +41,13 @@ jobs:
       - name: Prepare CI environment
         run: |
           cp .env.example .env
+          echo "WATCHDOG_VERSION=$(cat VERSION)" >> .env
 
       - name: Validate Docker Compose
         run: |
           docker compose -f docker-compose.yaml config -q
-          docker compose -f docker-compose.build.yaml config -q
+          WATCHDOG_VERSION="$(cat VERSION)" docker compose -f docker-compose.build.yaml config -q
+
+      - name: Build watchdog image
+        run: |
+          WATCHDOG_VERSION="$(cat VERSION)" docker compose -f docker-compose.build.yaml build

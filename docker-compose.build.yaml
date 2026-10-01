@@ -2,14 +2,14 @@
 # Use this file when you have internet access and want to build a fresh image.
 #
 # Usage:
+#   export WATCHDOG_VERSION=$(cat VERSION)
 #   docker compose -f docker-compose.build.yaml build
 #   docker compose -f docker-compose.build.yaml up -d
 #
 # After a successful build, export the image for offline customers — always
 # ship the versioned tag so install.sh can pin the deployment to it:
-#   VERSION=$(cat VERSION)
-#   docker tag watchdog:"$VERSION" watchdog:latest
-#   docker save watchdog:"$VERSION" watchdog:latest -o watchdog.tar
+#   docker tag watchdog:"$WATCHDOG_VERSION" watchdog:latest
+#   docker save watchdog:"$WATCHDOG_VERSION" watchdog:latest -o watchdog.tar
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -17,7 +17,7 @@ services:
   docker-container-watchdog:
     build:
       context: .
-    image: watchdog:${WATCHDOG_VERSION:-latest}
+    image: watchdog:${WATCHDOG_VERSION:?Set WATCHDOG_VERSION from the VERSION file before building}
     container_name: docker-container-watchdog
     restart: always
     network_mode: host

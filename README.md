@@ -438,7 +438,7 @@ docker compose logs docker-container-watchdog
 Common causes:
 - **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
 - **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
-- **Image not loaded** — run `docker images watchdog`; if empty, build with `docker compose -f docker-compose.build.yaml build` (or `docker build -t watchdog:latest .` directly — see [DEPLOYMENT.md](DEPLOYMENT.md) for details)
+- **Image not loaded** — run `docker images watchdog`; if empty, set `WATCHDOG_VERSION=$(cat VERSION)` and build with `WATCHDOG_VERSION="$WATCHDOG_VERSION" docker compose -f docker-compose.build.yaml build` (see [DEPLOYMENT.md](DEPLOYMENT.md) for details)
 
 ### Alert Notifications Not Received
 

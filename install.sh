@@ -198,23 +198,24 @@ update_env_vars() {
 }
 
 # watchdog-config.yaml is bind-mounted read-only into a container running as
-# RUN_UID:RUN_GID. A config left 600 root:root by an older install makes the
-# agent exit on startup, so normalise ownership/mode on every run.
+# RUN_UID:RUN_GID. Keep it root-owned and group-readable: the runtime can read
+# it, but UID 1000 on the host cannot rewrite probe commands and indirectly
+# control Docker exec operations.
 harden_config_permissions() {
     local file="$1"
     [ -f "$file" ] || return 0
-    if ! _run_priv chown "${RUN_UID}:${RUN_GID}" "$file"; then
-        print_error "Failed to set ownership of ${file} to UID ${RUN_UID}:GID ${RUN_GID}"
+    if ! _run_priv chown "0:${RUN_GID}" "$file"; then
+        print_error "Failed to set ownership of ${file} to root:GID ${RUN_GID}"
         echo ""
-        echo "  The container runs as ${RUN_UID}:${RUN_GID} and could not read it. Fix manually:"
-        echo "    sudo chown ${RUN_UID}:${RUN_GID} ${file} && sudo chmod 640 ${file}"
+        echo "  Fix manually:"
+        echo "    sudo chown root:${RUN_GID} ${file} && sudo chmod 640 ${file}"
         return 1
     fi
     if ! _run_priv chmod 640 "$file"; then
         print_error "Failed to set permissions 640 on ${file}"
         return 1
     fi
-    print_success "Config readable by the container runtime user (${RUN_UID}:${RUN_GID}, mode 640)"
+    print_success "Config secured as root:${RUN_GID}, mode 640 (runtime read-only)"
     return 0
 }
 
@@ -338,21 +339,24 @@ load_docker_image() {
         fi
         echo "$load_output"
 
-        # The archive must carry the release tag. Promoting whatever it happened
-        # to contain would silently relabel an older build as this version, and
-        # the post-install image check would then confirm the wrong release.
-        if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-            print_error "${IMAGE_ARCHIVE} does not contain ${IMAGE_NAME}"
+        # The archive itself must carry the release tag. Merely inspecting the
+        # local tag after docker load is insufficient because a stale tag may
+        # have existed before this installer ran.
+        if ! printf '%s\n' "$load_output" | grep -Fxq "Loaded image: ${IMAGE_NAME}"; then
+            print_error "${IMAGE_ARCHIVE} did not load the required tag ${IMAGE_NAME}"
             echo ""
-            echo "  The archive loaded:"
-            printf '%s\n' "$load_output" \
-                | sed -n -e 's/^Loaded image: */    /p' -e 's/^Loaded image ID: */    /p'
+            echo "  docker load reported:"
+            printf '    %s\n' "$load_output"
             echo ""
             echo "  This package is version ${VERSION} (from ${VERSION_FILE})."
-            echo "  Obtain a watchdog.tar built for ${VERSION}, or rebuild it:"
+            echo "  Rebuild the archive with the versioned tag:"
             echo "    docker build -t ${IMAGE_NAME} ."
             echo "    docker tag ${IMAGE_NAME} ${IMAGE_LATEST}"
             echo "    docker save ${IMAGE_NAME} ${IMAGE_LATEST} -o watchdog.tar"
+            exit 1
+        fi
+        if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+            print_error "Required image ${IMAGE_NAME} is not available after docker load"
             exit 1
         fi
     else
@@ -464,11 +468,11 @@ configure_all() {
             if [ -f "$ENV_FILE" ]; then
                 local CURRENT_GID MIGRATED_GID
                 CURRENT_GID=$(_read_file_priv "$ENV_FILE" | grep -E '^DOCKER_GID=' | tail -n1 | cut -d= -f2 | tr -d '[:space:]')
-                if [[ "$CURRENT_GID" =~ ^[0-9]+$ ]]; then
-                    MIGRATED_GID="$CURRENT_GID"
-                else
-                    print_warning "Existing .env predates non-root hardening — detecting and adding it"
-                    MIGRATED_GID=$(detect_docker_gid) || exit 1
+                MIGRATED_GID=$(detect_docker_gid) || exit 1
+                if [[ "$CURRENT_GID" =~ ^[0-9]+$ ]] && [ "$CURRENT_GID" != "$MIGRATED_GID" ]; then
+                    print_warning "Docker socket GID changed: ${CURRENT_GID} -> ${MIGRATED_GID}; updating .env"
+                elif ! [[ "$CURRENT_GID" =~ ^[0-9]+$ ]]; then
+                    print_warning "Existing .env predates non-root hardening — adding detected Docker socket GID"
                 fi
                 if ! update_env_vars "$ENV_FILE" \
                         "WATCHDOG_UID=${RUN_UID}" \
@@ -720,9 +724,10 @@ configure_all() {
         printf "  timeout_seconds: 2\n"
         printf "\ncontainer_health_checks: {}\n"
     } > "$CONFIG_TMP"
-    # Owned by the container's runtime user: it is bind-mounted read-only and
-    # the agent cannot start if it is unreadable at UID/GID 1000.
-    if ! _publish_file "$CONFIG_TMP" "$CONFIG_FILE" 640 "${RUN_UID}:${RUN_GID}"; then
+    # Root-owned, runtime-group-readable. This prevents host UID 1000 from
+    # rewriting exec health-check commands while still allowing the non-root
+    # container to read the bind-mounted file.
+    if ! _publish_file "$CONFIG_TMP" "$CONFIG_FILE" 640 "0:${RUN_GID}"; then
         rm -f "$CONFIG_TMP"
         exit 1
     fi
@@ -769,13 +774,25 @@ start_watchdog() {
 verify_deployment() {
     print_section "Verifying Deployment"
 
-    sleep 2   # give the container a moment to initialise
+    local state health status attempts=0
+    while [ "$attempts" -lt 18 ]; do
+        state=$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)
+        health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$CONTAINER_NAME" 2>/dev/null || true)
+        status=$(docker ps -a --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}' 2>/dev/null || true)
 
-    STATUS=$(docker ps --filter "name=^${CONTAINER_NAME}$" --format '{{.Status}}' 2>/dev/null || echo "")
-    if [ -n "$STATUS" ]; then
-        print_success "Container is running: ${STATUS}"
-    else
-        print_error "Container ${CONTAINER_NAME} is not running — the installation did not succeed"
+        if [ "$state" = "running" ] && { [ "$health" = "healthy" ] || [ "$health" = "none" ]; }; then
+            print_success "Container is running and healthy: ${status}"
+            break
+        fi
+        if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+            break
+        fi
+        attempts=$((attempts + 1))
+        sleep 5
+    done
+
+    if [ "$state" != "running" ] || { [ "$health" != "healthy" ] && [ "$health" != "none" ]; }; then
+        print_error "Container ${CONTAINER_NAME} did not become healthy (state=${state:-unknown}, health=${health:-unknown})"
         echo ""
         echo "  Check the logs for the reason:"
         echo "    $DC -f ${INSTALL_DIR}/docker-compose.yaml logs"
@@ -830,7 +847,7 @@ display_usage_instructions() {
     echo "  docker logs -f ${CONTAINER_NAME}"
     echo ""
     echo -e "${GREEN}Edit alert channels / thresholds:${NC}"
-    echo "  nano ${INSTALL_DIR}/watchdog-config.yaml"
+    echo "  sudoedit ${INSTALL_DIR}/watchdog-config.yaml"
     echo "  $DC -f ${INSTALL_DIR}/docker-compose.yaml restart"
     echo ""
     echo -e "${GREEN}Edit secrets (Slack / SMTP):${NC}"

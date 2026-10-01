@@ -346,7 +346,7 @@ Use this path when you need full control over configuration files before startin
 *Note* - If internet access is available, build the image and skip to [Start the container](#start-the-container) below.
 
 ```bash
-docker compose -f docker-compose.build.yaml build
+WATCHDOG_VERSION="$(cat VERSION)" docker compose -f docker-compose.build.yaml build
 ```
 
 #### Offline Installation
@@ -491,7 +491,7 @@ docker compose up -d
 
 ```bash
 # Rebuild the image (requires internet)
-docker compose -f docker-compose.build.yaml build
+WATCHDOG_VERSION="$(cat VERSION)" docker compose -f docker-compose.build.yaml build
 
 # Redeploy using the production runtime file
 docker compose up -d

@@ -355,34 +355,38 @@ remove_docker_image() {
     fi
 }
 
-# Internal helper — stops/removes ALL containers that reference the image, then removes the image.
+# Internal helper — removes only this deployment's image tags.
+# Never stop/remove unrelated containers that happen to use a watchdog image.
 _do_remove_image() {
-    print_info "Removing Docker image: ${IMAGE_TAGS[*]}..."
+    print_info "Removing Docker image for deployed version: ${IMAGE_NAME}..."
 
-    # Stop and remove every container (running or stopped) that uses this image.
-    # We iterate rather than rely on --filter ancestor because Docker 20.10 combos are unreliable.
-    for TAG in "${IMAGE_TAGS[@]}"; do
-        ALL_CTRS=$(docker ps -aq --filter "ancestor=${TAG}" 2>/dev/null || true)
-        [ -n "$ALL_CTRS" ] || continue
-        for CID in $ALL_CTRS; do
-            CSTATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null || true)
-            CNAME=$(docker inspect --format '{{.Name}}' "$CID" 2>/dev/null | sed 's|^/||' || true)
-            if [ "$CSTATUS" = "running" ] || [ "$CSTATUS" = "paused" ]; then
-                print_info "  Stopping running container ${CNAME:-$CID} (${CSTATUS})..."
-                docker stop "$CID" 2>/dev/null || true
-            fi
-            print_info "  Removing container ${CNAME:-$CID}..."
-            docker rm "$CID" 2>/dev/null || true
-        done
-    done
+    local VERSION_ID LATEST_ID TAG
+    local SAFE_TAGS=()
 
-    # Remove every tag — leaving the :latest alias behind keeps the layers on disk.
-    for TAG in "${IMAGE_TAGS[@]}"; do
-        docker image inspect "${TAG}" &>/dev/null || continue
-        if docker rmi "${TAG}" 2>&1; then
-            print_success "Docker image removed: ${TAG}"
+    VERSION_ID=$(docker image inspect "${IMAGE_NAME}" --format '{{.Id}}' 2>/dev/null || true)
+    if [ -n "$VERSION_ID" ]; then
+        SAFE_TAGS+=("${IMAGE_NAME}")
+    fi
+
+    if [ "${IMAGE_NAME}" != "${IMAGE_LATEST}" ]; then
+        LATEST_ID=$(docker image inspect "${IMAGE_LATEST}" --format '{{.Id}}' 2>/dev/null || true)
+        if [ -n "$VERSION_ID" ] && [ "$LATEST_ID" = "$VERSION_ID" ]; then
+            SAFE_TAGS+=("${IMAGE_LATEST}")
+        elif [ -n "$LATEST_ID" ]; then
+            print_info "Preserving ${IMAGE_LATEST}: it points to a different image"
+        fi
+    fi
+
+    if [ "${#SAFE_TAGS[@]}" -eq 0 ]; then
+        print_info "No matching watchdog image tags remain"
+        return 0
+    fi
+
+    for TAG in "${SAFE_TAGS[@]}"; do
+        if docker rmi "$TAG" 2>&1; then
+            print_success "Docker image tag removed: $TAG"
         else
-            print_warning "Could not remove image — check for containers using it: docker ps -a --filter ancestor=${TAG}"
+            print_warning "Could not remove $TAG; another container may still reference the image"
         fi
     done
 }

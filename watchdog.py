@@ -169,6 +169,7 @@ class ContainerState:
 class WatchdogState:
     def __init__(self, state_file: str = ""):
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self._states: dict[str, ContainerState] = {}
         self._state_file = state_file
 
@@ -188,6 +189,17 @@ class WatchdogState:
                 self._states.pop(n, None)
         for n in stale:
             log.debug("Removing stale state for container: %s", n)
+
+    def open_alert_names(self) -> list[str]:
+        """Return container names with an alert that is still open."""
+        with self._lock:
+            states = list(self._states.values())
+        names: list[str] = []
+        for st in states:
+            with st.lock:
+                if st.alerted_for and st.alerted_for != "recovered":
+                    names.append(st.name)
+        return sorted(names)
 
     # ── Persistence ───────────────────────────────────────────────────────────
     def load(self) -> tuple[dict, int]:
@@ -211,31 +223,35 @@ class WatchdogState:
     def save(self, boot_time: int) -> None:
         if not self._state_file:
             return
-        with self._lock:
-            containers = {
-                st.name: {
-                    "alerted_for": st.alerted_for,
-                    "last_alert_time": st.last_alert_time,
-                }
-                for st in self._states.values()
-                if st.alerted_for
+        # Event handling and polling can persist concurrently. Serialize the
+        # complete snapshot/write/replace sequence so writers cannot race.
+        with self._save_lock:
+            with self._lock:
+                states = list(self._states.values())
+            containers: dict[str, dict] = {}
+            for st in states:
+                with st.lock:
+                    if st.alerted_for:
+                        containers[st.name] = {
+                            "alerted_for": st.alerted_for,
+                            "last_alert_time": st.last_alert_time,
+                        }
+            record = {
+                "version": _STATE_VERSION,
+                "boot_time": boot_time,
+                "saved_at": time.time(),
+                "containers": containers,
             }
-        record = {
-            "version": _STATE_VERSION,
-            "boot_time": boot_time,
-            "saved_at": time.time(),
-            "containers": containers,
-        }
-        tmp = f"{self._state_file}.tmp"
-        try:
-            parent = os.path.dirname(self._state_file)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(tmp, "w") as f:
-                json.dump(record, f)
-            os.replace(tmp, self._state_file)  # atomic: never leave a half-written file
-        except Exception as exc:
-            log.warning("Could not write state file %s: %s", self._state_file, exc)
+            tmp = f"{self._state_file}.tmp"
+            try:
+                parent = os.path.dirname(self._state_file)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with open(tmp, "w") as f:
+                    json.dump(record, f)
+                os.replace(tmp, self._state_file)
+            except Exception as exc:
+                log.warning("Could not write state file %s: %s", self._state_file, exc)
 
 
 # ── Alert payload ─────────────────────────────────────────────────────────────
@@ -1226,6 +1242,9 @@ class Watchdog:
         self._boot_grace_secs = max(0, int(cfg.get("boot_grace_seconds", 180) or 0))
         self._grace_until: float = 0.0
         self._folded: list[AlertPayload] = []  # alerts held during the post-reboot window
+        self._folded_lock = threading.Lock()
+        self._manual_exec_lock = threading.Lock()
+        self._manual_exec_inflight: set[str] = set()
         self._restore_state()
 
     # ── State restore ─────────────────────────────────────────────────────────
@@ -1274,16 +1293,21 @@ class Watchdog:
 
     def _dispatch(self, payload: AlertPayload) -> None:
         """Send an alert, or hold it for the summary during the post-reboot window."""
-        if self._grace_until and time.time() < self._grace_until:
-            self._folded.append(payload)
+        held = False
+        with self._folded_lock:
+            if self._grace_until and time.time() < self._grace_until:
+                self._folded.append(payload)
+                held = True
+        if held:
             log.info("%s: %s held for post-reboot summary",
                      payload.container_name, payload.failure_type)
             return
         dispatch_alert(payload, self.cfg)
 
-    def _container_tally(self) -> tuple[int, int]:
-        """(running, not-running) counts of monitored containers, for the reboot summary."""
+    def _container_tally(self) -> tuple[int, int, list[str]]:
+        """Return running/not-running counts and current non-running names."""
         running = not_running = 0
+        non_running_names: list[str] = []
         try:
             for c in self.client.containers.list(all=True):
                 if c.name in self._excluded:
@@ -1292,27 +1316,33 @@ class Watchdog:
                     running += 1
                 else:
                     not_running += 1
+                    non_running_names.append(c.name)
         except Exception as exc:
             log.debug("Could not tally containers for the reboot summary: %s", exc)
-        return running, not_running
+        return running, not_running, sorted(non_running_names)
 
     def _flush_boot_summary(self) -> None:
-        """Emit the single post-reboot status alert once the grace window closes."""
-        if not self._grace_until or time.time() < self._grace_until:
-            return
-        self._grace_until = 0.0
-        recovered  = sorted({p.container_name for p in self._folded if p.failure_type == "recovered"})
-        still_down = sorted({p.container_name for p in self._folded if p.failure_type != "recovered"})
-        self._folded.clear()
-        # Sent even when nothing was held: after a reboot, silence is
-        # indistinguishable from the watchdog itself having failed to come back.
+        """Emit one post-reboot summary based on state at the end of a full poll."""
+        with self._folded_lock:
+            if not self._grace_until or time.time() < self._grace_until:
+                return
+            self._grace_until = 0.0
+            folded = list(self._folded)
+            self._folded.clear()
+
+        running, not_running, non_running_names = self._container_tally()
+        still_down_set = set(self.state.open_alert_names()) | set(non_running_names)
+        recovered = sorted({
+            p.container_name for p in folded if p.failure_type == "recovered"
+        } - still_down_set)
+        still_down = sorted(still_down_set)
+
         if not recovered and not still_down:
-            log.info("Post-reboot grace window closed — no alerts were held")
+            log.info("Post-reboot grace window closed — no failures remain")
         booted_at = (
             datetime.fromtimestamp(self._boot_time, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if self._boot_time else "unknown"
         )
-        running, not_running = self._container_tally()
         detail = (
             f"Host booted {booted_at}. "
             f"Containers: {running} running, {not_running} not running. "
@@ -1335,9 +1365,7 @@ class Watchdog:
 
     # ── Recovery alert ─────────────────────────────────────────────────────────
     def _maybe_alert_recovery(self, container, state: ContainerState) -> None:
-        """Fire a one-time RECOVERED alert when a previously-alarmed container is healthy again."""
-        if not self.cfg.get("alert_on_recovery", True):
-            return
+        """Clear resolved state and optionally fire a one-time RECOVERED alert."""
         with state.lock:
             previous = state.alerted_for
             if not previous or previous == "recovered":
@@ -1345,6 +1373,10 @@ class Watchdog:
             state.alerted_for = ""
             state.last_alert_time = time.time()
         self.state.save(self._boot_time)
+        if not self.cfg.get("alert_on_recovery", True):
+            log.info("%s recovered from %s — recovery notification disabled",
+                     state.name, previous)
+            return
         payload = build_payload(container, "recovered", self.host, self.runbook_base,
                                  probe_detail=f"Recovered from '{previous}'")
         self._dispatch(payload)
@@ -1472,7 +1504,6 @@ class Watchdog:
             self._stop_event.wait(interval)
 
     def _poll_all_containers(self) -> None:
-        self._flush_boot_summary()
         excluded            = self._excluded
         restart_threshold   = self._restart_threshold
         restart_window      = self._restart_window_secs
@@ -1598,6 +1629,8 @@ class Watchdog:
         # Refresh the stored boot time every cycle: otherwise a host that never
         # alerted has no baseline, and an unclean reboot goes unreported.
         self.state.save(self._boot_time)
+        # Evaluate the reboot summary only after a complete poll.
+        self._flush_boot_summary()
 
     @staticmethod
     def _get_health(container) -> str:
@@ -1670,33 +1703,83 @@ class Watchdog:
             pass
         return sorted(ports)
 
+    def _manual_exec_health_check(self, container, command, timeout: int) -> tuple[bool, str]:
+        """Run an exec probe without allowing a hung command to stall the poll loop."""
+        name = container.name
+        key = getattr(container, "id", None) or name
+        with self._manual_exec_lock:
+            if key in self._manual_exec_inflight:
+                return False, (
+                    f"Exec probe failed - previous probe for {name} is still running "
+                    f"after its {timeout}s timeout"
+                )
+            self._manual_exec_inflight.add(key)
+
+        done = threading.Event()
+        holder: dict[str, object] = {}
+
+        def _worker() -> None:
+            try:
+                holder["result"] = container.exec_run(command)
+            except Exception as exc:
+                holder["error"] = exc
+            finally:
+                with self._manual_exec_lock:
+                    self._manual_exec_inflight.discard(key)
+                done.set()
+
+        threading.Thread(
+            target=_worker, name=f"manual-exec-{name}", daemon=True
+        ).start()
+
+        if not done.wait(timeout):
+            return False, f"Exec probe failed - timed out after {timeout}s running {command!r}"
+
+        error = holder.get("error")
+        if error is not None:
+            log.debug("%s: manual exec check error: %s", name, error)
+            return True, ""
+
+        result = holder.get("result")
+        if result is None:
+            log.debug("%s: manual exec check returned no result", name)
+            return True, ""
+        if result.exit_code == 0:
+            return True, ""
+        raw_output = result.output or b""
+        output = (
+            raw_output.decode(errors="replace").strip()
+            if isinstance(raw_output, (bytes, bytearray))
+            else str(raw_output).strip()
+        )
+        return False, (
+            f"Exec probe failed - {command!r} exited {result.exit_code}: "
+            f"{output or '(no output)'}"
+        )
+
     def _manual_health_check(self, container, spec: dict) -> tuple[bool, str]:
         """
         Run an operator-defined check from container_health_checks, which takes
         precedence over auto-discovery for containers with health=none.
         type: http  — GET http://<container-ip>:<internal_port><path>, healthy = status < 500.
-        type: exec  — run `command` inside the container, healthy = exit code 0.
+        type: exec  — run command inside the container, healthy = exit code 0.
         Returns (healthy, probe_detail).
         """
         name       = container.name
         check_type = str(spec.get("type", "http")).lower()
-        timeout    = max(1, int(spec.get("timeout_seconds", 5)))
+        try:
+            timeout = max(1, int(spec.get("timeout_seconds", 5)))
+        except (TypeError, ValueError):
+            log.warning("%s: invalid timeout_seconds=%r — using 5s", name,
+                        spec.get("timeout_seconds"))
+            timeout = 5
 
         if check_type == "exec":
             command = spec.get("command")
             if not command:
                 log.warning("%s: manual exec check has no 'command' — skipping", name)
                 return True, ""
-            try:
-                result = container.exec_run(command)
-            except Exception as exc:
-                log.debug("%s: manual exec check error: %s", name, exc)
-                return True, ""  # can't run the probe — don't false-alarm
-            if result.exit_code == 0:
-                return True, ""
-            output = (result.output or b"").decode(errors="replace").strip()
-            return False, (f"Exec probe failed - '{command}' exited {result.exit_code}: "
-                           f"{output or '(no output)'}")
+            return self._manual_exec_health_check(container, command, timeout)
 
         if check_type != "http":
             log.warning("%s: unknown manual check type %r — skipping", name, check_type)
