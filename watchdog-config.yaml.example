@@ -32,6 +32,15 @@ excluded_containers: []
 log_level: DEBUG    # DEBUG | INFO | WARNING | ERROR
 log_file: /var/log/watchdog/watchdog.log   # bind-mounted to ./watchdog/watchdog.log on host
 
+# Alert state is persisted here so recovery alerts still fire after the host or
+# the watchdog restarts. Set to "" to disable persistence.
+state_file: /var/log/watchdog/state.json
+# After a detected host reboot, hold alerts this long while services start, then
+# send one reboot-summary instead of a burst. Set to 0 to alert immediately.
+# A detected reboot always produces exactly one summary, even when nothing failed,
+# so a clean reboot is confirmed rather than passing silently.
+boot_grace_seconds: 180
+
 # ── Syslog (remote / central log server) ─────────────────────────────────────
 syslog:
   enabled: true             # set to true to enable

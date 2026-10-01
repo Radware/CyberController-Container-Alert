@@ -2,7 +2,6 @@
 
 ################################################################################
 # CyberController Container Watchdog - Uninstallation Script
-# Version: 1.0.0
 #
 # Stops and removes the watchdog Docker container and image.
 # Log files are preserved by default.
@@ -11,7 +10,7 @@
 #   sudo bash uninstall.sh [OPTIONS]
 #
 # Options:
-#   --keep-image    Preserve the watchdog:latest Docker image (skip image removal)
+#   --keep-image    Preserve the watchdog Docker image (skip image removal)
 #   --keep-logs     Preserve log files (default behaviour)
 #   --remove-all    Full removal: container + image + log files
 #   --force         Skip confirmation prompts
@@ -35,8 +34,16 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$SCRIPT_DIR"
 CONTAINER_NAME="docker-container-watchdog"
-IMAGE_NAME="watchdog:latest"
-VERSION="1.0.0"
+
+# Prefer the release actually deployed (.env), then the packaged VERSION file.
+VERSION="$(grep -E '^WATCHDOG_VERSION=' "${SCRIPT_DIR}/.env" 2>/dev/null | tail -n1 | cut -d= -f2 | tr -d '[:space:]')"
+[ -z "$VERSION" ] && VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/VERSION" 2>/dev/null || true)"
+[ -z "$VERSION" ] && VERSION="latest"
+IMAGE_NAME="watchdog:${VERSION}"
+IMAGE_LATEST="watchdog:latest"
+# Both tags usually point at the same image ID; removing only one just untags it.
+IMAGE_TAGS=("$IMAGE_NAME")
+[ "$IMAGE_NAME" != "$IMAGE_LATEST" ] && IMAGE_TAGS+=("$IMAGE_LATEST")
 DC=""  # compose command — detected at runtime
 
 # ── Flags ─────────────────────────────────────────────────────────────────────
@@ -80,7 +87,7 @@ usage() {
     echo "Uninstall the CyberController Container Watchdog."
     echo ""
     echo "OPTIONS:"
-    echo "    --keep-image    Preserve the watchdog:latest Docker image (skip image removal)"
+    echo "    --keep-image    Preserve the watchdog Docker image (skip image removal)"
     echo "    --keep-logs     Remove container and image; preserve log files"
     echo "    --remove-all    Full removal: container + image + log directory"
     echo "    --force         Skip confirmation prompts"
@@ -196,13 +203,17 @@ plan_and_confirm() {
             echo -e "  ${GREEN}○${NC} Container : ${CONTAINER_NAME} — not found"
         fi
 
-        if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
+        FOUND_TAG=""
+        for TAG in "${IMAGE_TAGS[@]}"; do
+            docker image inspect "${TAG}" &>/dev/null && { FOUND_TAG="$TAG"; break; }
+        done
+        if [ -n "$FOUND_TAG" ]; then
             IMAGE_EXISTS=true
-            ISIZE=$(docker image inspect "${IMAGE_NAME}" --format '{{.Size}}' | \
+            ISIZE=$(docker image inspect "${FOUND_TAG}" --format '{{.Size}}' | \
                     awk '{printf "%.0f MB", $1/1024/1024}')
-            echo -e "  ${YELLOW}?${NC} Image     : ${IMAGE_NAME} (~${ISIZE})"
+            echo -e "  ${YELLOW}?${NC} Image     : ${IMAGE_TAGS[*]} (~${ISIZE})"
         else
-            echo -e "  ${GREEN}○${NC} Image     : ${IMAGE_NAME} — not found"
+            echo -e "  ${GREEN}○${NC} Image     : ${IMAGE_TAGS[*]} — not found"
         fi
     fi
 
@@ -240,7 +251,7 @@ plan_and_confirm() {
     # Interactive prompts — only for items not already decided by flags
     if [ "$FORCE" = false ]; then
         if [ "$IMAGE_EXISTS" = true ] && [ "$KEEP_IMAGE" = false ] && [ "$REMOVE_ALL" = false ]; then
-            read -p "  Remove Docker image (${IMAGE_NAME}, ~${ISIZE})? [Y/n]: " RI
+            read -p "  Remove Docker image (${IMAGE_TAGS[*]}, ~${ISIZE})? [Y/n]: " RI
             [[ "${RI:-y}" =~ ^[Nn] ]] || REMOVE_IMAGE_CONFIRMED=true
         fi
 
@@ -324,14 +335,14 @@ remove_docker_image() {
         return 0
     fi
 
-    if ! docker image inspect "${IMAGE_NAME}" &>/dev/null; then
-        print_info "Docker image not found: ${IMAGE_NAME}"
+    if [ "$IMAGE_EXISTS" != true ]; then
+        print_info "Docker image not found: ${IMAGE_TAGS[*]}"
         return 0
     fi
 
     if [ "$KEEP_IMAGE" = true ]; then
         IMAGE_KEPT=true
-        print_success "Keeping Docker image (--keep-image): ${IMAGE_NAME}"
+        print_success "Keeping Docker image (--keep-image): ${IMAGE_TAGS[*]}"
         return 0
     fi
 
@@ -339,36 +350,45 @@ remove_docker_image() {
         _do_remove_image
     else
         IMAGE_KEPT=true
-        print_success "Docker image preserved: ${IMAGE_NAME}"
-        print_info "Remove manually with: docker rmi ${IMAGE_NAME}"
+        print_success "Docker image preserved: ${IMAGE_TAGS[*]}"
+        print_info "Remove manually with: docker rmi ${IMAGE_TAGS[*]}"
     fi
 }
 
-# Internal helper — stops/removes ALL containers that reference the image, then removes the image.
+# Internal helper — removes only this deployment's image tags.
+# Never stop/remove unrelated containers that happen to use a watchdog image.
 _do_remove_image() {
-    print_info "Removing Docker image: ${IMAGE_NAME}..."
+    print_info "Removing Docker image for deployed version: ${IMAGE_NAME}..."
 
-    # Stop and remove every container (running or stopped) that uses this image.
-    # We iterate rather than rely on --filter ancestor because Docker 20.10 combos are unreliable.
-    ALL_CTRS=$(docker ps -aq --filter "ancestor=${IMAGE_NAME}" 2>/dev/null || true)
-    if [ -n "$ALL_CTRS" ]; then
-        for CID in $ALL_CTRS; do
-            CSTATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null || true)
-            CNAME=$(docker inspect --format '{{.Name}}' "$CID" 2>/dev/null | sed 's|^/||' || true)
-            if [ "$CSTATUS" = "running" ] || [ "$CSTATUS" = "paused" ]; then
-                print_info "  Stopping running container ${CNAME:-$CID} (${CSTATUS})..."
-                docker stop "$CID" 2>/dev/null || true
-            fi
-            print_info "  Removing container ${CNAME:-$CID}..."
-            docker rm "$CID" 2>/dev/null || true
-        done
+    local VERSION_ID LATEST_ID TAG
+    local SAFE_TAGS=()
+
+    VERSION_ID=$(docker image inspect "${IMAGE_NAME}" --format '{{.Id}}' 2>/dev/null || true)
+    if [ -n "$VERSION_ID" ]; then
+        SAFE_TAGS+=("${IMAGE_NAME}")
     fi
 
-    if docker rmi "${IMAGE_NAME}" 2>&1; then
-        print_success "Docker image removed: ${IMAGE_NAME}"
-    else
-        print_warning "Could not remove image — check for containers using it: docker ps -a --filter ancestor=${IMAGE_NAME}"
+    if [ "${IMAGE_NAME}" != "${IMAGE_LATEST}" ]; then
+        LATEST_ID=$(docker image inspect "${IMAGE_LATEST}" --format '{{.Id}}' 2>/dev/null || true)
+        if [ -n "$VERSION_ID" ] && [ "$LATEST_ID" = "$VERSION_ID" ]; then
+            SAFE_TAGS+=("${IMAGE_LATEST}")
+        elif [ -n "$LATEST_ID" ]; then
+            print_info "Preserving ${IMAGE_LATEST}: it points to a different image"
+        fi
     fi
+
+    if [ "${#SAFE_TAGS[@]}" -eq 0 ]; then
+        print_info "No matching watchdog image tags remain"
+        return 0
+    fi
+
+    for TAG in "${SAFE_TAGS[@]}"; do
+        if docker rmi "$TAG" 2>&1; then
+            print_success "Docker image tag removed: $TAG"
+        else
+            print_warning "Could not remove $TAG; another container may still reference the image"
+        fi
+    done
 }
 
 remove_logs() {
@@ -416,16 +436,20 @@ display_completion_summary() {
             echo -e "  ${GREEN}○${NC}  Container : ${CONTAINER_NAME} — not found (nothing to remove)"
         fi
 
-        if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
+        REMAINING_TAG=""
+        for TAG in "${IMAGE_TAGS[@]}"; do
+            docker image inspect "${TAG}" &>/dev/null && { REMAINING_TAG="$TAG"; break; }
+        done
+        if [ -n "$REMAINING_TAG" ]; then
             if [ "$IMAGE_KEPT" = true ]; then
-                echo -e "  ${GREEN}✓${NC}  Image     : ${IMAGE_NAME} — ${GREEN}PRESERVED${NC}"
+                echo -e "  ${GREEN}✓${NC}  Image     : ${REMAINING_TAG} — ${GREEN}PRESERVED${NC}"
             else
-                echo -e "  ${YELLOW}⚠${NC}  Image     : ${IMAGE_NAME} — ${YELLOW}STILL EXISTS (removal may have failed)${NC}"
+                echo -e "  ${YELLOW}⚠${NC}  Image     : ${REMAINING_TAG} — ${YELLOW}STILL EXISTS (removal may have failed)${NC}"
             fi
         elif [ "$IMAGE_EXISTS" = true ]; then
-            echo -e "  ${GREEN}✓${NC}  Image     : ${IMAGE_NAME} — removed"
+            echo -e "  ${GREEN}✓${NC}  Image     : ${IMAGE_TAGS[*]} — removed"
         else
-            echo -e "  ${GREEN}○${NC}  Image     : ${IMAGE_NAME} — not found (nothing to remove)"
+            echo -e "  ${GREEN}○${NC}  Image     : ${IMAGE_TAGS[*]} — not found (nothing to remove)"
         fi
     fi
 
