@@ -49,6 +49,8 @@ This guide covers initial deployment, alert channel configuration, and ongoing o
 | Git | Required to clone the repository |
 | Host permissions | Root, or membership in the `docker` group (to read `/var/run/docker.sock`) |
 
+> By default the container runs as root so a manual install needs no host-specific group setup. The automated installer ([3.1 Option A](#31-option-a-automated-installation-installsh-recommended)) instead hardens it to run non-root (UID/GID 1000, joined to the docker.sock group) automatically, with no input required. Either way it's still contained by a read-only root filesystem, dropped Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID limits (see [Container Hardening in the README](README.md#container-hardening)).
+
 ```bash
 docker compose version
 ```
@@ -120,6 +122,8 @@ LOG_LEVEL=INFO
 ```
 
 Only credentials and secrets belong in `.env`. Hosts, ports, recipients, and thresholds are configured in `watchdog-config.yaml`, never hardcoded in this guide or in scripts.
+
+The container runs as root by default for a zero-configuration manual install. If you want the non-root hardening that [Option A](#31-option-a-automated-installation-installsh-recommended) applies automatically, uncomment the `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` lines in `.env.example` and fill in `DOCKER_GID` (`stat -c '%g' /var/run/docker.sock`).
 
 ---
 
@@ -320,14 +324,14 @@ The script walks through the following stages in order:
 |---|---|
 | **Prerequisites** | Verifies Docker and Docker Compose are installed and running |
 | **Log directory** | Creates `./watchdog/` for persistent log storage |
-| **Load image** | Loads `watchdog.tar` into Docker (`watchdog:latest`); builds from source if archive is absent |
-| **Host identification** | `WATCHDOG_HOST` is hardcoded to `CyberController-Server` in `docker-compose.yaml` |
+| **Load image** | Loads `watchdog.tar` and requires it to contain `watchdog:<VERSION>` (from the root `VERSION` file); aborts on a version mismatch, and builds from source only when the archive is absent |
+| **Host identification** | `WATCHDOG_HOST` is taken from `.env` (the installer prompts for it), defaulting to `CyberController-Server` |
 | **Configuration wizard** | Selects channels and prompts for Slack/SMTP/SNMP/Syslog values interactively |
-| **Credentials + config write** | Generates/updates `.env` and `watchdog-config.yaml` from wizard answers |
-| **Start** | Runs `docker compose up -d` in the background |
-| **Verify** | Checks the container is running and prints a summary with common commands |
+| **Credentials + config write** | Generates/updates `.env` (including `WATCHDOG_VERSION`) and `watchdog-config.yaml` from wizard answers |
+| **Start** | Runs `docker compose up -d` in the background, aborting if Compose reports a failure |
+| **Verify** | Fails the installation unless the container is running **and** uses `watchdog:<VERSION>` |
 
-> **Re-running `install.sh` on an existing installation is safe.** If configuration files already exist, the installer asks whether to reconfigure from scratch. Choose `N` to keep existing files unchanged.
+> **Re-running `install.sh` on an existing installation is safe.** If both configuration files exist, the installer asks whether to reconfigure from scratch. Choose `N` to keep them unchanged — the packaged image is still loaded and the deployment is still moved to the new version. If only one of the two files is present, the wizard regenerates both, since a half-present configuration cannot start.
 
 Continue to [4. Verification](#4-verification).
 
@@ -342,7 +346,7 @@ Use this path when you need full control over configuration files before startin
 *Note* - If internet access is available, build the image and skip to [Start the container](#start-the-container) below.
 
 ```bash
-docker compose -f docker-compose.build.yaml build
+WATCHDOG_VERSION="$(cat VERSION)" docker compose -f docker-compose.build.yaml build
 ```
 
 #### Offline Installation
@@ -426,17 +430,18 @@ Re-run [4.1 Confirm Container Status and Health](#41-confirm-container-status-an
 
 ### 5.2 Roll Back an Image Upgrade
 
-The runtime image is always tagged `watchdog:latest`, so loading or pulling a new image overwrites the previous one. Before upgrading the image (see [6.3 Upgrade Guide](#63-upgrade-guide)), tag the current working image so it can be restored:
+Each release is tagged `watchdog:<VERSION>` and the deployed tag is pinned by `WATCHDOG_VERSION` in `.env`. As long as the previous image is still on the host, rolling back is a version change:
+
+```bash
+docker images watchdog                       # list the versions available locally
+sed -i 's/^WATCHDOG_VERSION=.*/WATCHDOG_VERSION=1.5.3/' .env
+docker compose up -d
+```
+
+If the previous image was only ever tagged `watchdog:latest`, preserve it under a rollback tag before loading a new archive:
 
 ```bash
 docker tag watchdog:latest watchdog:rollback
-```
-
-If the new image misbehaves after `docker load -i watchdog.tar` or `docker compose pull`, restore the previous image and redeploy:
-
-```bash
-docker tag watchdog:rollback watchdog:latest
-docker compose up -d
 ```
 
 ### 5.3 Roll Back an Application Upgrade (Git)
@@ -486,7 +491,7 @@ docker compose up -d
 
 ```bash
 # Rebuild the image (requires internet)
-docker compose -f docker-compose.build.yaml build
+WATCHDOG_VERSION="$(cat VERSION)" docker compose -f docker-compose.build.yaml build
 
 # Redeploy using the production runtime file
 docker compose up -d
@@ -518,11 +523,10 @@ docker compose up -d
 
 #### Apply docker-compose.yaml changes (container settings)
 
-For example, edit the `WATCHDOG_HOST` value in `docker-compose.yaml`:
+For example, change the hostname shown in alerts by editing `WATCHDOG_HOST` in `.env`:
 
-```yaml
-environment:
-  WATCHDOG_HOST: my-new-server-name
+```bash
+WATCHDOG_HOST=my-new-server-name
 ```
 
 Then redeploy to take effect:
@@ -642,12 +646,15 @@ docker compose up -d
 ##### Option B: Offline Image Upgrade
 
 1. Request the Radware RE team to create an updated pre-built Docker image for offline installation. See [8.4 Support Contacts](#84-support-contacts).
-2. Load the image. Make sure the new image uses the same name, `watchdog:latest`.
+2. Load the image. The archive carries the release tag `watchdog:<VERSION>` matching the package's `VERSION` file.
 
    ```bash
    docker load -i watchdog.tar
+   sed -i "s/^WATCHDOG_VERSION=.*/WATCHDOG_VERSION=$(cat VERSION)/" .env
    docker compose up -d
    ```
+
+   Running `bash install.sh` performs all three steps (and verifies the result) automatically.
 
 ---
 
@@ -692,7 +699,7 @@ Shows a removal plan (container name, image size, log directory size), asks for 
 bash uninstall.sh --keep-logs
 ```
 
-Stops and removes the `watchdog` container and the `watchdog:latest` Docker image. The `./watchdog/` log directory is left intact so you can review historical logs later.
+Stops and removes the `watchdog` container and the `watchdog:<VERSION>` and `watchdog:latest` Docker image tags. The `./watchdog/` log directory is left intact so you can review historical logs later.
 
 #### Remove everything including logs
 
@@ -723,7 +730,7 @@ docker compose logs docker-container-watchdog
 ```
 
 Common causes:
-- `/var/run/docker.sock` is not accessible — ensure the host socket exists and the container has read access
+- `/var/run/docker.sock` is not accessible — ensure the host socket exists and Docker is running. Manual installs run the container as root, so no host-side group configuration is required; if you opted into non-root hardening (`WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env`), verify `DOCKER_GID` matches `stat -c '%g' /var/run/docker.sock`.
 - Missing `.env` file — run `cp .env.example .env` and fill in values
 
 ### Alert Notifications Not Received
@@ -797,12 +804,13 @@ docker compose restart docker-container-watchdog
 
 #### Host Identification in Alerts
 
-Set `WATCHDOG_HOST` in `docker-compose.yaml` under the watchdog service environment:
+Set `WATCHDOG_HOST` in `.env` (written by `install.sh` from the hostname prompt), then run `docker compose up -d`:
 
-```yaml
-environment:
-  WATCHDOG_HOST: my-server-name
+```bash
+WATCHDOG_HOST=my-server-name
 ```
+
+When it is unset, `docker-compose.yaml` falls back to `CyberController-Server`.
 
 ---
 
