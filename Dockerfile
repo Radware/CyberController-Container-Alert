@@ -11,7 +11,7 @@ RUN pip install --no-cache-dir \
     "cryptography>=42.0"
 
 # Copy agent
-COPY watchdog.py .
+COPY watchdog.py ha_monitor.py ./
 
 # UID 1000 account for install.sh's non-root hardening path (docker-compose.yaml
 # defaults to root; install.sh instead sets WATCHDOG_UID/GID to run as this user).
