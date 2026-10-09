@@ -1,9 +1,9 @@
 # Optional CyberController HA Active-Node Alert — Design Proposal
 
-**Status:** Proposed for review; design only, no implementation  
-**Date:** 2026-10-09  
-**Target:** Radware/CyberController-Container-Alert, baseline v1.5.4 (main: a4ddfed)  
-**Delivery:** One small implementation PR after design approval
+**Status:** Implementation approved and completed on feature branch; controlled two-node validation pending
+**Date:** 2026-10-09
+**Target:** Radware/CyberController-Container-Alert, baseline v1.5.4 (main: a4ddfed)
+**Delivery:** One small implementation PR, with release blocked on two-node QA
 
 ## 1. Goal and decision
 
@@ -167,4 +167,4 @@ The implementation is ready for review/release when all automated tests and CI p
 
 **Out of scope:** HA orchestration/control, restarting or promoting resources, automatic remediation, logging every Pacemaker transition, live log parsing, new monitoring dashboards/exporters, historical HA event reconstruction, generalized multi-service health monitoring, and remediation of the native Prometheus 9002 vs 9664 mismatch. The latter should be handled as a separate CyberController native monitoring correction.
 
-**Review request:** Approve (or revise) the exact signal (**HAOperatorRep-Res promoted/active**), two-poll confirmation, single notification from the newly active node, state persistence, and the requirement to deploy on both nodes. Implementation must **not** start until design approval.
+**Implementation status:** Approved by the user on 2026-10-09 and implemented on the feature branch. Do not merge or release until the two-node acceptance gates in [HA_VALIDATION.md](HA_VALIDATION.md) are satisfied.

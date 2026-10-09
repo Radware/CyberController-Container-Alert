@@ -288,6 +288,24 @@ class NotificationTests(unittest.TestCase):
         self.assertIn(f"{A} -> {B}", warn.call_args.args[1])
         trap.assert_called_once()
 
+    def test_smtp_ha_notification_identifies_role_change(self):
+        from email.parser import BytesParser
+        from email.policy import default
+        alert = self.make_alert()
+        cfg = {"smtp": {"enabled": True, "auth": False, "tls": False,
+                        "host": "mail.invalid", "port": 25,
+                        "sender": "alerts@example.invalid",
+                        "recipients": ["ops@example.invalid"]}}
+        with patch("smtplib.SMTP") as smtp:
+            watchdog.send_smtp(alert, cfg)
+        sent = smtp.return_value.__enter__.return_value.sendmail.call_args.args[2]
+        parsed = BytesParser(policy=default).parsebytes(sent)
+        self.assertIn("HA active node changed", parsed["Subject"])
+        body = parsed.get_body(preferencelist=("plain",)).get_content()
+        self.assertIn(f"Previous active: {A}", body)
+        self.assertIn(f"New active: {B}", body)
+        self.assertNotIn("Container:", body)
+
     def test_container_alert_subject_unchanged(self):
         alert = watchdog.AlertPayload(
             "HIGH", "config_postgres_1", "abc", "host", "unhealthy",
