@@ -9,7 +9,7 @@
 - **25 unit/regression tests pass** on the development workstation, covering HA metric parsing, state validation, transition confirmation, failback, newly-active-node-only sending, persistence/duplicate suppression, bad/unavailable metrics, disabled-by-default behavior, existing Docker monitoring independence, Slack/SMTP/syslog/SNMP dispatch semantics and previous watchdog regressions.
 - **24 tests passed** in an isolated Docker container on the HA test appliance using the existing watchdog:1.5.4 runtime image with the new source mounted read-only (prior to adding the extra SMTP test).
 - Python syntax and existing shell-script syntax checks pass.
-- The local clean Docker build was **not completed** because Docker Hub returned HTTP 504 while fetching the python:3.11-slim base image. New Dockerfile includes both watchdog.py and ha_monitor.py; full clean image build remains for CI.
+- **GitHub Actions CI passed** on draft PR #4, including a clean image build, shell/Python syntax, regression tests and Compose checks. The earlier local build encountered an external Docker Hub HTTP 504; CI subsequently built the image successfully. The Dockerfile includes both watchdog.py and ha_monitor.py.
 
 ## Actual appliance checks — read-only
 
@@ -32,7 +32,7 @@ Standby side (10.199.0.242):
 2. Verify both nodes learn the same initial active owner *before* the failover.
 3. In an approved maintenance window, perform a **supported controlled switchover** and then failback; verify one notification comes only from the newly active node each time, with correct timestamps and old/new node details.
 4. Confirm that losing the original active node does not prevent the surviving node from sending the notification; avoid artificial network partitions while STONITH fencing is disabled.
-5. Verify at least syslog delivery end-to-end, performance, clean image build/CI, and disabled-option backward compatibility.
+5. Verify at least syslog delivery end-to-end, performance and disabled-option behavior on both real HA nodes (CI already passes).
 
 **Why no forced failover yet:** Testing a cluster-wide role change before the surviving node has a watchdog would not validate the requested operator notification. Because STONITH is disabled, a null-route or network partition is additionally unsafe (split-brain risk). No cluster state or firewall settings were changed.
 
