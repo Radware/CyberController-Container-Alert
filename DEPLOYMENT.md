@@ -410,6 +410,34 @@ docker exec docker-container-watchdog tail -f /var/log/watchdog/watchdog.log
 
 ---
 
+### Optional HA role-change verification
+
+This check is only for **two-node CyberController HA** installations and is
+disabled by default. On **each HA host**:
+
+1. Verify the local exporter is active: curl -fsS http://127.0.0.1:9664/metrics.
+2. Confirm metrics for Pacemaker resources, quorum, collector scrape success,
+   and local node identity are present. Port 9664 is the verified lab setting;
+   read /etc/ha_cluster_exporter.yaml if different.
+3. Enable ha_monitor.enabled: true in watchdog-config.yaml on **both**
+   nodes; restart only the watchdog service using the normal documented
+   configuration-change procedure.
+4. Verify the baseline is stored under ha_monitor.active_node in the persistent
+   watchdog state.json; startup should send **no** HA event.
+5. During an approved HA maintenance window, perform one controlled switchover
+   and failback using the supported CyberController operations procedure.
+   Confirm exactly one notification from the newly active node for each
+   transition; check docker logs docker-container-watchdog on both hosts.
+6. Disable by setting ha_monitor.enabled: false and restarting the watchdog.
+   No HA service or Pacemaker configuration changes are necessary.
+
+Do not attempt a network-partition simulation on a cluster with STONITH
+disabled: split-brain and database inconsistency are possible. The native
+Prometheus port mismatch (9002 vs exporter 9664) is a separate appliance
+configuration issue; it does not block the watchdog's direct localhost check.
+
+---
+
 ## 5. Rollback
 
 ### 5.1 Roll Back a Failed Deployment

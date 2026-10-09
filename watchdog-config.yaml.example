@@ -127,6 +127,16 @@ auto_health_check:
     - /              # fallback
   timeout_seconds: 2   # discovery uses 1s (half), cached checks use 2s
 
+# ── Optional CyberController HA active-node change alert ─────────────────────
+# Run this watchdog on BOTH HA nodes, with the HA exporter active locally.
+# The HA exporter is normally configured on port 9664 on the appliance.
+# No Prometheus scrape, Pacemaker command, host bind mount, or firewall change
+# is required. First successful sample sets a quiet baseline; a confirmed
+# active-node change alerts only from the newly promoted node.
+ha_monitor:
+  enabled: false
+  exporter_url: http://127.0.0.1:9664/metrics
+
 # ── Manual health checks (override auto-discovery for specific containers) ────
 # Leave empty — all containers use auto-discovery
 container_health_checks: {}
