@@ -1406,10 +1406,31 @@ class Watchdog:
 
         log.debug("Docker event: %s on %s", action, name)
 
+        # Docker events refer to a container *instance*, not a reusable name.
+        # A removed instance must never be attributed to a newly created one.
+        container_id = event.get("Actor", {}).get("ID") or event.get("id")
         try:
-            container = self.client.containers.get(name)
+            container = self.client.containers.get(container_id or name)
         except docker.errors.NotFound:
-            log.warning("Container %s not found for event %s", name, action)
+            # Docker can deliver die/health events after an ephemeral container
+            # has been removed. Report at most once per instance/action per
+            # minute, rather than flooding logs and configured syslog sinks.
+            if not hasattr(self, "_missing_event_last_log"):
+                self._missing_event_last_log = {}
+            now = time.monotonic()
+            key = (container_id or name, action)
+            last = self._missing_event_last_log.get(key, -float("inf"))
+            if now - last >= 60:
+                self._missing_event_last_log[key] = now
+                log.warning(
+                    "Container %s (%s) already removed before %s event could be processed",
+                    name, container_id or "unknown ID", action,
+                )
+            if len(self._missing_event_last_log) > 1024:
+                self._missing_event_last_log = {
+                    k: t for k, t in self._missing_event_last_log.items()
+                    if now - t < 60
+                }
             return
 
         if is_ignored_container_event(container, attributes, action, self._ignored_events):
