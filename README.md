@@ -59,9 +59,9 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 
 Two additional deduplication rules suppress redundant alerts at the event level:
 - **OOM → die suppression**: when a container is OOM-killed, Docker emits both an `oom` event and an immediately following `die` event. The watchdog fires the `oom` CRITICAL alert and suppresses the subsequent `crashed` alert to avoid a duplicate for the same incident.
-- **Restart-loop → die suppression**: once a `restart-loop` HIGH alert is active for a container, subsequent per-cycle `die` events are suppressed — the restart-loop alert is the primary signal until the container stabilises.
+- **Restart-loop incident coalescing**: for containers with automatic restart policies, the first unexpected exit sends one CRITICAL `crashed` alert. At `restart_threshold` failures within `restart_window_minutes`, one HIGH `restart-loop` alert escalates the incident. Further per-cycle crashes, OOMs, and unhealthy events do not replace it. The event listener counts failed runs immediately; the poller cross-checks `RestartCount` for missed events.
 
-**Recovery alerts**: once a container that was previously alarmed (`crashed`, `oom`, `unhealthy`, or `restart-loop`) is observed running and healthy again, the watchdog dispatches a one-time INFO `recovered` alert through the same channels and clears its alarm state. Controlled by `alert_on_recovery` (default `true`). Detection depends on the same probe path used for the original failure — a container with a Docker `HEALTHCHECK` recovers via the `health_status: healthy` event; containers on active probes (HTTP/TCP/`/proc`) recover on the next successful poll cycle.
+**Recovery alerts**: once a previously-alarmed container is healthy and running, the watchdog sends a one-time INFO `recovered` notification (if `alert_on_recovery: true`). For an auto-restarting container recovering from `crashed`, `oom`, or `restart-loop`, a fleeting `running` state is *not* recovery: Docker's `State.StartedAt` must prove at least `restart_recovery_stability_seconds` continuous uptime (default 120 seconds), with no intervening failure. On recovery, restart history is reset to avoid immediate re-alerting. Docker health events cannot bypass this check. Other container recovery checks preserve their existing behavior.
 
 ---
 
@@ -130,6 +130,7 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `cooldown_minutes` | `5` | Suppress duplicate alerts per container per failure type |
 | `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |
 | `restart_window_minutes` | `10` | Rolling window for restart counting |
+| `restart_recovery_stability_seconds` | `120` | Minimum uninterrupted running time before a recovered alert for automatically restarted crash/OOM/restart-loop incidents |
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy cycles before alerting |
 | `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
 | `excluded_containers` | `[]` | Container names to never alert on |
@@ -275,7 +276,7 @@ Every alert includes two probe fields that identify exactly how and why the fail
 | `unhealthy` (TCP connect) | `TCP connect` | `TCP probe failed — connection refused or timed out on 172.18.0.5:6379 (Connection refused)` |
 | `unhealthy` (/proc fallback) | `/proc alive check` | `/proc alive check failed — PID 1 is zombie/stopped (exit code 1)` |
 
-> **Restart-loop detection** is not a probe — it is tracked by the **Poll loop** path and fires when a container restarts ≥ `restart_threshold` times within `restart_window_minutes`. See the Poll loop row in the monitoring paths table above.
+> **Restart-loop detection** uses both event-stream `die` records (nonzero exits with an automatic restart policy) and Docker `RestartCount` sampled by the poll loop. This detects rapid failures that can occur entirely between polls; counts from both paths are reconciled without double-counting.
 
 ---
 

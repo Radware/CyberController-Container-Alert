@@ -86,6 +86,7 @@ DEFAULT_CONFIG = {
     "cooldown_minutes": 5,
     "restart_threshold": 5,
     "restart_window_minutes": 10,
+    "restart_recovery_stability_seconds": 120,  # prevent false recovery between restarts
     "unhealthy_cycles_threshold": 3,
     "alert_on_recovery": True,
     "excluded_containers": [],
@@ -153,14 +154,18 @@ def _host_boot_time() -> int:
 
 
 class ContainerState:
-    __slots__ = ("name", "lock", "unhealthy_cycles", "restart_times", "last_alert_time",
-                 "alerted_for", "last_restart_count")
+    __slots__ = ("name", "lock", "unhealthy_cycles", "restart_times",
+                 "poll_restart_times", "last_failure_time", "last_container_id",
+                 "last_alert_time", "alerted_for", "last_restart_count")
 
     def __init__(self, name: str):
         self.name = name
         self.lock = threading.Lock()  # event thread and poll thread both mutate this
         self.unhealthy_cycles: int = 0
-        self.restart_times: list[float] = []
+        self.restart_times: list[float] = []       # timestamped Docker die events
+        self.poll_restart_times: list[float] = []  # missing events inferred from RestartCount
+        self.last_failure_time: float = 0.0
+        self.last_container_id: str = ""
         self.last_alert_time: float = 0.0
         self.alerted_for: str = ""
         self.last_restart_count: int = -1  # -1 = no baseline taken yet
@@ -980,8 +985,8 @@ ACTIONS = {
     ),
     "restart-loop": (
         "HIGH",
-        "Container is in a restart loop. Check logs for crash reason. "
-        "Consider increasing RestartSec or investigating root cause.",
+        "Container is repeatedly restarting. Inspect docker logs and the "
+        "restart policy; fix application crash, OOM, or dependency failure.",
     ),
     "recovered": (
         "INFO",
@@ -1214,6 +1219,30 @@ def record_alert(state: ContainerState, failure_type: str) -> None:
     state.alerted_for = failure_type
 
 
+# ── Docker restart policy / uptime helpers ────────────────────────────────────
+def has_automatic_restart_policy(container) -> bool:
+    """Only restart-policy containers need crash-cycle coalescing."""
+    try:
+        policy = container.attrs.get("HostConfig", {}).get("RestartPolicy", {}).get("Name", "")
+        return policy in ("always", "unless-stopped", "on-failure")
+    except (AttributeError, TypeError):
+        return False
+
+
+def container_started_timestamp(container) -> float | None:
+    """Docker's State.StartedAt, parsed as an aware UTC timestamp."""
+    try:
+        started = container.attrs.get("State", {}).get("StartedAt", "")
+        if not started or started.startswith("0001-"):
+            return None
+        dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
 # ── Core watchdog logic ───────────────────────────────────────────────────────
 class Watchdog:
     def __init__(self, cfg: dict):
@@ -1227,6 +1256,8 @@ class Watchdog:
         self._excluded: set[str] = set(cfg.get("excluded_containers") or [])
         self._restart_threshold   = cfg.get("restart_threshold", 5)
         self._restart_window_secs = cfg.get("restart_window_minutes", 10) * 60
+        self._restart_recovery_stability_secs = max(
+            0, int(cfg.get("restart_recovery_stability_seconds", 120)))
         self._unhealthy_threshold = cfg.get("unhealthy_cycles_threshold", 3)
         self._cooldown_minutes    = cfg.get("cooldown_minutes", 5)
         self._ignored_events: list[dict] = cfg.get("ignored_container_events") or []
@@ -1365,13 +1396,34 @@ class Watchdog:
 
     # ── Recovery alert ─────────────────────────────────────────────────────────
     def _maybe_alert_recovery(self, container, state: ContainerState) -> None:
-        """Clear resolved state and optionally fire a one-time RECOVERED alert."""
+        """Resolve once stable; a brief RUNNING state is not loop recovery."""
+        automatic = has_automatic_restart_policy(container)
+        started = container_started_timestamp(container)
+        now = time.time()
         with state.lock:
             previous = state.alerted_for
             if not previous or previous == "recovered":
                 return
+            # Once a restart-loop was reported, changing Docker's restart
+            # policy must not bypass the stability period.
+            if previous == "restart-loop" or (automatic and previous in ("crashed", "oom")):
+                stability = self._restart_recovery_stability_secs
+                # If we cannot prove continuous uptime, don't clear a real incident.
+                if started is None or now - started < stability:
+                    return
+                if state.last_failure_time and now - state.last_failure_time < stability:
+                    return
+                # A resolved loop must not re-alert from restarts still in the
+                # rolling 10-minute window. Start a fresh episode on next failure.
+                state.restart_times.clear()
+                state.poll_restart_times.clear()
+                try:
+                    state.last_restart_count = int(container.attrs.get("RestartCount", 0) or 0)
+                except (TypeError, ValueError):
+                    state.last_restart_count = -1
+                state.last_failure_time = 0.0
             state.alerted_for = ""
-            state.last_alert_time = time.time()
+            state.last_alert_time = now
         self.state.save(self._boot_time)
         if not self.cfg.get("alert_on_recovery", True):
             log.info("%s recovered from %s — recovery notification disabled",
@@ -1419,50 +1471,103 @@ class Watchdog:
         state = self.state.get(name)
 
         if action == "die":
-            self._discovered_checks.pop(name, None)  # clear cache — container will restart
-            # OOM kills also emit a die event immediately after — skip the crashed alert
-            # to avoid duplicate: the oom alert already covers the incident
-            if name in self._oom_containers:
-                self._oom_containers.discard(name)
-                log.info("%s: die event follows OOM — suppressing duplicate crashed alert", name)
-                return
-            # Containers already flagged as restart-loop: suppress the per-cycle crashed
-            # alert — the restart-loop HIGH is the active signal for this incident.
-            # A first-time crash on a container with a restart policy still fires crashed.
-            if state.alerted_for == "restart-loop":
-                log.info("%s: die event during active restart-loop — suppressing redundant crashed alert", name)
-                return
+            self._discovered_checks.pop(name, None)  # clear cache — container may restart
             exit_code_str = attributes.get("exitCode", "0")
             try:
                 exit_code = int(exit_code_str)
             except (ValueError, TypeError):
                 exit_code = None
+
             if is_kvision_mariadb_dump_helper_crash(container, attributes, exit_code):
                 log.info(
                     "%s: Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert "
-                    "(image=%s, AutoRemove=true, mount=%s, exit_code=137)",
+                    "(image=%s, AutoRemove=True, mount=%s, exit_code=137)",
                     name, _KVISION_MARIADB_DUMP_HELPER_IMAGE, _KVISION_MARIADB_DUMP_MOUNT,
                 )
                 return
-            # exit 0 = graceful stop, no alert
-            if exit_code == 0:
-                log.info("%s exited cleanly (code 0) — no alert", name)
+
+            # Consume the OOM -> die pairing even if this die promotes an
+            # existing OOM alert to restart-loop.
+            oom_die = name in self._oom_containers
+            if oom_die:
+                self._oom_containers.discard(name)
+            automatic = has_automatic_restart_policy(container)
+            now = time.time()
+            with state.lock:
+                cid = getattr(container, "id", "") or ""
+                if cid and state.last_container_id and cid != state.last_container_id:
+                    # Same name, new container: don't inherit its predecessor's loop.
+                    state.restart_times.clear()
+                    state.poll_restart_times.clear()
+                    state.last_restart_count = -1
+                if cid:
+                    state.last_container_id = cid
+                if automatic and exit_code != 0:
+                    state.restart_times = [
+                        t for t in state.restart_times if now - t < self._restart_window_secs
+                    ]
+                    # A die event reliably records a failed *run*, even when
+                    # several Docker restarts happen between 60-second polls.
+                    # Clean exit 0 is not counted here: Docker stop/start during
+                    # maintenance is not evidence of an automatic restart.
+                    # The poller still catches clean-exit loops via RestartCount.
+                    state.restart_times.append(now)
+                    state.last_failure_time = now
+                elif exit_code != 0:
+                    state.last_failure_time = now
+                restarts = max(len(state.restart_times), len(state.poll_restart_times))
+                previous = state.alerted_for
+
+            if automatic and restarts >= self._restart_threshold:
+                if self._claim_alert(state, "restart-loop"):
+                    payload = build_payload(
+                        container, "restart-loop", self.host, self.runbook_base,
+                        probe_detail=(
+                            f"Restart-loop event detected - at least {restarts} restarts "
+                            f"in {int(self._restart_window_secs // 60)}min window"
+                        ))
+                    self._dispatch(payload)
                 return
+
+            if previous == "restart-loop":
+                log.info("%s: die event during active restart-loop — suppressing crashed alert", name)
+                return
+
+            # OOM kills also emit a die; count the restart above but do not
+            # downgrade the OOM incident into a redundant crashed alert.
+            if oom_die:
+                log.info("%s: die event follows OOM — suppressing duplicate crashed alert", name)
+                return
+
+            if exit_code == 0:
+                log.info("%s exited cleanly (code 0) — no crashed alert", name)
+                return
+
             if exit_code == 137:
-                # Suppression did not match — surface the real signals so the
-                # mismatched one (image / AutoRemove / mount) is visible in logs.
                 log.warning("%s: exit 137 not suppressed — signals: %s",
                             name, _mariadb_helper_signals(container, attributes))
-            failure_type = "crashed"
-            if self._claim_alert(state, failure_type):
-                payload = build_payload(container, failure_type, self.host,
-                                        self.runbook_base, exit_code,
-                                        probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
+            # One CRASH for the initial incident; subsequent crashes coalesce
+            # until restart-loop escalation or sustained recovery.
+            if previous == "crashed" or (automatic and previous == "oom"):
+                log.debug("%s: additional die within open %s incident — suppressing",
+                          name, previous)
+                return
+            if self._claim_alert(state, "crashed"):
+                payload = build_payload(
+                    container, "crashed", self.host, self.runbook_base, exit_code,
+                    probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
                 self._dispatch(payload)
 
         elif action == "oom":
             failure_type = "oom"
+            with state.lock:
+                if has_automatic_restart_policy(container):
+                    state.last_failure_time = time.time()
+                active_loop = state.alerted_for == "restart-loop"
             self._oom_containers.add(name)  # mark so the imminent die event is suppressed
+            if active_loop:
+                log.info("%s: OOM during active restart-loop — suppressing per-cycle OOM alert", name)
+                return
             if self._claim_alert(state, failure_type):
                 payload = build_payload(container, failure_type, self.host,
                                         self.runbook_base,
@@ -1476,6 +1581,10 @@ class Watchdog:
                 cycles = state.unhealthy_cycles
             threshold = self._unhealthy_threshold
             log.debug("%s unhealthy cycle %d/%d", name, cycles, threshold)
+            with state.lock:
+                active_loop = state.alerted_for == "restart-loop"
+            if active_loop:
+                return  # keep the primary incident until sustained recovery
             if cycles >= threshold:
                 failure_type = "unhealthy"
                 if self._claim_alert(state, failure_type):
@@ -1538,15 +1647,25 @@ class Watchdog:
             with state.lock:
                 state.restart_times = [t for t in state.restart_times
                                        if now - t < restart_window]
+                state.poll_restart_times = [t for t in state.poll_restart_times
+                                            if now - t < restart_window]
+                cid = getattr(container, "id", "") or ""
+                if cid and state.last_container_id and cid != state.last_container_id:
+                    state.restart_times.clear()
+                    state.poll_restart_times.clear()
+                    state.last_restart_count = -1
+                if cid:
+                    state.last_container_id = cid
                 if state.last_restart_count < 0 or restart_count < state.last_restart_count:
-                    # First sighting, or the container was recreated (count resets):
-                    # take a baseline instead of alerting on history we never saw.
+                    # Establish a baseline, without counting historical restarts.
                     state.last_restart_count = restart_count
                 elif restart_count > state.last_restart_count:
                     new_restarts = restart_count - state.last_restart_count
-                    state.restart_times.extend([now] * min(new_restarts, restart_threshold))
+                    state.poll_restart_times.extend([now] * min(new_restarts, restart_threshold))
                     state.last_restart_count = restart_count
-                restarts = len(state.restart_times)
+                # Docker events and RestartCount describe the same restarts.
+                # Use the higher observation count, never their sum.
+                restarts = max(len(state.restart_times), len(state.poll_restart_times))
 
             if restarts >= restart_threshold:
                 failure_type = "restart-loop"
@@ -1565,7 +1684,9 @@ class Watchdog:
                 with state.lock:
                     state.unhealthy_cycles += 1
                     cycles = state.unhealthy_cycles
-                if cycles >= unhealthy_threshold:
+                with state.lock:
+                    active_loop = state.alerted_for == "restart-loop"
+                if cycles >= unhealthy_threshold and not active_loop:
                     failure_type = "unhealthy"
                     if self._claim_alert(state, failure_type):
                         probe_detail = get_docker_health_log(container) or "Docker health probe failed - health_status: unhealthy (poll-detected)"
@@ -1609,13 +1730,9 @@ class Watchdog:
                         if state.unhealthy_cycles > 0:
                             log.info("%s: check recovered — resetting counters", name)
                         state.unhealthy_cycles = 0
-                        # restart_times ages out on its own. Clearing it here would
-                        # declare recovery for a container merely caught healthy
-                        # between two crashes of an ongoing restart loop.
-                        still_looping = (state.alerted_for == "restart-loop"
-                                         and len(state.restart_times) >= restart_threshold)
-                    if not still_looping:
-                        self._maybe_alert_recovery(container, state)
+                        # Recovery is gated on continuous Docker uptime below,
+                        # not on whether the last poll happened to see RUNNING.
+                    self._maybe_alert_recovery(container, state)
 
             else:
                 log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
