@@ -155,17 +155,17 @@ def _host_boot_time() -> int:
 
 class ContainerState:
     __slots__ = ("name", "lock", "unhealthy_cycles", "restart_times",
-                 "poll_restart_times", "pending_event_times", "last_failure_time",
-                 "last_container_id", "last_alert_time", "alerted_for", "last_restart_count")
+                 "last_restart_count", "last_restart_poll_at", "last_failure_time",
+                 "last_recovery_time", "last_container_id", "last_alert_time", "alerted_for")
 
     def __init__(self, name: str):
         self.name = name
         self.lock = threading.Lock()  # event thread and poll thread both mutate this
         self.unhealthy_cycles: int = 0
-        self.restart_times: list[float] = []       # timestamped Docker die events
-        self.poll_restart_times: list[float] = []  # missing restarts inferred from RestartCount
-        self.pending_event_times: list[float] = []  # die events not yet matched to RestartCount
+        self.restart_times: list[float] = []  # counter increments observed via Docker inspect
+        self.last_restart_poll_at: float = 0.0
         self.last_failure_time: float = 0.0
+        self.last_recovery_time: float = 0.0
         self.last_container_id: str = ""
         self.last_alert_time: float = 0.0
         self.alerted_for: str = ""
@@ -1245,6 +1245,18 @@ def container_started_timestamp(container) -> float | None:
         return None
 
 
+def docker_event_timestamp(event: dict) -> float | None:
+    """Use the Docker occurrence time, not the receipt time, if supplied."""
+    try:
+        if event.get("timeNano"):
+            return float(event["timeNano"]) / 1_000_000_000
+        if event.get("time"):
+            return float(event["time"])
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return None
+
+
 # ── Core watchdog logic ───────────────────────────────────────────────────────
 class Watchdog:
     def __init__(self, cfg: dict):
@@ -1417,10 +1429,10 @@ class Watchdog:
                          state.name, previous_id[:12], cid[:12])
                 state.unhealthy_cycles = 0
                 state.restart_times.clear()
-                state.poll_restart_times.clear()
-                state.pending_event_times.clear()
                 state.last_restart_count = -1
+                state.last_restart_poll_at = 0.0
                 state.last_failure_time = 0.0
+                state.last_recovery_time = 0.0
                 state.alerted_for = ""
                 state.last_alert_time = 0.0
             state.last_container_id = cid
@@ -1451,8 +1463,7 @@ class Watchdog:
                 # A resolved loop must not re-alert from restarts still in the
                 # rolling 10-minute window. Start a fresh episode on next failure.
                 state.restart_times.clear()
-                state.poll_restart_times.clear()
-                state.pending_event_times.clear()
+                state.last_restart_poll_at = now
                 try:
                     state.last_restart_count = int(container.attrs.get("RestartCount", 0) or 0)
                 except (TypeError, ValueError):
@@ -1460,6 +1471,7 @@ class Watchdog:
                 state.last_failure_time = 0.0
             state.alerted_for = ""
             state.last_alert_time = now
+            state.last_recovery_time = now
         self.state.save(self._boot_time)
         if not self.cfg.get("alert_on_recovery", True):
             log.info("%s recovered from %s — recovery notification disabled",
@@ -1513,6 +1525,14 @@ class Watchdog:
         state = self.state.get(name)
         self._sync_container_identity(state, container)
 
+        event_time = docker_event_timestamp(event)
+        if action in ("die", "oom", "health_status: unhealthy") and event_time is not None:
+            with state.lock:
+                stale = bool(state.last_recovery_time and event_time <= state.last_recovery_time)
+            if stale:
+                log.debug("%s: ignoring delayed %s event from before recovery", name, action)
+                return
+
         if action == "die":
             self._discovered_checks.pop(name, None)  # clear cache — container may restart
             exit_code_str = attributes.get("exitCode", "0")
@@ -1529,41 +1549,20 @@ class Watchdog:
                 )
                 return
 
-            # Consume the OOM -> die pairing even if this die promotes an
-            # existing OOM alert to restart-loop.
+            # Consume paired OOM/die events, but never count event deliveries
+            # as restarts: Docker RestartCount is authoritative.
             oom_die = name in self._oom_containers
             if oom_die:
                 self._oom_containers.discard(name)
             automatic = has_automatic_restart_policy(container)
-            now = time.time()
-            with state.lock:
-                if automatic and exit_code != 0:
-                    state.restart_times = [
-                        t for t in state.restart_times if now - t < self._restart_window_secs
-                    ]
-                    # A die event reliably records a failed *run*, even when
-                    # several Docker restarts happen between 60-second polls.
-                    # Clean exit 0 is not counted here: Docker stop/start during
-                    # maintenance is not evidence of an automatic restart.
-                    # The poller still catches clean-exit loops via RestartCount.
-                    state.restart_times.append(now)
-                    state.pending_event_times.append(now)
-                    state.last_failure_time = now
-                elif exit_code != 0:
-                    state.last_failure_time = now
-                restarts = len(state.restart_times) + len(state.poll_restart_times)
-                previous = state.alerted_for
-
-            if automatic and restarts >= self._restart_threshold:
-                if self._claim_alert(state, "restart-loop"):
-                    payload = build_payload(
-                        container, "restart-loop", self.host, self.runbook_base,
-                        probe_detail=(
-                            f"Restart-loop event detected - at least {restarts} restarts "
-                            f"in {int(self._restart_window_secs // 60)}min window"
-                        ))
-                    self._dispatch(payload)
-                return
+            if exit_code != 0:
+                with state.lock:
+                    failure_at = event_time if event_time is not None else time.time()
+                    state.last_failure_time = max(state.last_failure_time, failure_at)
+                    previous = state.alerted_for
+            else:
+                with state.lock:
+                    previous = state.alerted_for
 
             if previous == "restart-loop":
                 log.info("%s: die event during active restart-loop — suppressing crashed alert", name)
@@ -1598,7 +1597,8 @@ class Watchdog:
             failure_type = "oom"
             with state.lock:
                 if has_automatic_restart_policy(container):
-                    state.last_failure_time = time.time()
+                    failure_at = event_time if event_time is not None else time.time()
+                    state.last_failure_time = max(state.last_failure_time, failure_at)
                 active_loop = state.alerted_for == "restart-loop"
             self._oom_containers.add(name)  # mark so the imminent die event is suppressed
             if active_loop:
@@ -1682,32 +1682,24 @@ class Watchdog:
                 restart_count = 0
 
             with state.lock:
-                state.restart_times = [t for t in state.restart_times
-                                       if now - t < restart_window]
-                state.poll_restart_times = [t for t in state.poll_restart_times
-                                            if now - t < restart_window]
-                state.pending_event_times = [t for t in state.pending_event_times
-                                             if now - t < restart_window]
+                state.restart_times = [
+                    t for t in state.restart_times if now - t < restart_window
+                ]
                 if state.last_restart_count < 0 or restart_count < state.last_restart_count:
-                    # Initial baseline and Docker counter resets: existing
-                    # RestartCount may include events seen before our first poll.
-                    # Consume only events already reflected in that count.
-                    matched = min(restart_count, len(state.pending_event_times))
-                    del state.pending_event_times[:matched]
-                    state.last_restart_count = restart_count
+                    # First observation or counter reset: do not count history.
+                    state.restart_times.clear()
                 elif restart_count > state.last_restart_count:
-                    # Reconcile *this interval's* counter delta with event
-                    # observations not yet reflected by Docker's counter.
-                    # A die can arrive before Docker increments RestartCount,
-                    # so carry unmatched events forward until a later poll.
-                    new_restarts = restart_count - state.last_restart_count
-                    matched = min(new_restarts, len(state.pending_event_times))
-                    del state.pending_event_times[:matched]
-                    missing = new_restarts - matched
-                    state.poll_restart_times.extend([now] * min(missing, restart_threshold))
-                    state.last_restart_count = restart_count
-                # Only inferred MISSING restarts are additive to die events.
-                restarts = len(state.restart_times) + len(state.poll_restart_times)
+                    if state.last_restart_poll_at and now - state.last_restart_poll_at < restart_window:
+                        delta = restart_count - state.last_restart_count
+                        state.restart_times.extend([now] * min(delta, restart_threshold))
+                    else:
+                        # A long pause makes the age of increments unknowable.
+                        # Baseline rather than risking a false 10-minute loop.
+                        log.info("%s: skipping %d restarts after polling gap",
+                                 name, restart_count - state.last_restart_count)
+                state.last_restart_count = restart_count
+                state.last_restart_poll_at = now
+                restarts = len(state.restart_times)
 
             if restarts >= restart_threshold:
                 failure_type = "restart-loop"
