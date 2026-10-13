@@ -164,7 +164,7 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
                 HAObservation(B, B), HAObservation(B, B),
             ]):
                 for _ in range(4):
-                    w._poll_ha()
+                    w._poll_ha(w._session)
             w._dispatch.assert_called_once()
             alert = w._dispatch.call_args.args[0]
             self.assertEqual(alert.failure_type, "ha-failover")
@@ -180,7 +180,7 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
             restarted = self.create_shell(path)
             with patch("watchdog.read_ha_observation",
                        return_value=HAObservation(B, B)):
-                restarted._poll_ha()
+                restarted._poll_ha(restarted._session)
             restarted._dispatch.assert_not_called()
 
     def test_failed_exporter_does_not_overwrite_state_or_alert(self):
@@ -193,7 +193,7 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
                        side_effect=[HAObservation(B, B), TimeoutError("offline"),
                                     HAObservation(B, B), HAObservation(B, B)]):
                 for _ in range(4):
-                    w._poll_ha()
+                    w._poll_ha(w._session)
             self.assertEqual(w.state.get_ha_node(), B)
             w._dispatch.assert_called_once()
 
@@ -203,26 +203,92 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
             w._ha_tracker = HARoleTracker(A)
             w._grace_until = float("inf")
             with patch("watchdog.read_ha_observation") as read:
-                w._poll_ha()
+                w._poll_ha(w._session)
                 read.assert_not_called()
             w._grace_until = 0
             with patch("watchdog.read_ha_observation",
                        side_effect=[HAObservation(B, B), HAObservation(B, B)]):
-                w._poll_ha()
-                w._poll_ha()
+                w._poll_ha(w._session)
+                w._poll_ha(w._session)
             w._dispatch.assert_called_once()
 
-    def test_docker_poll_failure_does_not_suppress_ha_poll(self):
+    def test_slow_broken_docker_poll_cannot_block_ha(self):
         w = object.__new__(watchdog.Watchdog)
         w.cfg = {"check_interval_seconds": 60}
+        w.host = "CC-HA-test"
+        w.state = Mock()
+        w._boot_time = 123
         w._ha_enabled = True
-        w._stop_event = Mock()
-        w._stop_event.is_set.side_effect = [False, True]
-        w._poll_all_containers = Mock(side_effect=RuntimeError("docker outage"))
-        w._poll_ha = Mock()
+        w._stop_event = threading.Event()
+        w._session = Mock()  # Existing Docker probe HTTP session.
+        w._event_listener = Mock()
+        docker_entered = threading.Event()
+        release_docker = threading.Event()
+        docker_timed_out = threading.Event()
+        ha_ran = threading.Event()
+        ha_sessions = []
+
+        def broken_docker():
+            docker_entered.set()
+            if not release_docker.wait(timeout=3):
+                docker_timed_out.set()
+            raise RuntimeError("Docker API became unavailable")
+
+        def ha_tick(session):
+            # This runs while the main thread is still inside Docker polling.
+            if docker_entered.wait(timeout=2):
+                ha_sessions.append(session)
+                ha_ran.set()
+                release_docker.set()
+                w._stop_event.set()
+
+        w._poll_all_containers = broken_docker
+        w._poll_ha = ha_tick
         with patch("watchdog.log.error"):
-            w._poll_loop()
-        w._poll_ha.assert_called_once()
+            w.start()
+        self.assertTrue(docker_entered.is_set())
+        self.assertTrue(ha_ran.is_set(), "HA must run before Docker returns")
+        self.assertFalse(docker_timed_out.is_set(), "HA must release blocked Docker")
+        self.assertEqual(len(ha_sessions), 1)
+        self.assertIsNot(ha_sessions[0], w._session)
+        self.assertTrue(w._stop_event.is_set())
+
+    def test_disable_then_reenable_uses_fresh_quiet_baseline(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = f"{td}/state.json"
+            state = watchdog.WatchdogState(path)
+            state.set_ha_node(A)
+            state.save(123)
+
+            settings = {"state_file": path, "boot_grace_seconds": 0}
+            with patch("watchdog.docker.from_env", return_value=Mock()), \
+                 patch("watchdog._host_boot_time", return_value=123):
+                # A real disabled watchdog startup erases its previous HA state.
+                disabled = watchdog.Watchdog({
+                    **settings, "ha_monitor": {"enabled": False}
+                })
+                self.assertEqual(disabled.state.get_ha_node(), "")
+                self.assertNotIn("ha_monitor", json.loads(Path(path).read_text()))
+
+                # While disabled, the role changes from A to B.
+                enabled_cfg = {**settings, "ha_monitor": {"enabled": True}}
+                enabled = watchdog.Watchdog(enabled_cfg)
+                enabled._dispatch = Mock()
+                self.assertEqual(enabled._ha_tracker.confirmed, "")
+                with patch("watchdog.read_ha_observation",
+                           return_value=HAObservation(B, B)):
+                    enabled._poll_ha(Mock())
+                enabled._dispatch.assert_not_called()
+                self.assertEqual(enabled.state.get_ha_node(), B)
+
+                # Ordinary enabled restarts preserve B and remain silent.
+                restarted = watchdog.Watchdog(enabled_cfg)
+                self.assertEqual(restarted._ha_tracker.confirmed, B)
+                restarted._dispatch = Mock()
+                with patch("watchdog.read_ha_observation",
+                           return_value=HAObservation(B, B)):
+                    restarted._poll_ha(Mock())
+                restarted._dispatch.assert_not_called()
 
     def test_disabled_by_default(self):
         self.assertFalse(watchdog.DEFAULT_CONFIG["ha_monitor"]["enabled"])

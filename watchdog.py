@@ -191,6 +191,10 @@ class WatchdogState:
         with self._lock:
             self._ha_state = {"active_node": node}
 
+    def clear_ha_node(self) -> None:
+        with self._lock:
+            self._ha_state.clear()
+
     def cleanup_stale(self, active_names: set, retain_open: bool = False) -> None:
         with self._lock:
             stale = [
@@ -973,7 +977,7 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
                 (f"{_ENTERPRISE_ARC}.1.2.0", OctetString(summary.encode("utf-8", errors="replace"))),
                 # cwContainerName (.1.3.0) — STRING — container name
                 (f"{_ENTERPRISE_ARC}.1.3.0", OctetString(payload.container_name.encode("utf-8", errors="replace"))),
-                # cwFailureType (.1.4.0) — STRING — crashed | oom | unhealthy | restart-loop
+                # cwFailureType (.1.4.0) — STRING — container failure or ha-failover
                 (f"{_ENTERPRISE_ARC}.1.4.0", OctetString(payload.failure_type.encode("utf-8", errors="replace"))),
                 # cwProbeDetail (.1.5.0) — STRING — what probe failed and why
                 (f"{_ENTERPRISE_ARC}.1.5.0", OctetString((payload.probe_detail or "").encode("utf-8", errors="replace"))),
@@ -1301,6 +1305,11 @@ class Watchdog:
         _ha = cfg.get("ha_monitor")
         self._ha_cfg = _ha if isinstance(_ha, dict) else {}
         self._ha_enabled = self._ha_cfg.get("enabled") is True
+        if not self._ha_enabled and self.state.get_ha_node():
+            # An explicit disabled run breaks the observation history. On the
+            # next enable, establish a fresh quiet baseline, not a stale alert.
+            self.state.clear_ha_node()
+            self.state.save(self._boot_time)
         self._ha_tracker = HARoleTracker(self.state.get_ha_node())
         self._ha_error_log_at = float("-inf")
 
@@ -1549,13 +1558,13 @@ class Watchdog:
                 state.unhealthy_cycles = 0
             self._maybe_alert_recovery(container, state)
 
-    def _poll_ha(self) -> None:
-        """Check HA independently of Docker health probes; do not alter Pacemaker."""
+    def _poll_ha(self, session: requests.Session) -> None:
+        """Read HA state without Docker API calls; do not alter Pacemaker."""
         if self._grace_until and time.time() < self._grace_until:
             return  # Never fold HA events into the host reboot-summary.
         url = self._ha_cfg.get("exporter_url", "http://127.0.0.1:9664/metrics")
         try:
-            observation = read_ha_observation(self._session, url)
+            observation = read_ha_observation(session, url)
         except Exception as exc:
             self._ha_tracker.reset_candidate()
             if time.monotonic() - self._ha_error_log_at >= 300:
@@ -1592,6 +1601,18 @@ class Watchdog:
         )
         self._dispatch(payload)
 
+    def _ha_poll_loop(self) -> None:
+        """Separate HA scheduling and HTTP session so Docker probes cannot delay it."""
+        interval = self.cfg.get("check_interval_seconds", 60)
+        log.info("HA poll loop started — interval: %ds", interval)
+        with requests.Session() as session:
+            while not self._stop_event.is_set():
+                try:
+                    self._poll_ha(session)
+                except Exception as exc:
+                    log.error("HA poll error: %s", exc)
+                self._stop_event.wait(interval)
+
     # ── Poll loop ─────────────────────────────────────────────────────────────
     def _poll_loop(self) -> None:
         interval = self.cfg.get("check_interval_seconds", 60)
@@ -1601,11 +1622,6 @@ class Watchdog:
                 self._poll_all_containers()
             except Exception as exc:
                 log.error("Poll error: %s", exc)
-            if self._ha_enabled:
-                try:
-                    self._poll_ha()
-                except Exception as exc:
-                    log.error("HA poll error: %s", exc)
             self._stop_event.wait(interval)
 
     def _poll_all_containers(self) -> None:
@@ -2061,13 +2077,21 @@ class Watchdog:
             target=self._event_listener, name="event-listener", daemon=True
         )
         event_thread.start()
-        # Poll runs in the main thread
+        ha_thread = None
+        if self._ha_enabled:
+            ha_thread = threading.Thread(
+                target=self._ha_poll_loop, name="ha-poller", daemon=True
+            )
+            ha_thread.start()
+        # Docker polling remains in the main thread, independent of HA.
         try:
             self._poll_loop()
         except KeyboardInterrupt:
             pass
         finally:
             self.stop()
+            if ha_thread:
+                ha_thread.join(timeout=5)
 
     def stop(self) -> None:
         log.info("Watchdog shutting down")

@@ -1,41 +1,39 @@
 # Optional HA active-node alert — validation status
 
 **Branch:** feature/optional-ha-failover-alert
-**Status:** Implementation complete for review; controlled two-node failover and release DoD **pending**
-**Date:** 2026-10-09
+**Status:** Draft PR #4; tested in the two-node lab, not approved for merge
+**Updated:** 2026-10-13
 
-## Automated verification
+## Automated tests and build
 
-- **25 unit/regression tests pass** on the development workstation, covering HA metric parsing, state validation, transition confirmation, failback, newly-active-node-only sending, persistence/duplicate suppression, bad/unavailable metrics, disabled-by-default behavior, existing Docker monitoring independence, Slack/SMTP/syslog/SNMP dispatch semantics and previous watchdog regressions.
-- **24 tests passed** in an isolated Docker container on the HA test appliance using the existing watchdog:1.5.4 runtime image with the new source mounted read-only (prior to adding the extra SMTP test).
-- Python syntax and existing shell-script syntax checks pass.
-- **GitHub Actions CI passed** on draft PR #4, including a clean image build, shell/Python syntax, regression tests and Compose checks. The earlier local build encountered an external Docker Hub HTTP 504; CI subsequently built the image successfully. The Dockerfile includes both watchdog.py and ha_monitor.py.
+- **26 tests pass** after the PR review fixes. Added regression coverage for an HA thread running while the Docker poll is blocked and raises, and disable -> role change -> re-enable with a quiet baseline.
+- The new HA thread owns its HTTP session, uses the existing stop event and global polling interval, and does not change Docker health checks or require new dependencies.
+- Earlier PR #4 CI passed, including the clean Docker build. **CI must pass again on the updated commit** before merging.
+- The existing state.json v1 format and Docker container alert state are retained.
 
-## Actual appliance checks — read-only
+## Real two-node environment — user-initiated test (2026-10-10 UTC)
 
-Active side (lab host 10.199.0.241):
+- **Both nodes have HA exporters and watchdog builds running** during the user test, not just the original active node. These installations were done by the user, not by this code review.
+- At about 02:53:46 UTC the user initiated a manual switchover on .242, which moved the promoted HA Operator resource to .241.
+- .242 logged at **02:55:17**: "HA role changed 10.199.0.242 -> 10.199.0.241; new owner will notify."
+- .241 logged at **02:55:37**: one WARNING, "CyberController HA active node changed: 10.199.0.242 -> 10.199.0.241".
+- Both nodes stayed online and .241's promoted HA resources became active. The actual switch was detected correctly, without duplicate HA events observed.
+- **Actual notification delivery still needs verification.** .241 had syslog configured to 127.0.0.1:514; receiving NMS confirmation was not established. .242 used SMTP, but smtp.radware.com did not resolve, so its container failure messages were not emailed.
+- During the planned demotion, the HA Operator explicitly removed vDirect, TED and Assist Service on .242. The watchdog generated separate CRITICAL crash alerts for vDirect and Assist Service. Narrowly scoped suppression is **out of scope** for PR #4 and should have a separate code review.
+- A **reverse failback (.241 -> .242)**, end-to-end receiver confirmation, and a safe surviving-node test after failure of the original active node have not been confirmed.
 
-- Pacemaker sees two online nodes, 11 HA resource instances; HAOperatorRep-Res promoted on .241.
-- Direct HA exporter port 9664 returns HTTP 200. The new parser identifies active=.241, local=.241; one read took approximately **78 ms** in the isolated test container.
-- Calling Watchdog._poll_ha() against the **real** exporter twice establishes and saves state format v1 containing ha_monitor.active_node=10.199.0.241, without sending an initial alert.
-- No Docker socket, Pacemaker control, configuration change, notification receiver, or running-watchdog deployment was used in the isolated tests.
+## Release gates still open
 
-Standby side (10.199.0.242):
+1. CI passes for the current head, with new concurrency/re-enable tests.
+2. Test a controlled **failback** from .241 to .242, verifying a single reverse alert.
+3. Verify the configured receiving systems, not just local watchdog logs; resolve .242 SMTP DNS or configure a working syslog route.
+4. Validate a supported active-node-loss scenario without deliberately partitioning a cluster where STONITH is disabled.
+5. Confirm targeted CC-version compatibility and ordinary watchdog restart/disabled option behavior.
 
-- Node is online and its local HA exporter returns HTTP 200 from localhost:9664.
-- No Container Watchdog deployment or watchdog:1.5.4 image was found there during read-only inspection.
-- Native Prometheus HA scrape target 9002 vs HA exporter 9664 mismatch remains a separate appliance defect; this feature bypasses Prometheus and uses the existing local exporter directly.
+## Accepted v1 limitations
 
-## Outstanding acceptance gates (not claimed complete)
+- One-shot best-effort dispatch: transition state is persisted **before** notification. Failed SMTP/Slack/SNMP/syslog delivery does not automatically retry. A failed state write may cause a duplicate after restart. Do not add a durable delivery queue to this PR without changing the dispatch API.
+- HA SNMP events use the existing Container Watchdog MIB: cwContainerName=(HA cluster), cwFailureType=ha-failover. NMS integrations should classify by failure type. A separate MIB identity is not included in v1.
+- Planned HA service removals currently produce container failure alerts. Suppression is a separate, narrowly scoped enhancement.
 
-1. Deploy the approved watchdog build and enable ha_monitor **on both HA nodes**, with persistent local state and outbound alert destinations.
-2. Verify both nodes learn the same initial active owner *before* the failover.
-3. In an approved maintenance window, perform a **supported controlled switchover** and then failback; verify one notification comes only from the newly active node each time, with correct timestamps and old/new node details.
-4. Confirm that losing the original active node does not prevent the surviving node from sending the notification; avoid artificial network partitions while STONITH fencing is disabled.
-5. Verify at least syslog delivery end-to-end, performance and disabled-option behavior on both real HA nodes (CI already passes).
-
-**Why no forced failover yet:** Testing a cluster-wide role change before the surviving node has a watchdog would not validate the requested operator notification. Because STONITH is disabled, a null-route or network partition is additionally unsafe (split-brain risk). No cluster state or firewall settings were changed.
-
-## Rollback
-
-Because no live agent was replaced or configured, there is currently nothing to roll back on the HA appliance. When deploying for controlled QA, keep the previous watchdog image/configuration; disable ha_monitor (or roll back to v1.5.4) to revert the feature without touching the HA cluster.
+**No HA host, Docker service, Pacemaker, firewall, or monitoring configuration changes were made during this code-review update.**

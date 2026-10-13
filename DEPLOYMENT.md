@@ -429,7 +429,14 @@ disabled by default. On **each HA host**:
    Confirm exactly one notification from the newly active node for each
    transition; check docker logs docker-container-watchdog on both hosts.
 6. Disable by setting ha_monitor.enabled: false and restarting the watchdog.
+   This clears its saved HA baseline; re-enabling starts with a fresh, quiet
+   baseline (no notification for transitions that occurred while disabled).
+   An ordinary restart while HA remains enabled keeps the confirmed baseline.
    No HA service or Pacemaker configuration changes are necessary.
+
+Delivery is best-effort. Test the actual alert receiver on **both** nodes:
+an HA alert in watchdog logs does not prove a syslog or SMTP destination
+received it. This release has no persisted notification retry queue.
 
 Do not attempt a network-partition simulation on a cluster with STONITH
 disabled: split-brain and database inconsistency are possible. The native
@@ -853,8 +860,14 @@ Configuration for the SNMP Traps channel is in [2.4.4 SNMP Traps](#244-snmp-trap
 | `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
 | `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
 | `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` / `ha-failover` |
 | `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
+
+**HA trap mapping:** this release uses the existing Container Watchdog MIB.
+For HA, cwContainerName is (HA cluster), cwFailureType is ha-failover, and the
+summary/detail fields contain previous and new active nodes. NMS rules should
+match cwFailureType instead of treating all traps as container failures. No
+new trap OID is introduced.
 
 **SNMPv3 notes:**
 

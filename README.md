@@ -88,6 +88,24 @@ on two consecutive successful polls (usually 60 seconds apart). Only the
 newly active node sends one **WARNING: CyberController HA active node changed**,
 using the already configured Syslog, SMTP, Slack, and/or SNMP channels.
 Failback is handled the same way; HA state persists in the normal state.json.
+HA polling runs in its own lightweight thread with a separate HTTP session, so
+slow or unavailable Docker API probes do not block HA detection.
+
+An ordinary watchdog restart with HA enabled retains its baseline. If HA
+monitoring is **disabled and the watchdog restarted**, the old HA baseline is
+cleared; re-enabling and restarting establishes a new baseline silently rather
+than reporting an unobserved, potentially old role change.
+
+**Delivery is best-effort:** after confirming a change, the watchdog saves its
+new baseline before dispatching. If SMTP/Slack/SNMP/syslog delivery fails,
+this event is logged but is **not retried** by the HA monitor. Validate the
+notification path on both HA nodes. A failed state-file save may result in a
+duplicate alert after a restart.
+
+**SNMP compatibility:** HA events use the existing Container Watchdog MIB with
+cwFailureType=`ha-failover`, cwContainerName=`(HA cluster)`, and old/new
+node values in cwSummary/cwProbeDetail. NMS integrations should distinguish
+HA events by cwFailureType, not by the container-name field.
 
 This check is **off by default**. It does not install an HA exporter, open a
 firewall port, execute Pacemaker commands, or modify cluster roles. Both

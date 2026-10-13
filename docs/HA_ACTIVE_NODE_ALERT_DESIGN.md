@@ -1,6 +1,6 @@
 # Optional CyberController HA Active-Node Alert — Design Proposal
 
-**Status:** Implementation approved and completed on feature branch; controlled two-node validation pending
+**Status:** Feature under review; manual switchover verified, failback and alert delivery pending
 **Date:** 2026-10-09
 **Target:** Radware/CyberController-Container-Alert, baseline v1.5.4 (main: a4ddfed)
 **Delivery:** One small implementation PR, with release blocked on two-node QA
@@ -9,7 +9,7 @@
 
 Customer request: alert when CyberController HA changes its active node, including a manual switchover, automatic failover, or failback. The alert should identify the old and new active nodes, not speculate about the cause.
 
-**Decision:** Add one opt-in HA role-change check to the existing Container Watchdog. Read the existing HA exporter directly over host-local HTTP. Reuse the watchdog's polling loop, persistent state, and existing syslog/SMTP/SNMP/Slack delivery. Do not introduce another daemon, Docker container, metric exporter, firewall port, or Pacemaker control capability.
+**Decision:** Add one opt-in HA role-change check to the existing Container Watchdog. Read the existing HA exporter directly over host-local HTTP. Reuse the watchdog's polling interval, persistent state, and existing syslog/SMTP/SNMP/Slack delivery. Do not introduce another daemon, Docker container, metric exporter, firewall port, or Pacemaker control capability.
 
 This is an **observed active-node change** alert, not a claim to identify why a failover happened or that all CyberController applications are healthy.
 
@@ -31,7 +31,7 @@ On the two-node HA environment ha-test-admin-ea-iad1, Pacemaker reports nodes 10
 Per CyberController node:
   Existing ha_cluster_exporter :9664/metrics (localhost only)
          |
-         | bounded HTTP GET in the existing 60s watchdog poll
+         | bounded HTTP GET from independent HA polling thread (60s)
          v
   Optional HA role check:
     identify local node + unique promoted HA Operator
@@ -48,7 +48,7 @@ Both HA nodes must run the watchdog and have their own local exporter.
 No inter-node polling or new firewall opening is required.
 ~~~
 
-The check must execute independently of Docker container probes: a Docker API exception must not suppress the HA check, and a failed HA read must not break Docker monitoring. The small HA check runs within the existing process; no worker framework, queue, or additional process is needed.
+The HA check runs in its own lightweight thread with a dedicated HTTP session. Slow/blocking Docker probes cannot delay HA polling, and failed HA reads cannot break Docker monitoring. This is a single additional thread within the existing process, not a new service, container, queue, or worker framework.
 
 ### Signal selection
 
@@ -93,7 +93,8 @@ Retain a **small optional ha_monitor section in the existing state.json** (backw
 | Candidate active node changes A -> B | Confirm on next good poll (two consecutive observations) |
 | Confirmed A -> B | Update persistent baseline; **only watchdog on B** sends one WARNING |
 | Confirmed B -> A (failback) | Same behavior; notify once from A |
-| Watchdog restarted after notification | Do not repeat previous transition |
+| Watchdog restarted while HA stays enabled | Restore confirmed owner; do not repeat previous transition |
+| HA intentionally disabled and watchdog restarted | Clear saved HA owner; re-enable establishes a silent new baseline |
 | Exporter timeout, 404/500, invalid/incomplete series, lost quorum, zero/multiple promoted owners | Do not change baseline or claim a completed failover; log a rate-limited local warning |
 | Watchdog newly installed after the transition | Baseline silently; historical detection not guaranteed |
 | Host reboot/grace window | Respect existing boot-grace behavior; do not mix HA alerts into the container reboot-summary. Reconfirm role after grace |
@@ -112,14 +113,16 @@ Next step:       Confirm expected switchover and application health.
 
 Treat this as an event, **not a persistent container failure**: do not send a spurious "container recovered" alert. Keep the normal container alert subject/fields unchanged. Make only the minimum HA-specific display adjustment needed so email/Slack/syslog/SNMP do not misleadingly label it as a crashed container. Preserve existing notification formats for container alerts.
 
-**Delivery semantics:** one best-effort notification per confirmed observed transition, with state-based deduplication across restarts. Exactly-once delivery to external syslog/SNMP/SMTP cannot be guaranteed. Detection time is an observation timestamp, not necessarily the exact Pacemaker event time.
+**Delivery semantics (accepted v1 limitation):** one best-effort notification per confirmed observed transition, with state-based deduplication across restarts. The confirmed owner is persisted before dispatch; a delivery failure is logged but is not automatically retried. External syslog/SNMP delivery acknowledgement and exactly-once semantics are not available; adding a persisted retry queue would require changing the existing dispatcher contract and is deferred. A failed state-file save can lead to a duplicate after restart. Verify alert routing on both nodes. Detection time is an observation timestamp, not necessarily the exact Pacemaker event time.
+
+**SNMP compatibility (accepted v1 mapping):** the existing Container Watchdog MIB is reused. For HA notifications, cwContainerName is `(HA cluster)`, cwFailureType is `ha-failover`, and cwSummary/cwProbeDetail contain the old/new active nodes. An NMS should distinguish the HA event by cwFailureType; no new trap identity or OIDs are introduced in this release.
 
 ## 5. Implementation scope — one development PR, after approval
 
 | Existing component | Small change |
 |---|---|
 | **watchdog.py / DEFAULT_CONFIG** | Optional ha_monitor block, disabled by default |
-| **watchdog.py / Watchdog._poll_loop** | Invoke HA poll separately, with its own error handling, on the existing interval |
+| **watchdog.py / Watchdog.start, _ha_poll_loop** | Start independent HA polling thread with its own HTTP session and stop event; Docker polling remains unchanged |
 | **HA reader/transition helper** | Bounded local HTTP read; parse only required metrics; validate; confirm active change; deduplicate |
 | **WatchdogState persistence** | Optional HA baseline and notified transition, without breaking existing v1 state files or container recovery |
 | **AlertPayload/dispatch_alert** | Reuse channels; ensure HA event is clearly labelled and not folded into container reboot/recovery logic |
@@ -161,7 +164,7 @@ The implementation is ready for review/release when all automated tests and CI p
 
 ## 7. Release gates, risks, and intentional exclusions
 
-**Before implementation/release:** confirm the standby .242 has its own exporter on localhost:9664 and watchdog running; verify both nodes can send syslog/other customer notifications. The remote connection refusal on .242 is **not proof** its local service is absent; it may be a firewall rule. No cross-node port exposure is required for the proposed design.
+**Before release:** confirm both HA nodes can send notifications end-to-end. Both watchdogs and local exporters were confirmed running during the manual .242 -> .241 test. The standby's earlier *remote* exporter connection refusal reflected an inaccessible cross-node port, not a missing local service. No inter-node exporter access is required.
 
 **Known limitations:** If the surviving node has no running watchdog/exporter or has never recorded the original active node, this check cannot reconstruct the failover after the fact. Polling can miss a transition that changes twice between samples. Metrics cannot distinguish planned switchover vs unexpected failover, and promotion does not guarantee the entire application is healthy.
 
