@@ -42,7 +42,7 @@ The watchdog runs two parallel monitoring paths:
 
 | Path | Mechanism | What It Catches |
 |------|-----------|-----------------|
-| **Event stream** | `docker events` (real-time) | Crashes (`die`), OOM-kills (`oom`), health status changes |
+| **Event stream** | `docker events` (real-time) | Crashes (`die`), OOM-kills (`oom`), health changes, requested stops (`stop`), kill signals (`kill`) |
 | **Active Probes** | `docker ps` + Probes | **Integrity**: Periodic verification of liveness, stuck states, and restart-loops |
 
 The watchdog selects one of **4 active probe types** per container, chosen automatically based on the container's configuration. Probe selection is cached for the container's lifetime and re-discovered on restart.
@@ -61,7 +61,11 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 - **OOM → die suppression**: when a container is OOM-killed, Docker emits both an `oom` event and an immediately following `die` event. The watchdog fires the `oom` CRITICAL alert and suppresses the subsequent `crashed` alert to avoid a duplicate for the same incident.
 - **Restart-loop → die suppression**: once a `restart-loop` HIGH alert is active for a container, subsequent per-cycle `die` events are suppressed — the restart-loop alert is the primary signal until the container stabilises.
 
-**Recovery alerts**: once a container that was previously alarmed (`crashed`, `oom`, `unhealthy`, or `restart-loop`) is observed running and healthy again, the watchdog dispatches a one-time INFO `recovered` alert through the same channels and clears its alarm state. Controlled by `alert_on_recovery` (default `true`). Detection depends on the same probe path used for the original failure — a container with a Docker `HEALTHCHECK` recovers via the `health_status: healthy` event; containers on active probes (HTTP/TCP/`/proc`) recover on the next successful poll cycle.
+**Planned-stop correlation** (enabled by default): the event listener also captures Docker `stop`, `kill` and `start`. A lightweight worker holds `die` for up to 3 seconds so it can correlate a subsequent or preceding `stop` event for the **same container ID**. A matching `stop` is treated as a Docker-requested stop rather than an application crash, even if exit code is 137 (SIGKILL); that forced shutdown is logged as WARNING. `kill` alone never suppresses CRITICAL: direct `docker kill` does not prove an administrative stop. OOM events still produce the existing OOM CRITICAL instead of duplicate CRASH. If stop evidence is absent or delayed beyond the configured window, the watchdog alerts on the nonzero death (fail-closed). The 3-second grace does not block event ingestion. The INFO notification for requested stops is optional and **off** by default. An observed Docker stop does not establish operator authorization or acceptable service downtime.
+
+**Opt-in critical-service availability**: configure exact container names under `expected_running_containers` (default empty) to receive a CRITICAL `not-running` alert when a specified service is exited, restarting, or missing for `expected_running_grace_seconds` (default 120 seconds). This covers accidental or intentional stops that leave an essential service offline. A pre-existing CRASH/OOM/health alert takes precedence to avoid duplicate outage messages. On watchdog restart, the downtime grace timer starts fresh. The feature monitors Docker state and is not a substitute for application readiness or an audited maintenance workflow.
+
+**Recovery alerts**: once a container that was previously alarmed (`crashed`, `oom`, `unhealthy`, `restart-loop`, or `not-running`) is observed running and healthy again, the watchdog dispatches a one-time INFO `recovered` alert through the same channels and clears its alarm state. Controlled by `alert_on_recovery` (default `true`). Detection depends on the same probe path used for the original failure — a container with a Docker `HEALTHCHECK` recovers via the `health_status: healthy` event; containers on active probes (HTTP/TCP/`/proc`) recover on the next successful poll cycle.
 
 ---
 
@@ -72,6 +76,7 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 ```
 .
 ├── watchdog.py                  # Main monitor script
+├── lifecycle.py                 # Docker stop/die/oom correlation
 ├── watchdog-config.yaml         # All configuration (no secrets)
 ├── docker-compose.yaml          # Production / offline runtime (image only)
 ├── docker-compose.build.yaml    # Developer / online build
@@ -132,6 +137,12 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `restart_window_minutes` | `10` | Rolling window for restart counting |
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy cycles before alerting |
 | `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
+| `lifecycle_detection.enabled` | `true` | Enable Docker stop/kill/start event correlation |
+| `lifecycle_detection.correlation_window_seconds` | `3` | Hold die decisions up to 3 seconds to match a Docker stop (0.5-30 seconds supported) |
+| `lifecycle_detection.notify_on_docker_stop` | `false` | Send INFO on Docker-requested stops, including forced stops (otherwise log locally) |
+| `lifecycle_detection.log_forced_stop_warning` | `true` | Log WARNING when a requested stop ends in exit 137/SIGKILL |
+| `expected_running_containers` | `[]` | Exact container names to monitor for prolonged stopped/missing state |
+| `expected_running_grace_seconds` | `120` | Seconds to wait before alerting on a configured expected-running container |
 | `excluded_containers` | `[]` | Container names to never alert on |
 | `ignored_container_events` | MariaDB syntax-check label rule | Label-based event suppressions for intentional temporary containers |
 | `auto_health_check` | enabled | Probe containers reporting `health=none` by discovering an HTTP/TCP endpoint |
@@ -231,7 +242,7 @@ Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3
 | `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
 | `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
 | `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `not-running` / `docker-stop` / `recovered` |
 | `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
 
 ---
@@ -252,11 +263,13 @@ bash install.sh
 
 | Failure | Severity | Trigger |
 |---------|----------|---------|
-| `crashed` | CRITICAL | Container exited with non-zero exit code |
+| `crashed` | CRITICAL | Nonzero death without a matching Docker stop or OOM event |
 | `oom` | CRITICAL | Container was OOM-killed by the kernel |
 | `unhealthy` | HIGH | Health probe failing for N consecutive cycles |
 | `restart-loop` | HIGH | Container restarted ≥ threshold times within window |
-| `recovered` | INFO | Previously-alarmed container (`crashed`/`oom`/`unhealthy`/`restart-loop`) is healthy/running again. Fires once per incident; controlled by `alert_on_recovery` (default `true`) |
+| `docker-stop` | INFO (opt-in) | Matching Docker stop event detected; does not create an open alert |
+| `not-running` | CRITICAL (opt-in) | Explicitly expected-running container remains exited, restarting, or missing beyond grace period |
+| `recovered` | INFO | Previously-alarmed container (`crashed`/`oom`/`unhealthy`/`restart-loop`/`not-running`) is healthy/running again. Fires once per incident; controlled by `alert_on_recovery` (default `true`) |
 | `reboot-summary` | INFO / HIGH | Sent once after a host reboot is detected, when the `boot_grace_seconds` window closes. Reports boot time, how many containers are running, which recovered, and which are still failing. Always sent after a reboot — an INFO summary confirms the node came back cleanly. HIGH if any container is still failing |
 
 OOM alerts include **memory stats** (usage / limit / peak) prepended to the log snippet.
@@ -270,6 +283,8 @@ Every alert includes two probe fields that identify exactly how and why the fail
 |---------|------------|-------------------------|
 | `crashed` | `Docker event (crash)` | `Crash probe failed — container exited with exit code 1` |
 | `oom` | `Docker event (OOM)` | `OOM probe failed — container was OOM-killed by the kernel` |
+| `docker-stop` | `Docker event (stop)` | `Docker stop event confirmed; exit code 137; observed kill signals: 15, 9` |
+| `not-running` | `Docker state (poll)` | `Expected-running container is exited; not running for at least 120s` |
 | `unhealthy` (Docker native HEALTHCHECK) | `Docker HEALTHCHECK` | `Docker health probe failed — exit code 1, output: connection refused` |
 | `unhealthy` (HTTP auto-probe) | `HTTP GET` | `HTTP probe failed — error response 503 Service Unavailable, URI http://172.18.0.5:8080/health` |
 | `unhealthy` (TCP connect) | `TCP connect` | `TCP probe failed — connection refused or timed out on 172.18.0.5:6379 (Connection refused)` |

@@ -23,6 +23,22 @@ restart_window_minutes:     10    # rolling window for restart counting
 unhealthy_cycles_threshold:  3    # consecutive unhealthy cycles before alerting
 alert_on_recovery:        true    # send an INFO "recovered" alert when a container returns to normal
 
+# Docker stop events may arrive before OR after "die". Briefly hold a crash
+# decision so intentional docker stop/restart does not appear as an app crash.
+# docker kill alone is NOT considered a planned stop.
+lifecycle_detection:
+  enabled: true
+  correlation_window_seconds: 3    # live-event correlation, valid range 0.5-30s
+  notify_on_docker_stop: false     # if true, send INFO notification for stopped containers
+  log_forced_stop_warning: true    # local WARNING if requested stop finished with SIGKILL (137)
+
+# Optional safety net: containers that should always run. A requested docker
+# stop suppresses a crash alert, but sustained downtime remains CRITICAL here.
+# These names must be explicitly listed; empty list disables the check.
+expected_running_containers: []
+  # - config_kvision-vdirect_1
+expected_running_grace_seconds: 120
+
 # Containers to never alert on (debug, test, or one-shot containers)
 excluded_containers: []
   # - my-temp-container

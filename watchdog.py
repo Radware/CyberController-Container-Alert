@@ -26,6 +26,8 @@ import requests
 import socket
 import yaml
 
+from lifecycle import DockerLifecycleCorrelator
+
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 SYSLOG_FORMAT = "watchdog[%(process)d]: %(levelname)s %(name)s: %(message)s"
@@ -88,6 +90,14 @@ DEFAULT_CONFIG = {
     "restart_window_minutes": 10,
     "unhealthy_cycles_threshold": 3,
     "alert_on_recovery": True,
+    "lifecycle_detection": {
+        "enabled": True,
+        "correlation_window_seconds": 3,
+        "notify_on_docker_stop": False,
+        "log_forced_stop_warning": True,
+    },
+    "expected_running_containers": [],
+    "expected_running_grace_seconds": 120,
     "excluded_containers": [],
     "ignored_container_events": [
         {
@@ -271,6 +281,10 @@ def _probe_type_label(detail: str) -> str:
         return "Docker event (crash)"
     if detail.startswith("OOM probe failed"):
         return "Docker event (OOM)"
+    if detail.startswith("Docker stop event confirmed"):
+        return "Docker event (stop)"
+    if detail.startswith("Expected-running container"):
+        return "Docker state (poll)"
     if detail.startswith("Restart-loop probe failed"):
         return "Restart-loop tracking"
     return ""
@@ -283,6 +297,8 @@ def _default_probe_type(failure_type: str) -> str:
         "oom":          "Docker event (OOM)",
         "unhealthy":    "Docker HEALTHCHECK",
         "restart-loop": "Restart-loop tracking",
+        "docker-stop":  "Docker event (stop)",
+        "not-running":  "Docker state (poll)",
     }.get(failure_type, "")
 
 
@@ -966,7 +982,8 @@ ACTIONS = {
     "crashed": (
         "CRITICAL",
         "Check exit code and logs. Run: docker logs <name> --tail 50. "
-        "If exit code 137, likely OOM — increase memory limit.",
+        "Exit 137 means SIGKILL, not necessarily OOM. Check OOMKilled and "
+        "Docker kill/stop/oom events before adjusting memory limits.",
     ),
     "oom": (
         "CRITICAL",
@@ -982,6 +999,15 @@ ACTIONS = {
         "HIGH",
         "Container is in a restart loop. Check logs for crash reason. "
         "Consider increasing RestartSec or investigating root cause.",
+    ),
+    "docker-stop": (
+        "INFO",
+        "Docker requested a stop. Check whether the service was expected to stop.",
+    ),
+    "not-running": (
+        "CRITICAL",
+        "A designated always-running container is stopped or missing. Confirm "
+        "maintenance, inspect container events, and restore the service.",
     ),
     "recovered": (
         "INFO",
@@ -1232,6 +1258,27 @@ class Watchdog:
         self._ignored_events: list[dict] = cfg.get("ignored_container_events") or []
         self._discovered_checks: dict[str, dict | None] = {}  # auto-discovery cache
         self._oom_containers: set[str] = set()  # suppress die alert when oom already fired
+        _lcfg = cfg.get("lifecycle_detection") or {}
+        self._lifecycle_cfg = _lcfg if isinstance(_lcfg, dict) else {}
+        self._lifecycle_enabled = bool(self._lifecycle_cfg.get("enabled", True))
+        try:
+            _window = float(self._lifecycle_cfg.get("correlation_window_seconds", 3))
+        except (TypeError, ValueError):
+            _window = 3.0
+        if not 0.5 <= _window <= 30.0:
+            log.warning("Invalid lifecycle correlation window %r; using 3 seconds", _window)
+            _window = 3.0
+        self._lifecycle = DockerLifecycleCorrelator(_window)
+        self._lifecycle_wake = threading.Event()
+        _expected = cfg.get("expected_running_containers") or []
+        self._expected_running = (set(str(n) for n in _expected if n)
+                                  if isinstance(_expected, list) else set())
+        self._expected_running.difference_update(self._excluded)
+        try:
+            self._expected_running_grace = max(0, int(cfg.get("expected_running_grace_seconds", 120)))
+        except (TypeError, ValueError):
+            self._expected_running_grace = 120
+        self._expected_down_since: dict[str, float] = {}
         self._auto_cfg: dict = cfg.get("auto_health_check", {})
         _manual = cfg.get("container_health_checks") or {}
         self._manual_checks: dict = _manual if isinstance(_manual, dict) else {}
@@ -1381,10 +1428,72 @@ class Watchdog:
                                  probe_detail=f"Recovered from '{previous}'")
         self._dispatch(payload)
 
+    # ── Docker lifecycle correlation ────────────────────────────────────────
+    def _lifecycle_worker(self) -> None:
+        """Deliver queued deaths after a short window without blocking events."""
+        while not self._stop_event.is_set():
+            self._lifecycle_wake.wait(0.2)
+            self._lifecycle_wake.clear()
+            for death in self._lifecycle.drain_ready():
+                try:
+                    self._resolve_lifecycle_death(death)
+                except Exception:
+                    log.exception("Failed to resolve Docker death event for %s", death.name)
+
+    def _emit_crash(self, container, name: str, exit_code: int | None,
+                    observed_signals: tuple[str, ...] = ()) -> None:
+        state = self.state.get(name)
+        if state.alerted_for == "restart-loop":
+            log.info("%s: die during restart-loop — suppressing redundant crash", name)
+            return
+        if exit_code == 0:
+            log.info("%s exited cleanly (code 0) — no alert", name)
+            return
+        if exit_code == 137:
+            log.warning("%s: exit 137 (SIGKILL) without matching Docker stop/oom; "
+                        "inspect OOMKilled and recent Docker events. signals=%s",
+                        name, observed_signals or "none")
+        if self._claim_alert(state, "crashed"):
+            reason = (f"no matching Docker stop/oom event within {self._lifecycle.window:g}s"
+                      if self._lifecycle_enabled else "lifecycle correlation disabled")
+            detail = (f"Crash probe failed - container exited with code {exit_code}; "
+                      f"{reason}; observed kill signals: "
+                      f"{', '.join(observed_signals) or 'none'}")
+            payload = build_payload(container, "crashed", self.host,
+                                    self.runbook_base, exit_code, probe_detail=detail)
+            self._dispatch(payload)
+
+    def _resolve_lifecycle_death(self, death) -> None:
+        if death.oom:
+            log.info("%s: die correlated with OOM — no duplicate crash", death.name)
+            return
+        signals = ", ".join(death.signals) or "none"
+        if death.stopped:
+            detail = (f"Docker stop event confirmed; exit code {death.exit_code}; "
+                      f"observed kill signals: {signals}. "
+                      "This confirms a Docker-requested stop, not authorization.")
+            if death.exit_code == 137 and self._lifecycle_cfg.get("log_forced_stop_warning", True):
+                log.warning("%s: Docker-requested stop ended with SIGKILL (exit 137); "
+                            "the application may not handle graceful shutdown; signals=%s",
+                            death.name, signals)
+            else:
+                log.info("%s: Docker-requested stop; exit=%s signals=%s",
+                         death.name, death.exit_code, signals)
+            if self._lifecycle_cfg.get("notify_on_docker_stop", False):
+                payload = build_payload(death.container, "docker-stop", self.host,
+                                        self.runbook_base, death.exit_code,
+                                        probe_detail=detail)
+                self._dispatch(payload)
+            return
+        self._emit_crash(death.container, death.name, death.exit_code, death.signals)
+
     # ── Event stream listener ─────────────────────────────────────────────────
     def _event_listener(self) -> None:
         log.info("Docker event listener started")
-        filters = {"type": "container", "event": ["die", "oom", "health_status"]}
+        events = ["die", "oom", "health_status"]
+        if self._lifecycle_enabled:
+            events += ["stop", "kill", "start"]
+        filters = {"type": "container", "event": events}
         try:
             for event in self.client.events(decode=True, filters=filters):
                 if self._stop_event.is_set():
@@ -1397,17 +1506,27 @@ class Watchdog:
                 threading.Thread(target=self._event_listener, daemon=True).start()
 
     def _handle_event(self, event: dict) -> None:
-        action     = event.get("Action", "")
-        attributes = event.get("Actor", {}).get("Attributes", {})
-        name       = attributes.get("name", "unknown")
+        action = event.get("Action", "")
+        actor = event.get("Actor") or {}
+        attributes = actor.get("Attributes") or {}
+        name = attributes.get("name", "unknown")
+        container_id = str(actor.get("ID") or event.get("id") or event.get("ID") or "")
 
         if name in self._excluded:
             return
-
         log.debug("Docker event: %s on %s", action, name)
 
+        # Stop/kill can occur after the container has disappeared from Docker's
+        # API. Record them BEFORE attempting a container lookup.
+        if action in ("stop", "kill", "start"):
+            if self._lifecycle_enabled:
+                self._lifecycle.record(action, container_id,
+                                       signal=attributes.get("signal", ""))
+                self._lifecycle_wake.set()
+            return
+
         try:
-            container = self.client.containers.get(name)
+            container = self.client.containers.get(container_id or name)
         except docker.errors.NotFound:
             log.warning("Container %s not found for event %s", name, action)
             return
@@ -1415,57 +1534,47 @@ class Watchdog:
         if is_ignored_container_event(container, attributes, action, self._ignored_events):
             log.info("%s: ignoring Docker %s event due to configured label rule", name, action)
             return
-
         state = self.state.get(name)
 
         if action == "die":
-            self._discovered_checks.pop(name, None)  # clear cache — container will restart
-            # OOM kills also emit a die event immediately after — skip the crashed alert
-            # to avoid duplicate: the oom alert already covers the incident
+            self._discovered_checks.pop(name, None)
+            # Keep existing deduplication for OOM and established restart loops.
             if name in self._oom_containers:
                 self._oom_containers.discard(name)
-                log.info("%s: die event follows OOM — suppressing duplicate crashed alert", name)
+                log.info("%s: die follows OOM — suppressing duplicate crash", name)
                 return
-            # Containers already flagged as restart-loop: suppress the per-cycle crashed
-            # alert — the restart-loop HIGH is the active signal for this incident.
-            # A first-time crash on a container with a restart policy still fires crashed.
             if state.alerted_for == "restart-loop":
-                log.info("%s: die event during active restart-loop — suppressing redundant crashed alert", name)
+                log.info("%s: die during restart loop — suppressing duplicate crash", name)
                 return
-            exit_code_str = attributes.get("exitCode", "0")
             try:
-                exit_code = int(exit_code_str)
+                exit_code = int(attributes.get("exitCode", "0"))
             except (ValueError, TypeError):
                 exit_code = None
             if is_kvision_mariadb_dump_helper_crash(container, attributes, exit_code):
                 log.info(
-                    "%s: Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert "
-                    "(image=%s, AutoRemove=true, mount=%s, exit_code=137)",
+                    "%s: Suppressing expected Cyber Controller SQL dump syntax-check "
+                    "container termination (image=%s, AutoRemove=true, mount=%s, exit=137)",
                     name, _KVISION_MARIADB_DUMP_HELPER_IMAGE, _KVISION_MARIADB_DUMP_MOUNT,
                 )
                 return
-            # exit 0 = graceful stop, no alert
-            if exit_code == 0:
-                log.info("%s exited cleanly (code 0) — no alert", name)
-                return
-            if exit_code == 137:
-                # Suppression did not match — surface the real signals so the
-                # mismatched one (image / AutoRemove / mount) is visible in logs.
-                log.warning("%s: exit 137 not suppressed — signals: %s",
-                            name, _mariadb_helper_signals(container, attributes))
-            failure_type = "crashed"
-            if self._claim_alert(state, failure_type):
-                payload = build_payload(container, failure_type, self.host,
-                                        self.runbook_base, exit_code,
-                                        probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
-                self._dispatch(payload)
+            if self._lifecycle_enabled and container_id:
+                self._lifecycle.record("die", container_id, name=name,
+                                       container=container, exit_code=exit_code)
+                self._lifecycle_wake.set()
+            else:
+                self._emit_crash(container, name, exit_code)
 
         elif action == "oom":
-            failure_type = "oom"
-            self._oom_containers.add(name)  # mark so the imminent die event is suppressed
-            if self._claim_alert(state, failure_type):
-                payload = build_payload(container, failure_type, self.host,
-                                        self.runbook_base,
+            # OOM takes precedence over a pending crash even if events are reordered.
+            matched_pending = False
+            if self._lifecycle_enabled:
+                matched_pending = self._lifecycle.record("oom", container_id)
+                self._lifecycle_wake.set()
+            # A late OOM attached to a queued die must not suppress the NEXT die.
+            if not matched_pending:
+                self._oom_containers.add(name)
+            if self._claim_alert(state, "oom"):
+                payload = build_payload(container, "oom", self.host, self.runbook_base,
                                         extra_context=get_memory_stats(container),
                                         probe_detail="OOM probe failed - container was OOM-killed by the kernel")
                 self._dispatch(payload)
@@ -1492,6 +1601,34 @@ class Watchdog:
                 state.unhealthy_cycles = 0
             self._maybe_alert_recovery(container, state)
 
+    def _check_expected_running(self, observed: dict[str, str], now: float) -> None:
+        """Opt-in check: planned maintenance must not hide prolonged downtime."""
+        for name in sorted(self._expected_running):
+            status = observed.get(name, "missing")
+            if status in ("running", "unknown"):
+                self._expected_down_since.pop(name, None)
+                continue
+            down_since = self._expected_down_since.setdefault(name, now)
+            if now - down_since < self._expected_running_grace:
+                continue
+            state = self.state.get(name)
+            with state.lock:
+                open_reason = state.alerted_for
+            if open_reason and open_reason not in ("recovered", "not-running"):
+                # A crash/OOM/health alert already describes this outage.
+                continue
+            if self._claim_alert(state, "not-running"):
+                payload = AlertPayload(
+                    severity="CRITICAL", container_name=name, container_id="",
+                    host=self.host, failure_type="not-running",
+                    exit_code=None, log_tail="",
+                    recommended_action=ACTIONS["not-running"][1],
+                    runbook_url=self.runbook_base,
+                    probe_detail=(f"Expected-running container is {status}; "
+                                  f"not running for at least {self._expected_running_grace}s."),
+                )
+                self._dispatch(payload)
+
     # ── Poll loop ─────────────────────────────────────────────────────────────
     def _poll_loop(self) -> None:
         interval = self.cfg.get("check_interval_seconds", 60)
@@ -1510,6 +1647,7 @@ class Watchdog:
         unhealthy_threshold = self._unhealthy_threshold
         now                 = time.time()
         seen_names: set[str] = set()
+        observed_statuses: dict[str, str] = {}
 
         for container in self.client.containers.list(all=True):
             name = container.name
@@ -1520,8 +1658,10 @@ class Watchdog:
             try:
                 container.reload()
             except Exception:
+                observed_statuses[name] = "unknown"
                 continue
 
+            observed_statuses[name] = container.status
             status = container.status               # running, exited, restarting, etc.
             health = self._get_health(container)    # healthy, unhealthy, none
             state  = self.state.get(name)
@@ -1622,6 +1762,8 @@ class Watchdog:
 
         # During the post-reboot window a restored container may not exist yet —
         # keep its open alert so the recovery still fires once it comes back.
+        self._check_expected_running(observed_statuses, time.monotonic())
+        seen_names.update(self._expected_running)
         self.state.cleanup_stale(seen_names, retain_open=bool(self._grace_until))
         # Clean up discovery cache for containers no longer running
         for _name in self._discovered_checks.keys() - seen_names:
@@ -1956,6 +2098,9 @@ class Watchdog:
             target=self._event_listener, name="event-listener", daemon=True
         )
         event_thread.start()
+        if self._lifecycle_enabled:
+            threading.Thread(target=self._lifecycle_worker, name="lifecycle-worker",
+                             daemon=True).start()
         # Poll runs in the main thread
         try:
             self._poll_loop()
@@ -1967,6 +2112,7 @@ class Watchdog:
     def stop(self) -> None:
         log.info("Watchdog shutting down")
         self._stop_event.set()
+        self._lifecycle_wake.set()
         self.state.save(self._boot_time)
 
 
