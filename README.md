@@ -59,9 +59,13 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 
 Two additional deduplication rules suppress redundant alerts at the event level:
 - **OOM → die suppression**: when a container is OOM-killed, Docker emits both an `oom` event and an immediately following `die` event. The watchdog fires the `oom` CRITICAL alert and suppresses the subsequent `crashed` alert to avoid a duplicate for the same incident.
-- **Restart-loop → die suppression**: once a `restart-loop` HIGH alert is active for a container, subsequent per-cycle `die` events are suppressed — the restart-loop alert is the primary signal until the container stabilises.
+- **Restart-loop incident coalescing**: Docker `die`/OOM events initiate the first failure alert (nonzero `die` events may be held for the short stop-correlation window). Only periodic Docker `RestartCount` increments determine the number of automatic restarts and whether the `restart_threshold` has been reached within `restart_window_minutes`; event deliveries are **never** added to the restart total. One HIGH `restart-loop` alert then suppresses per-cycle crashes, OOMs and failed Docker, manual or auto-discovered probes until sustained recovery, regardless of cooldown. Docker IDs identify distinct container instances even when names are reused.
 
-**Recovery alerts**: once a container that was previously alarmed (`crashed`, `oom`, `unhealthy`, or `restart-loop`) is observed running and healthy again, the watchdog dispatches a one-time INFO `recovered` alert through the same channels and clears its alarm state. Controlled by `alert_on_recovery` (default `true`). Detection depends on the same probe path used for the original failure — a container with a Docker `HEALTHCHECK` recovers via the `health_status: healthy` event; containers on active probes (HTTP/TCP/`/proc`) recover on the next successful poll cycle.
+**Docker-requested stops and exit 137:** An exit status of 137 means SIGKILL; it does **not** prove an OOM. Docker may deliver a stop event shortly after die, so nonzero exits are briefly held for lifecycle_detection.correlation_window_seconds (default 3 seconds). A matching stop from the same container ID suppresses that instance's misleading CRASH and is logged instead; a direct docker kill, an unconfirmed stop, or a genuine OOM still produces the normal CRITICAL incident. A start event prevents the following run's stop from masking an earlier crash. This correlation only provides evidence of a **Docker-requested stop**, not evidence that stopping the service was authorized. The existing restart-loop counting, recovery rules, and alert delivery remain authoritative. Set lifecycle_detection.enabled to false to disable the correlation.
+
+Planned-stop correlation does not implement an availability policy: long-running services stopped intentionally will not produce a downtime alert unless another monitoring rule detects their outage. Optional expected-running monitoring and HA-specific planned-shutdown handling are tracked separately.
+
+**Recovery alerts**: once a previously-alarmed container is healthy and running, the watchdog sends a one-time INFO `recovered` notification (if `alert_on_recovery: true`). For an auto-restarting container recovering from `crashed`, `oom`, or `restart-loop`, a fleeting `running` state is *not* recovery: Docker's `State.StartedAt` must prove at least `restart_recovery_stability_seconds` continuous uptime (default 120 seconds), with no intervening failure. On recovery, restart history is reset to avoid immediate re-alerting. Docker health events cannot bypass this check. Other container recovery checks preserve their existing behavior.
 
 ---
 
@@ -131,6 +135,7 @@ See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
 ```
 .
 ├── watchdog.py                  # Main monitor script
+├── lifecycle.py                 # Bounded Docker stop/die evidence correlation
 ├── watchdog-config.yaml         # All configuration (no secrets)
 ├── docker-compose.yaml          # Production / offline runtime (image only)
 ├── docker-compose.build.yaml    # Developer / online build
@@ -189,6 +194,7 @@ All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, p
 | `cooldown_minutes` | `5` | Suppress duplicate alerts per container per failure type |
 | `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |
 | `restart_window_minutes` | `10` | Rolling window for restart counting |
+| `restart_recovery_stability_seconds` | `120` | Minimum uninterrupted running time before a recovered alert for automatically restarted crash/OOM/restart-loop incidents |
 | `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy cycles before alerting |
 | `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
 | `excluded_containers` | `[]` | Container names to never alert on |
@@ -334,7 +340,7 @@ Every alert includes two probe fields that identify exactly how and why the fail
 | `unhealthy` (TCP connect) | `TCP connect` | `TCP probe failed — connection refused or timed out on 172.18.0.5:6379 (Connection refused)` |
 | `unhealthy` (/proc fallback) | `/proc alive check` | `/proc alive check failed — PID 1 is zombie/stopped (exit code 1)` |
 
-> **Restart-loop detection** is not a probe — it is tracked by the **Poll loop** path and fires when a container restarts ≥ `restart_threshold` times within `restart_window_minutes`. See the Poll loop row in the monitoring paths table above.
+> **Restart-loop detection** uses Docker `RestartCount` from the polling loop as its sole restart count. The first poll establishes a baseline without interpreting historical restarts. Counter increases are timestamped when observed, so detection can take up to one polling interval; the rolling window is approximate to polling precision. After a polling gap longer than the restart window, unknown-age increments are ignored rather than misattributed to the current window. Delayed Docker events cannot double-count restarts; timestamps on events also prevent failures from before confirmed recovery from reopening an incident.
 
 ---
 

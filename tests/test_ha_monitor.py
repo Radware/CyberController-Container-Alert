@@ -219,6 +219,8 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
         w.state = Mock()
         w._boot_time = 123
         w._ha_enabled = True
+        w._lifecycle_enabled = False  # disabled in this HA scheduling test
+        w._lifecycle_wake = threading.Event()
         w._stop_event = threading.Event()
         w._session = Mock()  # Existing Docker probe HTTP session.
         w._event_listener = Mock()
