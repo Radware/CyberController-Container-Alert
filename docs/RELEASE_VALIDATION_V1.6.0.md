@@ -1,5 +1,7 @@
 # Container Alert v1.6.0 — Release Acceptance Validation
 
+> **Historical baseline (pre-fix).** This page records the original HA-lab smoke-test failures. They were subsequently investigated using a separate real Docker Engine on m920q, and a minimal recovery fix passed the complete [final release acceptance report](RELEASE_ACCEPTANCE_V1.6.0_FINAL.md). Retain this document as evidence of the original findings, not the current release verdict.
+
 **Date:** October 14, 2026 (UTC)
 **Repository:** `Radware/CyberController-Container-Alert`
 **Release PR:** [#9](https://github.com/Radware/CyberController-Container-Alert/pull/9) — open

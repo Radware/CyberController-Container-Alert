@@ -1573,17 +1573,16 @@ class Watchdog:
 
     # ── Recovery alert ─────────────────────────────────────────────────────────
     def _maybe_alert_recovery(self, container, state: ContainerState) -> None:
-        """Resolve once stable; a brief RUNNING state is not loop recovery."""
-        automatic = has_automatic_restart_policy(container)
+        """Resolve real failures only after sustained Docker uptime."""
         started = container_started_timestamp(container)
         now = time.time()
         with state.lock:
             previous = state.alerted_for
             if not previous or previous == "recovered":
                 return
-            # Once a restart-loop was reported, changing Docker's restart
-            # policy must not bypass the stability period.
-            if previous == "restart-loop" or (automatic and previous in ("crashed", "oom")):
+            # Even a policy=no container may be restarted by an external actor.
+            # Never mark a crash, OOM, or loop recovered after a brief RUNNING poll.
+            if previous in ("restart-loop", "crashed", "oom"):
                 stability = self._restart_recovery_stability_secs
                 # If we cannot prove continuous uptime, don't clear a real incident.
                 if started is None or now - started < stability:

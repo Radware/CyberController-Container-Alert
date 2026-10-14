@@ -15,10 +15,12 @@ import time
 import traceback
 
 IMAGE = os.environ.get("SMOKE_IMAGE", "watchdog:1.6.0")
-EXPECTED_REV = "3b1de153e4d6c1b5ef33ca90c0b6ef755727fb05"
+EXPECTED_REV = os.environ.get("SMOKE_EXPECTED_REV", "")
 TAG = dt.datetime.now(dt.timezone.utc).strftime("%y%m%d%H%M%S") + str(os.getpid())[-3:]
 PREFIX = "ca-smoke-" + TAG
 LABEL = "container-alert.smoke=" + TAG
+ISOLATED = os.environ.get("SMOKE_ISOLATED", "") == "1"
+RECEIVER = PREFIX + "-syslog-receiver" if ISOLATED else "config_dfc_1"
 HOST = "release-smoke-" + TAG
 OBS = PREFIX + "-observer"
 STATE_VOL = PREFIX + "-state"
@@ -184,25 +186,71 @@ def wait_restarts(name, minimum, limit=120):
     raise AssertionError("restart count did not reach " + str(minimum))
 
 def require_syslog():
-    # This file is in the EXISTING DFC container, not created on the host.
-    data = run(["exec", "config_dfc_1", "sh", "-c",
-               "grep -F " + "'host=" + '"' + HOST + '"' + "'" +
-               " /var/log/syslog || true"], timeout=20, check=False)
+    # Keep the isolated collector's raw received packets as separate evidence.
+    if ISOLATED:
+        data = run(["exec", RECEIVER, "cat", "/var/log/syslog"], timeout=20)
+        (BASE/"syslog-udp-raw.txt").write_text(data+"\n")
+    else:
+        data = run(["exec", RECEIVER, "sh", "-c",
+                    "grep -F " + "'host=" + '"' + HOST + '"' + "'" +
+                    " /var/log/syslog || true"], timeout=20, check=False)
     return [x for x in data.splitlines()
             if 'host="' + HOST + '"' in x and 'event="watchdog_alert"' in x]
 
 def init():
-    ensure(run(["inspect", "--format", "{{.State.Health.Status}}",
-                "docker-container-watchdog"]) == "healthy", "existing watchdog not healthy")
+    if not ISOLATED:
+        ensure(run(["inspect", "--format", "{{.State.Health.Status}}",
+                    "docker-container-watchdog"]) == "healthy", "existing watchdog not healthy")
     revision = run(["image", "inspect", "--format",
                     '{{index .Config.Labels "org.opencontainers.image.revision"}}', IMAGE])
-    ensure(revision == EXPECTED_REV, "wrong image source revision " + revision)
+    if EXPECTED_REV:
+        ensure(revision == EXPECTED_REV, "wrong image source revision " + revision)
     image_id = run(["image", "inspect", "--format", "{{.Id}}", IMAGE])
-    ensure("config_dfc_1" in run(["ps", "--format", "{{.Names}}"]).splitlines(),
-           "DFC syslog receiver not running")
+    embedded = run(["run", "--rm", "--network", "none", "--entrypoint", "sha256sum",
+                    IMAGE, "/app/watchdog.py", "/app/lifecycle.py", "/app/ha_monitor.py"])
+    expected_sha = {
+        "/app/watchdog.py": os.environ.get(
+            "SMOKE_EXPECTED_WATCHDOG_SHA256",
+            "4df8451b496a2935eba17fd56cc87459c87b4f96d9c2ace5bee9161fdf2c60fa"),
+        "/app/lifecycle.py": "55b6a06ebb69cb5a70f6c1566798087510228ef93eeceb810dcadb5da09d81f9",
+        "/app/ha_monitor.py": "0fb3ba165035c9970f91854914709fd7492e21a7583c74f34174275c12083dbd",
+    }
+    actual_sha = {line.split()[-1]: line.split()[0] for line in embedded.splitlines()}
+    ensure(actual_sha == expected_sha, "release image source SHA mismatch: " + repr(actual_sha))
+    facts["embedded_source_sha256"] = actual_sha
+    if not ISOLATED:
+        ensure(RECEIVER in run(["ps", "--format", "{{.Names}}"]).splitlines(),
+               "DFC syslog receiver not running")
     existing = run(["ps", "-a", "--format", "{{.Names}}"]).splitlines()
     ensure(not any(n.startswith(PREFIX) for n in existing), "smoke prefix collision")
     ensure(not run(["volume", "ls", "--filter", "label=" + LABEL, "-q"]), "old test volumes")
+    if ISOLATED:
+        collector = make_volume("syslogdata")
+        udp_code = """import socket
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+s.bind(("0.0.0.0",514))
+with open("/var/log/syslog","a",buffering=1) as output:
+    print("SMOKE_SYSLOG_RECEIVER_READY", flush=True)
+    while True:
+        packet,source=s.recvfrom(65535)
+        output.write(packet.decode(errors="replace")+"\\n")
+"""
+        run(["run", "-d", "--name", RECEIVER, "--label", LABEL, "--network", "host",
+             "--restart", "no", "--memory", "64m", "--pids-limit", "32",
+             "--volume", collector + ":/var/log", "--user", "0:0",
+             "--entrypoint", "python3", IMAGE, "-u", "-c", udp_code])
+        containers.append(RECEIVER)
+        receiver_logs = ""
+        for _ in range(18):
+            time.sleep(1)
+            receiver_logs = run(["logs", RECEIVER], check=False)
+            if "SMOKE_SYSLOG_RECEIVER_READY" in receiver_logs:
+                break
+            if inspect(RECEIVER, "{{.State.Status}}") == "exited":
+                break
+        ensure("SMOKE_SYSLOG_RECEIVER_READY" in receiver_logs,
+               "isolated UDP syslog collector failed; state=" +
+               inspect(RECEIVER, "{{.State.Status}}") + ", log=" + receiver_logs[-1000:])
     vol = make_volume("state")
     excludes = sorted(set(existing + [OBS]))
     config = {
@@ -227,7 +275,7 @@ def init():
          "-e", "SMOKE_CONFIG=" + json.dumps(config),
          "--volume", vol + ":/data", "--entrypoint", "python3",
          IMAGE, "-c", setup], timeout=30)
-    gid = os.stat("/var/run/docker.sock").st_gid
+    gid = int(os.environ.get("SMOKE_DOCKER_SOCKET_GID", os.stat("/var/run/docker.sock").st_gid))
     arm_events()
     args = ["run", "-d", "--name", OBS, "--label", LABEL, "--restart", "no",
             "--label", "com.docker.compose.project=release-smoke",
@@ -256,7 +304,9 @@ def init():
                   "revision": revision, "image_id": image_id, "observer": OBS,
                   "syslog_source_host": HOST, "observer_poll_seconds": 2,
                   "restart_threshold": 5, "recovery_stability_seconds": 120,
-                  "excluded_existing_containers": len(existing)})
+                  "excluded_existing_containers": len(existing),
+                  "syslog_backend": "isolated UDP test collector" if ISOLATED else "real DFC",
+                  "docker_engine_endpoint": os.environ.get("DOCKER_HOST", "default")})
     log("REAL_DOCKER_TEST_READY " + HOST + " image=" + image_id[:24])
 
 def t01_clean():
@@ -375,6 +425,70 @@ while True:
     facts["loop_restart_count_after"] = int(inspect(name, "{{.RestartCount}}"))
     return "one CRASH + one LOOP + one RECOVERED after real interrupted recovery"
 
+def t14_external_restart():
+    # A Docker policy=no container is intentionally started by an external actor.
+    # RECOVERED must wait for sustained uptime, just like auto-restart containers.
+    vol = make_volume("externalcontrol")
+    script = """import os,sys,time
+if not os.path.exists("/control/recover"): sys.exit(2)
+time.sleep(300)
+"""
+    name = fixture("external", script, control=vol)
+    start(name)
+    ensure(wait_exit(name) == 2, "initial actual crash not exit 2")
+    wait_alert(name, "crashed", limit=35)
+    write_control(vol, "recover")
+    ensure(inspect(name, "{{.HostConfig.RestartPolicy.Name}}") == "no",
+           "external fixture should not auto-restart")
+    run(["start", name])
+    time.sleep(12)
+    ensure(must_count(name, "recovered", 0) == 0,
+           "premature RECOVERED after external Docker start, before 120s uptime")
+    wait_alert(name, "recovered", limit=150)
+    ensure(must_count(name, "crashed", 1) == 1, "duplicate crash")
+    ensure(must_count(name, "recovered", 1) == 1, "duplicate recovery")
+    stable = confirmed_stable_uptime(name)
+    return "real manual Docker start after crash; RECOVERED after " + str(stable) + "s uptime"
+
+def confirmed_stable_uptime(name):
+    line = alerts(name, "recovered")[0]
+    stamp = re.search(r'time_utc="([^"]+)"', line)
+    ensure(stamp is not None, "RECOVERED alert missing timestamp")
+    started = dt.datetime.fromisoformat(inspect(name, "{{.State.StartedAt}}").replace("Z","+00:00"))
+    recovered = dt.datetime.fromisoformat(stamp.group(1).replace("Z","+00:00"))
+    elapsed = (recovered-started).total_seconds()
+    ensure(elapsed >= 119, "RECOVERED was emitted after only " + str(elapsed) + " seconds")
+    return round(elapsed,1)
+
+def t15_external_oom_restart():
+    vol = make_volume("externaloomcontrol")
+    script = """import os,time
+if os.path.exists("/control/recover"):
+    while True: time.sleep(2)
+else:
+    chunks=[]
+    while True:
+        chunks.append(bytearray(8*1024*1024))
+        time.sleep(.02)
+"""
+    name = fixture("externaloom", script, memory="64m", control=vol)
+    ensure(inspect(name, "{{.HostConfig.RestartPolicy.Name}}") == "no",
+           "external OOM fixture must have restart policy no")
+    start(name)
+    ensure(wait_exit(name, 40) == 137, "kernel OOM did not exit 137")
+    ensure(state(name)["OOMKilled"] is True, "Docker did not confirm real OOM")
+    wait_alert(name, "oom", limit=35)
+    ensure(must_count(name, "crashed", 0) == 0, "OOM produced CRASH")
+    write_control(vol, "recover")
+    run(["start", name])
+    time.sleep(12)
+    ensure(must_count(name, "recovered", 0) == 0, "early recovered after external OOM start")
+    wait_alert(name, "recovered", limit=150)
+    ensure(must_count(name, "oom", 1) == 1, "repeated OOM notification")
+    ensure(must_count(name, "recovered", 1) == 1, "repeated RECOVERED")
+    stable = confirmed_stable_uptime(name)
+    return "real kernel OOM -> external Docker start -> INFO RECOVERED after " + str(stable) + "s"
+
 def t10_name_reuse():
     name = PREFIX + "-reuse"
     ids = []
@@ -442,7 +556,8 @@ def t13_dfc():
     facts["watchdog_alert_count"] = len(sent)
     facts["dfc_received_count"] = len(received)
     ensure(sent, "watchdog generated no alert records")
-    for name in ("crash", "sigkill", "oom", "loop", "reuse", "health"):
+    for name in (("crash", "sigkill", "oom", "loop", "reuse", "health", "external")
+                 if ISOLATED else ("crash", "sigkill", "oom", "loop", "reuse", "health")):
         actual = PREFIX + "-" + name
         local = [x for x in sent if 'container="' + actual + '"' in x]
         remote = [x for x in received if 'container="' + actual + '"' in x]
@@ -460,7 +575,8 @@ def t13_dfc():
                    'severity="' + severity + '"' in x for x in received),
                "DFC missing " + kind + "/" + severity)
     return str(len(sent)) + " watchdog alerts delivered as " + str(len(received)) + \
-           " DFC syslog messages; CRITICAL/HIGH/INFO fields correct"
+           (" isolated UDP syslog messages" if ISOLATED else " DFC syslog messages") + \
+           "; CRITICAL/HIGH/INFO fields correct"
 
 def collect():
     stop_events()
@@ -523,17 +639,42 @@ def cleanup():
 
 try:
     init()
-    checked("T01_CLEAN_EXIT", "exit=0 means no alert", t01_clean)
-    checked("T02_UNEXPECTED_CRASH", "exit=2 sends one CRITICAL crash", t02_crash)
-    checked("T03_PLANNED_STOP_137", "Docker stop exit 137 is suppressed", t03_planned_stop)
-    checked("T04_DIRECT_SIGKILL", "SIGKILL 137 is crash, not OOM", t04_direct_kill)
-    checked("T05_REAL_OOM", "OOMKilled=true sends only CRITICAL OOM", t05_oom)
-    checked("T06_TO_T09_RESTART_LIFECYCLE",
-            "CRASH -> RESTART-LOOP -> stability -> RECOVERED, interrupted recovery", t06_t08_loop)
-    checked("T10_NAME_REUSE", "replacement with same name gets new incident", t10_name_reuse)
-    checked("T11_FAST_REMOVAL", "no event flood, event listener survives", t11_fast_removal)
-    checked("T12_NATIVE_HEALTHCHECK", "unhealthy -> recovered", t12_healthcheck)
-    checked("T13_DFC_SYSLOG", "all expected structured alerts reach actual DFC", t13_dfc)
+    if os.environ.get("SMOKE_ONLY") == "T13_SYSLOG_QUICK":
+        ensure(ISOLATED, "SMOKE_ONLY quick test requires isolated engine")
+        checked("T02_UNEXPECTED_CRASH", "real CRITICAL crash", t02_crash)
+        def quick_syslog():
+            lines = require_syslog()
+            ensure(any('container="' + PREFIX + '-crash"' in x and
+                       'severity="CRITICAL"' in x for x in lines),
+                   "no matching CRITICAL Syslog packet; raw=" +
+                   (BASE/"syslog-udp-raw.txt").read_text()[:700])
+            return "CRITICAL Syslog datagram collected for real Docker crash"
+        checked("T13_SYSLOG_QUICK", "UDP receiver captures matching CRITICAL record", quick_syslog)
+    elif os.environ.get("SMOKE_ONLY") in ("T14_EXTERNAL_RESTART", "T15_EXTERNAL_OOM"):
+        ensure(ISOLATED, "SMOKE_ONLY external case must run on isolated engine")
+        if os.environ["SMOKE_ONLY"] == "T14_EXTERNAL_RESTART":
+            checked("T14_EXTERNAL_RESTART", "no recovery until 120 seconds after external start",
+                    t14_external_restart)
+        else:
+            checked("T15_EXTERNAL_OOM", "real OOM then manual start requires 120s stability",
+                    t15_external_oom_restart)
+    else:
+        checked("T01_CLEAN_EXIT", "exit=0 means no alert", t01_clean)
+        checked("T02_UNEXPECTED_CRASH", "exit=2 sends one CRITICAL crash", t02_crash)
+        checked("T03_PLANNED_STOP_137", "Docker stop exit 137 is suppressed", t03_planned_stop)
+        checked("T04_DIRECT_SIGKILL", "SIGKILL 137 is crash, not OOM", t04_direct_kill)
+        checked("T05_REAL_OOM", "OOMKilled=true sends only CRITICAL OOM", t05_oom)
+        checked("T06_TO_T09_RESTART_LIFECYCLE",
+                "CRASH -> RESTART-LOOP -> stability -> RECOVERED, interrupted recovery", t06_t08_loop)
+        if ISOLATED:
+            checked("T14_EXTERNAL_RESTART", "manual start after CRASH waits 120s before RECOVERED",
+                    t14_external_restart)
+        checked("T10_NAME_REUSE", "replacement with same name gets new incident", t10_name_reuse)
+        checked("T11_FAST_REMOVAL", "no event flood, event listener survives", t11_fast_removal)
+        checked("T12_NATIVE_HEALTHCHECK", "unhealthy -> recovered", t12_healthcheck)
+        checked("T13_SYSLOG" if ISOLATED else "T13_DFC_SYSLOG",
+                "all expected structured alerts reach " + ("test UDP collector" if ISOLATED else "DFC"),
+                t13_dfc)
 except Exception as e:
     issue("PREFLIGHT_OR_FATAL", "observer initializes and tests run", repr(e))
     facts["fatal_traceback"] = traceback.format_exc()
@@ -564,7 +705,7 @@ finally:
         lines.append("| " + item["id"] + " | " + item["status"] + " | " + actual[:290] + " |")
     lines += ["", "## Evidence",
               "Actual Docker container failures and events; exact release code in an isolated observer.",
-              "Observer has SMTP disabled; Syslog messages are sent to pre-existing DFC UDP/514.",
+              "Observer has SMTP disabled; Syslog messages go to " + facts.get("syslog_backend", "receiver") + " UDP/514.",
               "No synthetic Docker events, mocked exporter metrics, host packages, or Pacemaker changes.",
               "Other watchdogs and unrelated existing containers are not modified.",
               "Output files: watchdog.log, docker-events.log, dfc-syslog.txt, observer-state.json, report.json.",

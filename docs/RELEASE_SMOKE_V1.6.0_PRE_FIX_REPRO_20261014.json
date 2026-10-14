@@ -1,0 +1,76 @@
+{
+  "run_id": "261014223252035",
+  "started_utc": "2026-10-14T22:32:52.613776Z",
+  "finished_utc": "2026-10-14T22:33:29.913178Z",
+  "status": "FAIL",
+  "image": "watchdog:1.6.0",
+  "results": [
+    {
+      "id": "T14_EXTERNAL_RESTART",
+      "status": "FAIL",
+      "expected": "no recovery until 120 seconds after external start",
+      "observed": "ca-smoke-261014223252035-external recovered: expected 0 got 1",
+      "elapsed_seconds": 33.8
+    }
+  ],
+  "facts": {
+    "host": "b6df39059ff7",
+    "revision": "",
+    "image_id": "sha256:3a9942e74f643b0c2b38c82bcd0ef2b805cd13dd0f7c100031080f2cf06e494a",
+    "observer": "ca-smoke-261014223252035-observer",
+    "syslog_source_host": "release-smoke-261014223252035",
+    "observer_poll_seconds": 2,
+    "restart_threshold": 5,
+    "recovery_stability_seconds": 120,
+    "excluded_existing_containers": 0,
+    "syslog_backend": "isolated UDP test collector",
+    "docker_engine_endpoint": "tcp://127.0.0.1:32768",
+    "external": {
+      "name": "ca-smoke-261014223252035-external",
+      "container_id": "b78eb7be8c5464972808a9a3a85a2240a4b57aac347ca91b31a7c445015604af"
+    },
+    "live_docker_events": 6,
+    "live_docker_action_counts": {
+      "create": 2,
+      "start": 3,
+      "die": 1,
+      "oom": 0,
+      "stop": 0,
+      "kill": 0,
+      "restart": 0,
+      "health_status: unhealthy": 0,
+      "health_status: healthy": 0,
+      "destroy": 0
+    },
+    "docker_event_lines": 8,
+    "final_fixture_states": {
+      "ca-smoke-261014223252035-syslog-receiver": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 790,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:32:57.598924455Z",
+        "FinishedAt": "0001-01-01T00:00:00Z"
+      },
+      "ca-smoke-261014223252035-external": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 1174,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:33:14.250958418Z",
+        "FinishedAt": "2026-10-14T22:33:09.081072575Z"
+      }
+    },
+    "total_seconds": 37.3
+  }
+}

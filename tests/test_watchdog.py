@@ -57,9 +57,14 @@ class WatchdogRegressionTests(unittest.TestCase):
         w.cfg = {"alert_on_recovery": False}
         w.state = watchdog.WatchdogState("")
         w._boot_time = 123
+        w._restart_recovery_stability_secs = 120
         state = w.state.get("svc")
         state.alerted_for = "crashed"
-        w._maybe_alert_recovery(SimpleNamespace(name="svc"), state)
+        state.last_failure_time = time.time() - 130
+        stable_since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 130))
+        container = SimpleNamespace(name="svc", attrs={
+            "State": {"StartedAt": stable_since}, "RestartCount": 0})
+        w._maybe_alert_recovery(container, state)
         self.assertEqual(state.alerted_for, "")
     def test_reboot_summary_uses_current_state_not_folded_failures(self):
         w = object.__new__(watchdog.Watchdog)

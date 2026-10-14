@@ -1,0 +1,324 @@
+{
+  "run_id": "261014224557488",
+  "started_utc": "2026-10-14T22:45:57.106131Z",
+  "finished_utc": "2026-10-14T22:52:41.488066Z",
+  "status": "PASS",
+  "image": "watchdog:1.6.0-rc-fix",
+  "results": [
+    {
+      "id": "T01_CLEAN_EXIT",
+      "status": "PASS",
+      "expected": "exit=0 means no alert",
+      "observed": "real exit=0, no alerts",
+      "elapsed_seconds": 21.9
+    },
+    {
+      "id": "T02_UNEXPECTED_CRASH",
+      "status": "PASS",
+      "expected": "exit=2 sends one CRITICAL crash",
+      "observed": "Docker exit=2, exactly one CRITICAL crashed alert",
+      "elapsed_seconds": 26.8
+    },
+    {
+      "id": "T03_PLANNED_STOP_137",
+      "status": "PASS",
+      "expected": "Docker stop exit 137 is suppressed",
+      "observed": "real docker stop -> SIGKILL/137; no crash or OOM alert",
+      "elapsed_seconds": 39.0
+    },
+    {
+      "id": "T04_DIRECT_SIGKILL",
+      "status": "PASS",
+      "expected": "SIGKILL 137 is crash, not OOM",
+      "observed": "real SIGKILL/137, OOMKilled=false, exactly one CRITICAL crash",
+      "elapsed_seconds": 57.5
+    },
+    {
+      "id": "T05_REAL_OOM",
+      "status": "PASS",
+      "expected": "OOMKilled=true sends only CRITICAL OOM",
+      "observed": "kernel cgroup OOMKilled=true, exit=137, one CRITICAL OOM, zero crash",
+      "elapsed_seconds": 71.9
+    },
+    {
+      "id": "T06_RESTART_LOOP",
+      "status": "PASS",
+      "expected": "one CRASH, one HIGH RESTART-LOOP at >=5 Docker restarts",
+      "observed": "real Docker RestartCount=5; crash=1; restart-loop=1",
+      "elapsed_seconds": 83.7
+    },
+    {
+      "id": "T07_BRIEF_RECOVERY",
+      "status": "PASS",
+      "expected": "no recovery before 120s stability",
+      "observed": "running after 11s, RECOVERED=0",
+      "elapsed_seconds": 96.7
+    },
+    {
+      "id": "T08_INTERRUPTED_RECOVERY",
+      "status": "PASS",
+      "expected": "new actual die/reset prevents premature recovery",
+      "observed": "Docker RestartCount 6 -> 7; RECOVERED=0 after 14s",
+      "elapsed_seconds": 112.6
+    },
+    {
+      "id": "T09_STABLE_RECOVERY",
+      "status": "PASS",
+      "expected": "one INFO RECOVERED after 120s sustained uptime",
+      "observed": "1 crashed, 1 restart-loop, 1 recovered after interrupted recovery",
+      "elapsed_seconds": 225.2
+    },
+    {
+      "id": "T06_TO_T09_RESTART_LIFECYCLE",
+      "status": "PASS",
+      "expected": "CRASH -> RESTART-LOOP -> stability -> RECOVERED, interrupted recovery",
+      "observed": "one CRASH + one LOOP + one RECOVERED after real interrupted recovery",
+      "elapsed_seconds": 225.3
+    },
+    {
+      "id": "T14_EXTERNAL_RESTART",
+      "status": "PASS",
+      "expected": "manual start after CRASH waits 120s before RECOVERED",
+      "observed": "real manual Docker start after crash; RECOVERED after 119.9s uptime",
+      "elapsed_seconds": 355.0
+    },
+    {
+      "id": "T10_NAME_REUSE",
+      "status": "PASS",
+      "expected": "replacement with same name gets new incident",
+      "observed": "two unique container IDs, same name, each gets one CRITICAL crash",
+      "elapsed_seconds": 367.1
+    },
+    {
+      "id": "T11_FAST_REMOVAL",
+      "status": "PASS",
+      "expected": "no event flood, event listener survives",
+      "observed": "3 real --rm containers, 0 bounded missing-ID warnings, observer alive",
+      "elapsed_seconds": 381.3
+    },
+    {
+      "id": "T12_NATIVE_HEALTHCHECK",
+      "status": "PASS",
+      "expected": "unhealthy -> recovered",
+      "observed": "real native Docker HEALTHCHECK unhealthy HIGH then healthy INFO recovery",
+      "elapsed_seconds": 398.2
+    },
+    {
+      "id": "T13_SYSLOG",
+      "status": "PASS",
+      "expected": "all expected structured alerts reach test UDP collector",
+      "observed": "15 watchdog alerts delivered as 15 isolated UDP syslog messages; CRITICAL/HIGH/INFO fields correct",
+      "elapsed_seconds": 398.3
+    }
+  ],
+  "facts": {
+    "embedded_source_sha256": {
+      "/app/watchdog.py": "4df8451b496a2935eba17fd56cc87459c87b4f96d9c2ace5bee9161fdf2c60fa",
+      "/app/lifecycle.py": "55b6a06ebb69cb5a70f6c1566798087510228ef93eeceb810dcadb5da09d81f9",
+      "/app/ha_monitor.py": "0fb3ba165035c9970f91854914709fd7492e21a7583c74f34174275c12083dbd"
+    },
+    "host": "b6df39059ff7",
+    "revision": "",
+    "image_id": "sha256:670cbdd3a24317aa39c04036d1c90c72420c97a0afe32ad5e4a77e06ef464be9",
+    "observer": "ca-smoke-261014224557488-observer",
+    "syslog_source_host": "release-smoke-261014224557488",
+    "observer_poll_seconds": 2,
+    "restart_threshold": 5,
+    "recovery_stability_seconds": 120,
+    "excluded_existing_containers": 0,
+    "syslog_backend": "isolated UDP test collector",
+    "docker_engine_endpoint": "tcp://127.0.0.1:32768",
+    "clean": {
+      "name": "ca-smoke-261014224557488-clean",
+      "container_id": "93dc6ec3664fa2b472f7031cde519ecbd49549a82cce2ef1e85c8581657ed781"
+    },
+    "crash": {
+      "name": "ca-smoke-261014224557488-crash",
+      "container_id": "59e4a2af2ecf9c225a09df23c6b59fc504ae4f2f0b147b13b9ca2b45c60120de"
+    },
+    "planned": {
+      "name": "ca-smoke-261014224557488-planned",
+      "container_id": "ee156fae6fcd5bef6c53165886e04bf0988fe0061378fb496e76d9f488e3d4d9"
+    },
+    "sigkill": {
+      "name": "ca-smoke-261014224557488-sigkill",
+      "container_id": "80e2215066163d64b2bd6a62ce5c6e43a57a7638d472539c53e8db9c7a539920"
+    },
+    "sigkill_state": {
+      "exit": 137,
+      "OOMKilled": false
+    },
+    "oom": {
+      "name": "ca-smoke-261014224557488-oom",
+      "container_id": "19482ebcd087d5d302ea6e707075e1a874524ef2a33e2f2db1c2b572de59e8a1"
+    },
+    "oom_state": {
+      "exit": 137,
+      "OOMKilled": true
+    },
+    "loop": {
+      "name": "ca-smoke-261014224557488-loop",
+      "container_id": "1016f94b5e91523c0358698cbe9b48edad0ac087ae4c332a5f55cc9690f9b02e"
+    },
+    "loop_restart_count_after": 7,
+    "external": {
+      "name": "ca-smoke-261014224557488-external",
+      "container_id": "d30bdc108c3a194a9fe4d75a09e8ce313eca86a8c0c9f6af3d2f26812624f969"
+    },
+    "reuse": {
+      "name": "ca-smoke-261014224557488-reuse",
+      "container_id": "c09027edaf62f85bb5babaf6aa38aee13d719866ba108f83a9cdeb9e52544c51"
+    },
+    "fast_remove_warning_count": 0,
+    "health": {
+      "name": "ca-smoke-261014224557488-health",
+      "container_id": "23b9356951d88eb98fbd92d8bdd08be6ed29ffb293125338db78a8d35560a300"
+    },
+    "watchdog_alert_count": 15,
+    "dfc_received_count": 15,
+    "live_docker_events": 92,
+    "live_docker_action_counts": {
+      "create": 14,
+      "start": 22,
+      "die": 18,
+      "oom": 1,
+      "stop": 1,
+      "kill": 3,
+      "restart": 0,
+      "health_status: unhealthy": 1,
+      "health_status: healthy": 1,
+      "destroy": 7
+    },
+    "docker_event_lines": 97,
+    "final_fixture_states": {
+      "ca-smoke-261014224557488-syslog-receiver": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 5484,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:46:02.126339022Z",
+        "FinishedAt": "0001-01-01T00:00:00Z"
+      },
+      "ca-smoke-261014224557488-clean": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:46:11.519112255Z",
+        "FinishedAt": "2026-10-14T22:46:11.888551005Z"
+      },
+      "ca-smoke-261014224557488-crash": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 2,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:46:20.387611646Z",
+        "FinishedAt": "2026-10-14T22:46:20.651109479Z"
+      },
+      "ca-smoke-261014224557488-loop": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 6714,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:47:35.416361955Z",
+        "FinishedAt": "2026-10-14T22:47:35.299866533Z"
+      },
+      "ca-smoke-261014224557488-external": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 6976,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:49:51.127967239Z",
+        "FinishedAt": "2026-10-14T22:49:45.881841779Z"
+      },
+      "ca-smoke-261014224557488-reuse": {
+        "Status": "exited",
+        "Running": false,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 0,
+        "ExitCode": 42,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:52:00.724185739Z",
+        "FinishedAt": "2026-10-14T22:52:00.970303463Z"
+      },
+      "ca-smoke-261014224557488-health": {
+        "Status": "running",
+        "Running": true,
+        "Paused": false,
+        "Restarting": false,
+        "OOMKilled": false,
+        "Dead": false,
+        "Pid": 7439,
+        "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-10-14T22:52:21.630416377Z",
+        "FinishedAt": "0001-01-01T00:00:00Z",
+        "Health": {
+          "Status": "healthy",
+          "FailingStreak": 0,
+          "Log": [
+            {
+              "Start": "2026-10-14T22:52:28.219276407Z",
+              "End": "2026-10-14T22:52:28.31610092Z",
+              "ExitCode": 1,
+              "Output": ""
+            },
+            {
+              "Start": "2026-10-14T22:52:30.316786865Z",
+              "End": "2026-10-14T22:52:30.503706796Z",
+              "ExitCode": 1,
+              "Output": ""
+            },
+            {
+              "Start": "2026-10-14T22:52:32.504440652Z",
+              "End": "2026-10-14T22:52:32.698663166Z",
+              "ExitCode": 1,
+              "Output": ""
+            },
+            {
+              "Start": "2026-10-14T22:52:34.699078389Z",
+              "End": "2026-10-14T22:52:35.108639315Z",
+              "ExitCode": 0,
+              "Output": ""
+            },
+            {
+              "Start": "2026-10-14T22:52:37.109706599Z",
+              "End": "2026-10-14T22:52:37.218394592Z",
+              "ExitCode": 0,
+              "Output": ""
+            }
+          ]
+        }
+      }
+    },
+    "total_seconds": 404.4
+  }
+}
