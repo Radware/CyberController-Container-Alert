@@ -1,221 +1,253 @@
-"""Regression coverage for planned Docker stops and real termination failures."""
-
+"""Integration regression: Docker stop evidence feeds ONE PR #5 incident engine."""
 import threading
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from lifecycle import DockerLifecycleCorrelator
 import watchdog
 
-
 CID = "a" * 64
-OTHER_ID = "b" * 64
+OTHER = "b" * 64
 
 
-class LifecycleCorrelatorTests(unittest.TestCase):
-    def test_forced_docker_stop_die_before_stop(self):
+class CorrelationTests(unittest.TestCase):
+    def test_die_before_stop(self):
         tracker = DockerLifecycleCorrelator(3)
-        tracker.record("kill", CID, signal="15", now=100)
-        tracker.record("kill", CID, signal="9", now=110)
-        tracker.record("die", CID, name="svc", exit_code=137, now=110.01)
-        self.assertEqual(tracker.drain_ready(now=110.02), [])
-        tracker.record("stop", CID, now=110.05)
-        [death] = tracker.drain_ready(now=110.06)
-        self.assertTrue(death.stopped)
-        self.assertEqual(death.signals, ("15", "9"))
-        self.assertEqual(death.exit_code, 137)
-
-    def test_stop_before_die_is_correlated(self):
-        tracker = DockerLifecycleCorrelator(3)
-        tracker.record("stop", CID, now=200)
-        tracker.record("die", CID, name="svc", exit_code=143, now=200.1)
-        [death] = tracker.drain_ready(now=200.2)
+        tracker.record("die", CID, name="svc", exit_code=137, now=10)
+        tracker.record("stop", CID, now=10.1)
+        [death] = tracker.drain_ready(now=10.2)
         self.assertTrue(death.stopped)
 
-    def test_kill_without_stop_cannot_suppress(self):
+    def test_stop_before_die(self):
         tracker = DockerLifecycleCorrelator(3)
-        tracker.record("kill", CID, signal="9", now=100)
-        tracker.record("die", CID, name="svc", exit_code=137, now=100.1)
-        tracker.record("stop", OTHER_ID, now=100.2)
-        self.assertEqual(tracker.drain_ready(now=102), [])
-        [death] = tracker.drain_ready(now=103.1)
-        self.assertFalse(death.stopped)
-        self.assertEqual(death.signals, ("9",))
+        tracker.record("stop", CID, now=10)
+        tracker.record("die", CID, name="svc", exit_code=137, now=10.1)
+        [death] = tracker.drain_ready(now=10.2)
+        self.assertTrue(death.stopped)
 
-    def test_late_stop_cannot_suppress_timeout(self):
+    def test_late_stop_not_suppressed(self):
         tracker = DockerLifecycleCorrelator(3)
-        tracker.record("die", CID, name="svc", exit_code=137, now=100)
-        tracker.record("stop", CID, now=105)
-        [death] = tracker.drain_ready(now=105)
+        tracker.record("die", CID, name="svc", exit_code=137, now=10)
+        tracker.record("stop", CID, now=14)
+        [death] = tracker.drain_ready(now=14)
         self.assertFalse(death.stopped)
 
-    def test_restart_clears_stale_stop_evidence(self):
+    def test_wrong_id_not_suppressed(self):
         tracker = DockerLifecycleCorrelator(3)
-        tracker.record("stop", CID, now=100)
-        tracker.record("start", CID, now=100.1)
-        tracker.record("die", CID, name="svc", exit_code=1, now=100.2)
-        [death] = tracker.drain_ready(now=104)
+        tracker.record("die", CID, name="svc", exit_code=137, now=10)
+        tracker.record("stop", OTHER, now=10.1)
+        [death] = tracker.drain_ready(now=14)
         self.assertFalse(death.stopped)
 
-    def test_oom_after_die_marks_pending(self):
+    def test_start_clears_old_stop(self):
         tracker = DockerLifecycleCorrelator(3)
-        tracker.record("die", CID, name="svc", exit_code=137, now=100)
-        self.assertTrue(tracker.record("oom", CID, now=100.1))
-        [death] = tracker.drain_ready(now=100.1)
+        tracker.record("stop", CID, now=10)
+        tracker.record("start", CID, now=10.1)
+        tracker.record("die", CID, name="svc", exit_code=137, now=10.2)
+        [death] = tracker.drain_ready(now=14)
+        self.assertFalse(death.stopped)
+
+    def test_next_run_stop_cannot_hide_previous_run_crash(self):
+        tracker = DockerLifecycleCorrelator(3)
+        tracker.record("die", CID, name="svc", exit_code=1, now=10)
+        tracker.record("start", CID, now=10.1)
+        tracker.record("stop", CID, now=10.2)
+        [death] = tracker.drain_ready(now=10.3)
+        self.assertFalse(death.stopped)
+
+    def test_single_stop_can_suppress_only_latest_die(self):
+        tracker = DockerLifecycleCorrelator(3)
+        tracker.record("die", CID, name="svc", exit_code=2, now=10)
+        tracker.record("die", CID, name="svc", exit_code=137, now=10.2)
+        tracker.record("stop", CID, now=10.3)
+        deaths = tracker.drain_ready(force=True)
+        self.assertEqual([d.stopped for d in deaths], [False, True])
+
+    def test_oom_after_die_is_correlated(self):
+        tracker = DockerLifecycleCorrelator(3)
+        tracker.record("die", CID, name="svc", exit_code=137, now=10)
+        self.assertTrue(tracker.record("oom", CID, now=10.1))
+        [death] = tracker.drain_ready(now=10.2)
         self.assertTrue(death.oom)
 
-    def test_unmatched_oom_returns_false(self):
+    def test_oom_without_pending_die_is_not_matched(self):
         tracker = DockerLifecycleCorrelator(3)
-        self.assertFalse(tracker.record("oom", CID, now=100))
+        self.assertFalse(tracker.record("oom", CID, now=10))
+
+    def test_no_premature_resolution(self):
+        tracker = DockerLifecycleCorrelator(3)
+        tracker.record("die", CID, name="svc", exit_code=1, now=10)
+        self.assertEqual(tracker.drain_ready(now=12.99), [])
+        self.assertEqual(len(tracker.drain_ready(now=13.01)), 1)
 
 
-class DummyContainer:
-    def __init__(self, name="svc", cid=CID):
-        self.name = name
-        self.id = cid
+class FakeContainer:
+    def __init__(self, cid=CID, name="svc"):
+        self.id, self.name = cid, name
+        self.status = "running"
         self.labels = {}
         self.attrs = {
-            "Config": {"Image": "test/svc:latest", "Labels": {}},
-            "HostConfig": {"AutoRemove": False},
-            "State": {"OOMKilled": False},
-            "Mounts": [],
+            "Config": {"Image": "test/svc", "Labels": {}},
+            "HostConfig": {"AutoRemove": False, "RestartPolicy": {"Name": "always"}},
+            "State": {"OOMKilled": False,
+                      "StartedAt": (datetime.now(timezone.utc)-timedelta(seconds=5)).isoformat()},
+            "Mounts": [], "RestartCount": 0,
+            "NetworkSettings": {"Networks": {}},
         }
         self.image = SimpleNamespace(tags=["test/svc:latest"])
 
     def logs(self, **kwargs):
-        return b"test container log"
+        return b"failure in test container"
 
     def stats(self, **kwargs):
         return {"memory_stats": {}}
 
+    def reload(self):
+        pass
+
 
 class WatchdogLifecycleTests(unittest.TestCase):
     def setUp(self):
-        self.container = DummyContainer()
-        w = object.__new__(watchdog.Watchdog)
-        w.cfg = {"alert_on_recovery": True}
-        w.host = "lab"
-        w.runbook_base = "https://example.invalid/runbook"
-        w._excluded = set()
-        w._ignored_events = []
-        w._discovered_checks = {}
-        w._oom_containers = set()
-        w._lifecycle_enabled = True
-        w._lifecycle = DockerLifecycleCorrelator(3)
-        w._lifecycle_wake = threading.Event()
-        w._lifecycle_cfg = {
-            "notify_on_docker_stop": False,
-            "log_forced_stop_warning": True,
-        }
-        w.state = watchdog.WatchdogState("")
-        w._cooldown_minutes = 5
-        w._boot_time = 0
-        w._unhealthy_threshold = 3
+        self.container = FakeContainer()
+        wd = object.__new__(watchdog.Watchdog)
+        wd.cfg = {"alert_on_recovery": True}
+        wd.state = watchdog.WatchdogState("")
+        wd.host = "lab"
+        wd.runbook_base = ""
+        wd._excluded = set()
+        wd._ignored_events = []
+        wd._discovered_checks = {}
+        wd._oom_containers = set()
+        wd._missing_events = {}
+        wd._lifecycle_enabled = True
+        wd._lifecycle = DockerLifecycleCorrelator(3)
+        wd._lifecycle_wake = threading.Event()
+        wd._restart_threshold = 3
+        wd._restart_window_secs = 600
+        wd._restart_recovery_stability_secs = 120
+        wd._unhealthy_threshold = 3
+        wd._cooldown_minutes = 5
+        wd._auto_cfg = {"enabled": False}
+        wd._manual_checks = {}
+        wd._boot_time = 0
+        wd._grace_until = 0
+        wd._folded = []
+        wd._folded_lock = threading.Lock()
+        wd.client = SimpleNamespace(
+            containers=SimpleNamespace(get=lambda cid: self.container,
+                                       list=lambda all=True: [self.container]))
         self.alerts = []
-        w._dispatch = self.alerts.append
-        w.client = SimpleNamespace(containers=SimpleNamespace(get=lambda cid: self.container))
-        w._expected_running = set()
-        w._expected_down_since = {}
-        w._expected_running_grace = 120
-        self.w = w
+        wd._dispatch = self.alerts.append
+        self.wd = wd
 
-    def event(self, action, *, exit_code=None, signal=None, cid=CID):
-        attrs = {"name": "svc"}
-        if exit_code is not None:
-            attrs["exitCode"] = str(exit_code)
-        if signal is not None:
-            attrs["signal"] = str(signal)
-        return {"Action": action, "Actor": {"ID": cid, "Attributes": attrs}}
+    def event(self, action, code=None, cid=CID, timeNano=None):
+        attrs = {"name": self.container.name}
+        if code is not None:
+            attrs["exitCode"] = str(code)
+        event = {"Action": action, "Actor": {"ID": cid, "Attributes": attrs}}
+        if timeNano:
+            event["timeNano"] = timeNano
+        return event
 
-    def resolve(self, *, force=False):
-        for death in self.w._lifecycle.drain_ready(force=force):
-            self.w._resolve_lifecycle_death(death)
+    def resolve(self):
+        for death in self.wd._lifecycle.drain_ready(force=True):
+            self.wd._resolve_lifecycle_death(death)
 
-    def test_exact_october_incident_planned_sigkill_no_critical(self):
-        self.w._handle_event(self.event("kill", signal=15))
-        self.w._handle_event(self.event("kill", signal=9))
-        self.w._handle_event(self.event("die", exit_code=137))
-        self.assertEqual(self.alerts, [])
-        self.w._handle_event(self.event("stop"))
+    def reasons(self):
+        return [alert.failure_type for alert in self.alerts]
+
+    def test_october_forced_stop_does_not_crash(self):
+        self.wd._handle_event(self.event("die", 137))
+        self.wd._handle_event(self.event("stop"))
         self.resolve()
-        self.assertEqual(self.alerts, [])
-        self.assertEqual(self.w.state.get("svc").alerted_for, "")
+        self.assertEqual(self.reasons(), [])
+        self.assertEqual(self.wd.state.get("svc").alerted_for, "")
 
-    def test_requested_stop_notification_is_info_only(self):
-        self.w._lifecycle_cfg["notify_on_docker_stop"] = True
-        self.w._handle_event(self.event("die", exit_code=137))
-        self.w._handle_event(self.event("stop"))
+    def test_stop_first_suppresses_forced_exit(self):
+        self.wd._handle_event(self.event("stop"))
+        self.wd._handle_event(self.event("die", 137))
         self.resolve()
-        self.assertEqual(len(self.alerts), 1)
-        self.assertEqual(self.alerts[0].severity, "INFO")
-        self.assertEqual(self.alerts[0].failure_type, "docker-stop")
-        self.assertEqual(self.w.state.get("svc").alerted_for, "")
+        self.assertEqual(self.reasons(), [])
 
-    def test_direct_docker_kill_is_critical(self):
-        self.w._handle_event(self.event("kill", signal=9))
-        self.w._handle_event(self.event("die", exit_code=137))
-        self.resolve(force=True)
-        self.assertEqual(len(self.alerts), 1)
-        self.assertEqual(self.alerts[0].failure_type, "crashed")
-        self.assertEqual(self.alerts[0].severity, "CRITICAL")
-        self.assertIn("OOM", self.alerts[0].recommended_action)
-
-    def test_unexpected_nonzero_exit_is_critical(self):
-        self.w._handle_event(self.event("die", exit_code=1))
-        self.resolve(force=True)
-        self.assertEqual([a.failure_type for a in self.alerts], ["crashed"])
-
-    def test_exit_zero_no_alert(self):
-        self.w._handle_event(self.event("die", exit_code=0))
-        self.resolve(force=True)
-        self.assertEqual(self.alerts, [])
-
-    def test_oom_before_die_only_oom(self):
-        self.w._handle_event(self.event("oom"))
-        self.w._handle_event(self.event("die", exit_code=137))
-        self.resolve(force=True)
-        self.assertEqual([a.failure_type for a in self.alerts], ["oom"])
-
-    def test_oom_after_die_only_oom_and_no_stale_marker(self):
-        self.w._handle_event(self.event("die", exit_code=137))
-        self.w._handle_event(self.event("oom"))
+    def test_direct_kill_without_stop_is_a_crash(self):
+        self.wd._handle_event(self.event("die", 137))
         self.resolve()
-        self.assertEqual([a.failure_type for a in self.alerts], ["oom"])
-        self.assertEqual(self.w._oom_containers, set())
+        self.assertEqual(self.reasons(), ["crashed"])
+        self.assertNotIn("likely OOM", self.alerts[0].recommended_action)
 
-    def test_established_restart_loop_suppresses_die(self):
-        self.w.state.get("svc").alerted_for = "restart-loop"
-        self.w._handle_event(self.event("die", exit_code=1))
-        self.resolve(force=True)
-        self.assertEqual(self.alerts, [])
+    def test_nonzero_exit_without_stop_is_a_crash(self):
+        self.wd._handle_event(self.event("die", 2))
+        self.resolve()
+        self.assertEqual(self.reasons(), ["crashed"])
 
-    def test_expected_running_alerts_after_grace(self):
-        self.w._expected_running = {"svc"}
-        self.w._check_expected_running({"svc": "exited"}, now=100)
-        self.w._check_expected_running({"svc": "exited"}, now=219)
-        self.assertEqual(self.alerts, [])
-        self.w._check_expected_running({"svc": "exited"}, now=220)
-        self.assertEqual([a.failure_type for a in self.alerts], ["not-running"])
-        self.w._check_expected_running({"svc": "exited"}, now=250)
-        self.assertEqual(len(self.alerts), 1)
-        self.w._check_expected_running({"svc": "running"}, now=251)
-        self.w._maybe_alert_recovery(self.container, self.w.state.get("svc"))
-        self.assertEqual([a.failure_type for a in self.alerts],
-                         ["not-running", "recovered"])
+    def test_clean_exit_is_not_a_crash(self):
+        self.wd._handle_event(self.event("die", 0))
+        self.resolve()
+        self.assertEqual(self.reasons(), [])
 
-    def test_expected_running_missing_container_alerts(self):
-        self.w._expected_running = {"svc"}
-        self.w._check_expected_running({}, now=100)
-        self.w._check_expected_running({}, now=230)
-        self.assertEqual(self.alerts[0].failure_type, "not-running")
-        self.assertIn("missing", self.alerts[0].probe_detail)
+    def test_oom_before_die_no_duplicate(self):
+        self.wd._handle_event(self.event("oom"))
+        self.wd._handle_event(self.event("die", 137))
+        self.resolve()
+        self.assertEqual(self.reasons(), ["oom"])
 
-    def test_expected_running_does_not_duplicate_open_crash(self):
-        self.w._expected_running = {"svc"}
-        self.w.state.get("svc").alerted_for = "crashed"
-        self.w._check_expected_running({"svc": "exited"}, now=100)
-        self.w._check_expected_running({"svc": "exited"}, now=230)
-        self.assertEqual(self.alerts, [])
+    def test_oom_after_die_no_duplicate_or_stale_marker(self):
+        self.wd._handle_event(self.event("die", 137))
+        self.wd._handle_event(self.event("oom"))
+        self.resolve()
+        self.assertEqual(self.reasons(), ["oom"])
+        self.assertEqual(self.wd._oom_containers, set())
+
+    def test_pending_die_does_not_erase_active_restart_loop(self):
+        state = self.wd.state.get("svc")
+        state.alerted_for = "restart-loop"
+        self.wd._handle_event(self.event("die", 2))
+        self.resolve()
+        self.assertEqual(self.reasons(), [])
+        self.assertEqual(state.alerted_for, "restart-loop")
+
+    def test_multiple_pending_dies_still_one_crash(self):
+        for _ in range(4):
+            self.wd._handle_event(self.event("die", 2))
+        self.resolve()
+        self.assertEqual(self.reasons(), ["crashed"])
+
+    def test_pending_death_from_replaced_container_is_ignored(self):
+        self.wd._handle_event(self.event("die", 137))
+        new = FakeContainer(cid=OTHER)
+        self.wd._sync_container_identity(self.wd.state.get("svc"), new)
+        self.resolve()
+        self.assertEqual(self.reasons(), [])
+
+    def test_delayed_old_event_after_recovery_is_ignored(self):
+        state = self.wd.state.get("svc")
+        state.last_recovery_time = time.time()
+        self.wd._handle_event(self.event("die", 2, timeNano=int((time.time()-5)*1e9)))
+        self.resolve()
+        self.assertEqual(self.reasons(), [])
+
+    def test_stop_evidence_skips_container_lookup(self):
+        self.wd.client.containers.get = Mock(side_effect=AssertionError("unexpected inspect"))
+        self.wd._handle_event(self.event("stop"))
+        self.wd.client.containers.get.assert_not_called()
+
+    def test_lifecycle_can_be_disabled(self):
+        self.wd._lifecycle_enabled = False
+        self.wd._handle_event(self.event("die", 2))
+        self.assertEqual(self.reasons(), ["crashed"])
+
+    def test_event_subscription_does_not_need_kill(self):
+        events = []
+        self.wd._stop_event = threading.Event()
+        self.wd.client.events = lambda **kw: events.append(kw) or iter([])
+        self.wd._event_listener()
+        filters = events[0]["filters"]["event"]
+        self.assertIn("start", filters)
+        self.assertIn("stop", filters)
+        self.assertNotIn("kill", filters)
 
 
 if __name__ == "__main__":

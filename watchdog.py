@@ -88,16 +88,10 @@ DEFAULT_CONFIG = {
     "cooldown_minutes": 5,
     "restart_threshold": 5,
     "restart_window_minutes": 10,
+    "restart_recovery_stability_seconds": 120,  # prevent false recovery between restarts
+    "lifecycle_detection": {"enabled": True, "correlation_window_seconds": 3},
     "unhealthy_cycles_threshold": 3,
     "alert_on_recovery": True,
-    "lifecycle_detection": {
-        "enabled": True,
-        "correlation_window_seconds": 3,
-        "notify_on_docker_stop": False,
-        "log_forced_stop_warning": True,
-    },
-    "expected_running_containers": [],
-    "expected_running_grace_seconds": 120,
     "excluded_containers": [],
     "ignored_container_events": [
         {
@@ -163,14 +157,19 @@ def _host_boot_time() -> int:
 
 
 class ContainerState:
-    __slots__ = ("name", "lock", "unhealthy_cycles", "restart_times", "last_alert_time",
-                 "alerted_for", "last_restart_count")
+    __slots__ = ("name", "lock", "unhealthy_cycles", "restart_times",
+                 "last_restart_count", "last_restart_poll_at", "last_failure_time",
+                 "last_recovery_time", "last_container_id", "last_alert_time", "alerted_for")
 
     def __init__(self, name: str):
         self.name = name
         self.lock = threading.Lock()  # event thread and poll thread both mutate this
         self.unhealthy_cycles: int = 0
-        self.restart_times: list[float] = []
+        self.restart_times: list[float] = []  # counter increments observed via Docker inspect
+        self.last_restart_poll_at: float = 0.0
+        self.last_failure_time: float = 0.0
+        self.last_recovery_time: float = 0.0
+        self.last_container_id: str = ""
         self.last_alert_time: float = 0.0
         self.alerted_for: str = ""
         self.last_restart_count: int = -1  # -1 = no baseline taken yet
@@ -245,6 +244,7 @@ class WatchdogState:
                         containers[st.name] = {
                             "alerted_for": st.alerted_for,
                             "last_alert_time": st.last_alert_time,
+                            "container_id": st.last_container_id,
                         }
             record = {
                 "version": _STATE_VERSION,
@@ -281,10 +281,6 @@ def _probe_type_label(detail: str) -> str:
         return "Docker event (crash)"
     if detail.startswith("OOM probe failed"):
         return "Docker event (OOM)"
-    if detail.startswith("Docker stop event confirmed"):
-        return "Docker event (stop)"
-    if detail.startswith("Expected-running container"):
-        return "Docker state (poll)"
     if detail.startswith("Restart-loop probe failed"):
         return "Restart-loop tracking"
     return ""
@@ -297,8 +293,6 @@ def _default_probe_type(failure_type: str) -> str:
         "oom":          "Docker event (OOM)",
         "unhealthy":    "Docker HEALTHCHECK",
         "restart-loop": "Restart-loop tracking",
-        "docker-stop":  "Docker event (stop)",
-        "not-running":  "Docker state (poll)",
     }.get(failure_type, "")
 
 
@@ -982,8 +976,7 @@ ACTIONS = {
     "crashed": (
         "CRITICAL",
         "Check exit code and logs. Run: docker logs <name> --tail 50. "
-        "Exit 137 means SIGKILL, not necessarily OOM. Check OOMKilled and "
-        "Docker kill/stop/oom events before adjusting memory limits.",
+        "Exit 137 means SIGKILL, not necessarily OOM. Check Docker stop/oom events and OOMKilled.",
     ),
     "oom": (
         "CRITICAL",
@@ -997,17 +990,8 @@ ACTIONS = {
     ),
     "restart-loop": (
         "HIGH",
-        "Container is in a restart loop. Check logs for crash reason. "
-        "Consider increasing RestartSec or investigating root cause.",
-    ),
-    "docker-stop": (
-        "INFO",
-        "Docker requested a stop. Check whether the service was expected to stop.",
-    ),
-    "not-running": (
-        "CRITICAL",
-        "A designated always-running container is stopped or missing. Confirm "
-        "maintenance, inspect container events, and restore the service.",
+        "Container is repeatedly restarting. Inspect docker logs and the "
+        "restart policy; fix application crash, OOM, or dependency failure.",
     ),
     "recovered": (
         "INFO",
@@ -1240,6 +1224,42 @@ def record_alert(state: ContainerState, failure_type: str) -> None:
     state.alerted_for = failure_type
 
 
+# ── Docker restart policy / uptime helpers ────────────────────────────────────
+def has_automatic_restart_policy(container) -> bool:
+    """Only restart-policy containers need crash-cycle coalescing."""
+    try:
+        policy = container.attrs.get("HostConfig", {}).get("RestartPolicy", {}).get("Name", "")
+        return policy in ("always", "unless-stopped", "on-failure")
+    except (AttributeError, TypeError):
+        return False
+
+
+def container_started_timestamp(container) -> float | None:
+    """Docker's State.StartedAt, parsed as an aware UTC timestamp."""
+    try:
+        started = container.attrs.get("State", {}).get("StartedAt", "")
+        if not started or started.startswith("0001-"):
+            return None
+        dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def docker_event_timestamp(event: dict) -> float | None:
+    """Use the Docker occurrence time, not the receipt time, if supplied."""
+    try:
+        if event.get("timeNano"):
+            return float(event["timeNano"]) / 1_000_000_000
+        if event.get("time"):
+            return float(event["time"])
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return None
+
+
 # ── Core watchdog logic ───────────────────────────────────────────────────────
 class Watchdog:
     def __init__(self, cfg: dict):
@@ -1253,32 +1273,25 @@ class Watchdog:
         self._excluded: set[str] = set(cfg.get("excluded_containers") or [])
         self._restart_threshold   = cfg.get("restart_threshold", 5)
         self._restart_window_secs = cfg.get("restart_window_minutes", 10) * 60
+        self._restart_recovery_stability_secs = max(
+            0, int(cfg.get("restart_recovery_stability_seconds", 120)))
         self._unhealthy_threshold = cfg.get("unhealthy_cycles_threshold", 3)
         self._cooldown_minutes    = cfg.get("cooldown_minutes", 5)
         self._ignored_events: list[dict] = cfg.get("ignored_container_events") or []
         self._discovered_checks: dict[str, dict | None] = {}  # auto-discovery cache
         self._oom_containers: set[str] = set()  # suppress die alert when oom already fired
-        _lcfg = cfg.get("lifecycle_detection") or {}
-        self._lifecycle_cfg = _lcfg if isinstance(_lcfg, dict) else {}
-        self._lifecycle_enabled = bool(self._lifecycle_cfg.get("enabled", True))
+        self._missing_events: dict[str, tuple[float, set[str]]] = {}
+        lc = cfg.get("lifecycle_detection") or {}
+        self._lifecycle_enabled = lc.get("enabled", True) is True
         try:
-            _window = float(self._lifecycle_cfg.get("correlation_window_seconds", 3))
+            window = float(lc.get("correlation_window_seconds", 3))
+            if not 0.5 <= window <= 30:
+                raise ValueError("out of range")
         except (TypeError, ValueError):
-            _window = 3.0
-        if not 0.5 <= _window <= 30.0:
-            log.warning("Invalid lifecycle correlation window %r; using 3 seconds", _window)
-            _window = 3.0
-        self._lifecycle = DockerLifecycleCorrelator(_window)
+            log.warning("Invalid lifecycle correlation window; using 3 seconds")
+            window = 3.0
+        self._lifecycle = DockerLifecycleCorrelator(window)
         self._lifecycle_wake = threading.Event()
-        _expected = cfg.get("expected_running_containers") or []
-        self._expected_running = (set(str(n) for n in _expected if n)
-                                  if isinstance(_expected, list) else set())
-        self._expected_running.difference_update(self._excluded)
-        try:
-            self._expected_running_grace = max(0, int(cfg.get("expected_running_grace_seconds", 120)))
-        except (TypeError, ValueError):
-            self._expected_running_grace = 120
-        self._expected_down_since: dict[str, float] = {}
         self._auto_cfg: dict = cfg.get("auto_health_check", {})
         _manual = cfg.get("container_health_checks") or {}
         self._manual_checks: dict = _manual if isinstance(_manual, dict) else {}
@@ -1306,6 +1319,7 @@ class Watchdog:
                 continue
             st = self.state.get(str(name))
             st.alerted_for = failure_type
+            st.last_container_id = str(entry.get("container_id") or "")
             # unhealthy_cycles and restart_times stay at zero on purpose: they are
             # rolling observation windows, and a stale count would alert instantly.
             try:
@@ -1332,6 +1346,10 @@ class Watchdog:
     def _claim_alert(self, state: ContainerState, failure_type: str) -> bool:
         """Atomically take the alert slot so both threads cannot fire the same alert."""
         with state.lock:
+            if state.alerted_for == "restart-loop":
+                # One incident, one loop notification until sustained recovery,
+                # including after the normal cooldown has elapsed.
+                return False
             if not should_alert(state, failure_type, self._cooldown_minutes):
                 return False
             record_alert(state, failure_type)
@@ -1410,15 +1428,65 @@ class Watchdog:
         )
         dispatch_alert(payload, self.cfg)
 
+    def _sync_container_identity(self, state: ContainerState, container) -> None:
+        """Keep incidents scoped to a Docker instance, not a reusable name."""
+        cid = getattr(container, "id", "") or ""
+        if not cid:
+            return
+        changed = False
+        with state.lock:
+            previous_id = state.last_container_id
+            if previous_id and previous_id != cid:
+                changed = True
+                # Do not suppress a new instance's crash because the old
+                # instance had an open crash/loop/unhealthy incident.
+                log.info("%s: replaced Docker instance %s -> %s; resetting incident",
+                         state.name, previous_id[:12], cid[:12])
+                state.unhealthy_cycles = 0
+                state.restart_times.clear()
+                state.last_restart_count = -1
+                state.last_restart_poll_at = 0.0
+                state.last_failure_time = 0.0
+                state.last_recovery_time = 0.0
+                state.alerted_for = ""
+                state.last_alert_time = 0.0
+            state.last_container_id = cid
+        if changed:
+            # Docker names are reusable; cached probes and OOM pairing are not.
+            self._discovered_checks.pop(state.name, None)
+            self._oom_containers.discard(state.name)
+
     # ── Recovery alert ─────────────────────────────────────────────────────────
     def _maybe_alert_recovery(self, container, state: ContainerState) -> None:
-        """Clear resolved state and optionally fire a one-time RECOVERED alert."""
+        """Resolve once stable; a brief RUNNING state is not loop recovery."""
+        automatic = has_automatic_restart_policy(container)
+        started = container_started_timestamp(container)
+        now = time.time()
         with state.lock:
             previous = state.alerted_for
             if not previous or previous == "recovered":
                 return
+            # Once a restart-loop was reported, changing Docker's restart
+            # policy must not bypass the stability period.
+            if previous == "restart-loop" or (automatic and previous in ("crashed", "oom")):
+                stability = self._restart_recovery_stability_secs
+                # If we cannot prove continuous uptime, don't clear a real incident.
+                if started is None or now - started < stability:
+                    return
+                if state.last_failure_time and now - state.last_failure_time < stability:
+                    return
+                # A resolved loop must not re-alert from restarts still in the
+                # rolling 10-minute window. Start a fresh episode on next failure.
+                state.restart_times.clear()
+                state.last_restart_poll_at = now
+                try:
+                    state.last_restart_count = int(container.attrs.get("RestartCount", 0) or 0)
+                except (TypeError, ValueError):
+                    state.last_restart_count = -1
+                state.last_failure_time = 0.0
             state.alerted_for = ""
-            state.last_alert_time = time.time()
+            state.last_alert_time = now
+            state.last_recovery_time = now
         self.state.save(self._boot_time)
         if not self.cfg.get("alert_on_recovery", True):
             log.info("%s recovered from %s — recovery notification disabled",
@@ -1428,9 +1496,81 @@ class Watchdog:
                                  probe_detail=f"Recovered from '{previous}'")
         self._dispatch(payload)
 
-    # ── Docker lifecycle correlation ────────────────────────────────────────
+
+    def _process_die(self, container, state: ContainerState, name: str,
+                     exit_code: int | None, event_time: float | None) -> None:
+        """Existing PR #5 incident rules: the ONLY place that emits a die/crash."""
+        # Consume paired OOM/die events, but never count event deliveries
+        # as restarts: Docker RestartCount is authoritative.
+        oom_die = name in self._oom_containers
+        if oom_die:
+            self._oom_containers.discard(name)
+        automatic = has_automatic_restart_policy(container)
+        if exit_code != 0:
+            with state.lock:
+                failure_at = event_time if event_time is not None else time.time()
+                state.last_failure_time = max(state.last_failure_time, failure_at)
+                previous = state.alerted_for
+        else:
+            with state.lock:
+                previous = state.alerted_for
+
+        if previous == "restart-loop":
+            log.info("%s: die event during active restart-loop — suppressing crashed alert", name)
+            return
+
+        # OOM kills also emit a die; count the restart above but do not
+        # downgrade the OOM incident into a redundant crashed alert.
+        if oom_die:
+            log.info("%s: die event follows OOM — suppressing duplicate crashed alert", name)
+            return
+
+        if exit_code == 0:
+            log.info("%s exited cleanly (code 0) — no crashed alert", name)
+            return
+
+        if exit_code == 137:
+            log.warning("%s: exit 137 (SIGKILL) without a confirmed Docker stop; "
+                        "check OOMKilled and Docker event history", name)
+        # One CRASH for the initial incident; subsequent crashes coalesce
+        # until restart-loop escalation or sustained recovery.
+        if previous == "crashed" or (automatic and previous == "oom"):
+            log.debug("%s: additional die within open %s incident — suppressing",
+                      name, previous)
+            return
+        if self._claim_alert(state, "crashed"):
+            payload = build_payload(
+                container, "crashed", self.host, self.runbook_base, exit_code,
+                probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
+            self._dispatch(payload)
+
+    def _resolve_lifecycle_death(self, death) -> None:
+        state = self.state.get(death.name)
+        with state.lock:
+            # A replacement using the same name must never inherit the old death.
+            replaced = bool(state.last_container_id and
+                            state.last_container_id != death.container_id)
+            stale = bool(death.event_time is not None and state.last_recovery_time
+                         and death.event_time <= state.last_recovery_time)
+        if replaced or stale:
+            log.debug("%s: discard outdated pending death (replaced=%s stale=%s)",
+                      death.name, replaced, stale)
+            return
+        if death.oom:
+            log.debug("%s: die matched OOM; no duplicate CRASH", death.name)
+            return
+        if death.stopped:
+            if death.exit_code == 137:
+                log.warning("%s: Docker-requested stop ended with SIGKILL (137), "
+                            "not proof of OOM", death.name)
+            else:
+                log.info("%s: Docker-requested stop (exit %s)", death.name, death.exit_code)
+            return
+        self._process_die(death.container, state, death.name, death.exit_code,
+                          death.event_time)
+
     def _lifecycle_worker(self) -> None:
-        """Deliver queued deaths after a short window without blocking events."""
+        """Resolve bounded stop/die evidence outside the Docker event reader."""
         while not self._stop_event.is_set():
             self._lifecycle_wake.wait(0.2)
             self._lifecycle_wake.clear()
@@ -1438,61 +1578,14 @@ class Watchdog:
                 try:
                     self._resolve_lifecycle_death(death)
                 except Exception:
-                    log.exception("Failed to resolve Docker death event for %s", death.name)
-
-    def _emit_crash(self, container, name: str, exit_code: int | None,
-                    observed_signals: tuple[str, ...] = ()) -> None:
-        state = self.state.get(name)
-        if state.alerted_for == "restart-loop":
-            log.info("%s: die during restart-loop — suppressing redundant crash", name)
-            return
-        if exit_code == 0:
-            log.info("%s exited cleanly (code 0) — no alert", name)
-            return
-        if exit_code == 137:
-            log.warning("%s: exit 137 (SIGKILL) without matching Docker stop/oom; "
-                        "inspect OOMKilled and recent Docker events. signals=%s",
-                        name, observed_signals or "none")
-        if self._claim_alert(state, "crashed"):
-            reason = (f"no matching Docker stop/oom event within {self._lifecycle.window:g}s"
-                      if self._lifecycle_enabled else "lifecycle correlation disabled")
-            detail = (f"Crash probe failed - container exited with code {exit_code}; "
-                      f"{reason}; observed kill signals: "
-                      f"{', '.join(observed_signals) or 'none'}")
-            payload = build_payload(container, "crashed", self.host,
-                                    self.runbook_base, exit_code, probe_detail=detail)
-            self._dispatch(payload)
-
-    def _resolve_lifecycle_death(self, death) -> None:
-        if death.oom:
-            log.info("%s: die correlated with OOM — no duplicate crash", death.name)
-            return
-        signals = ", ".join(death.signals) or "none"
-        if death.stopped:
-            detail = (f"Docker stop event confirmed; exit code {death.exit_code}; "
-                      f"observed kill signals: {signals}. "
-                      "This confirms a Docker-requested stop, not authorization.")
-            if death.exit_code == 137 and self._lifecycle_cfg.get("log_forced_stop_warning", True):
-                log.warning("%s: Docker-requested stop ended with SIGKILL (exit 137); "
-                            "the application may not handle graceful shutdown; signals=%s",
-                            death.name, signals)
-            else:
-                log.info("%s: Docker-requested stop; exit=%s signals=%s",
-                         death.name, death.exit_code, signals)
-            if self._lifecycle_cfg.get("notify_on_docker_stop", False):
-                payload = build_payload(death.container, "docker-stop", self.host,
-                                        self.runbook_base, death.exit_code,
-                                        probe_detail=detail)
-                self._dispatch(payload)
-            return
-        self._emit_crash(death.container, death.name, death.exit_code, death.signals)
+                    log.exception("Failed to handle pending death for %s", death.name)
 
     # ── Event stream listener ─────────────────────────────────────────────────
     def _event_listener(self) -> None:
         log.info("Docker event listener started")
         events = ["die", "oom", "health_status"]
         if self._lifecycle_enabled:
-            events += ["stop", "kill", "start"]
+            events += ["stop", "start"]
         filters = {"type": "container", "event": events}
         try:
             for event in self.client.events(decode=True, filters=filters):
@@ -1506,75 +1599,133 @@ class Watchdog:
                 threading.Thread(target=self._event_listener, daemon=True).start()
 
     def _handle_event(self, event: dict) -> None:
-        action = event.get("Action", "")
-        actor = event.get("Actor") or {}
-        attributes = actor.get("Attributes") or {}
-        name = attributes.get("name", "unknown")
-        container_id = str(actor.get("ID") or event.get("id") or event.get("ID") or "")
+        action     = event.get("Action", "")
+        attributes = event.get("Actor", {}).get("Attributes", {})
+        name       = attributes.get("name", "unknown")
 
         if name in self._excluded:
             return
+
         log.debug("Docker event: %s on %s", action, name)
 
-        # Stop/kill can occur after the container has disappeared from Docker's
-        # API. Record them BEFORE attempting a container lookup.
-        if action in ("stop", "kill", "start"):
-            if self._lifecycle_enabled:
-                self._lifecycle.record(action, container_id,
-                                       signal=attributes.get("signal", ""))
-                self._lifecycle_wake.set()
+        # Start and stop are evidence, not incidents; even removed containers
+        # can produce these events, so do not inspect them through Docker.
+        if action in ("start", "stop") and self._lifecycle_enabled:
+            cid = event.get("Actor", {}).get("ID") or event.get("id")
+            self._lifecycle.record(action, cid)
+            self._lifecycle_wake.set()
+            return
+
+        # Keep recent missing IDs so late events do not repeatedly hit Docker.
+        # An ID-less legacy event must still be looked up: its name can be reused.
+        container_id = event.get("Actor", {}).get("ID") or event.get("id")
+        cache_key = container_id or f"name:{name}"
+        now = time.monotonic()
+        missing = self._missing_events.get(cache_key)
+        if missing is not None and now - missing[0] >= 60:
+            self._missing_events.pop(cache_key)
+            missing = None
+
+        if container_id and missing is not None:
+            if action not in missing[1]:
+                missing[1].add(action)
+                log.warning("Container %s (%s) already removed before %s event could be processed",
+                            name, container_id, action)
             return
 
         try:
             container = self.client.containers.get(container_id or name)
         except docker.errors.NotFound:
-            log.warning("Container %s not found for event %s", name, action)
+            if missing is None:
+                missing = (now, set())
+                self._missing_events[cache_key] = missing
+                # Insertion-ordered dict: evict the oldest entry even during a burst.
+                if len(self._missing_events) > 1024:
+                    self._missing_events.pop(next(iter(self._missing_events)))
+            if action not in missing[1]:
+                missing[1].add(action)
+                log.warning("Container %s (%s) already removed before %s event could be processed",
+                            name, container_id or "unknown ID", action)
+            return
+
+        # Events may carry the previous name of a renamed container. Incident
+        # tracking, recovery, OOM suppression, and probe caches use the name
+        # reported by the resolved container, consistent with the poll loop.
+        name = container.name
+        if name in self._excluded:
+            return
+        # A late event from a removed instance must not be attributed to the
+        # replacement currently occupying the same name.
+        event_id = event.get("Actor", {}).get("ID") or event.get("id")
+        if event_id and getattr(container, "id", "") != event_id:
+            log.debug("%s: stale %s event belongs to a different container ID", name, action)
             return
 
         if is_ignored_container_event(container, attributes, action, self._ignored_events):
             log.info("%s: ignoring Docker %s event due to configured label rule", name, action)
             return
+
         state = self.state.get(name)
+        self._sync_container_identity(state, container)
+
+        event_time = docker_event_timestamp(event)
+        if action in ("die", "oom", "health_status: unhealthy") and event_time is not None:
+            with state.lock:
+                stale = bool(state.last_recovery_time and event_time <= state.last_recovery_time)
+            if stale:
+                log.debug("%s: ignoring delayed %s event from before recovery", name, action)
+                return
 
         if action == "die":
-            self._discovered_checks.pop(name, None)
-            # Keep existing deduplication for OOM and established restart loops.
-            if name in self._oom_containers:
-                self._oom_containers.discard(name)
-                log.info("%s: die follows OOM — suppressing duplicate crash", name)
-                return
-            if state.alerted_for == "restart-loop":
-                log.info("%s: die during restart loop — suppressing duplicate crash", name)
-                return
+            self._discovered_checks.pop(name, None)  # clear cache — container may restart
+            exit_code_str = attributes.get("exitCode", "0")
             try:
-                exit_code = int(attributes.get("exitCode", "0"))
+                exit_code = int(exit_code_str)
             except (ValueError, TypeError):
                 exit_code = None
+
             if is_kvision_mariadb_dump_helper_crash(container, attributes, exit_code):
                 log.info(
-                    "%s: Suppressing expected Cyber Controller SQL dump syntax-check "
-                    "container termination (image=%s, AutoRemove=true, mount=%s, exit=137)",
+                    "%s: Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert "
+                    "(image=%s, AutoRemove=True, mount=%s, exit_code=137)",
                     name, _KVISION_MARIADB_DUMP_HELPER_IMAGE, _KVISION_MARIADB_DUMP_MOUNT,
                 )
                 return
-            if self._lifecycle_enabled and container_id:
+
+            if self._lifecycle_enabled and container_id and exit_code not in (0, None):
+                # Record failure time immediately so a concurrent poll cannot
+                # declare stable recovery while this die is awaiting stop evidence.
+                with state.lock:
+                    failed_at = event_time if event_time is not None else time.time()
+                    state.last_failure_time = max(state.last_failure_time, failed_at)
                 self._lifecycle.record("die", container_id, name=name,
-                                       container=container, exit_code=exit_code)
+                                       container=container, exit_code=exit_code,
+                                       event_time=event_time)
                 self._lifecycle_wake.set()
-            else:
-                self._emit_crash(container, name, exit_code)
+                return
+            self._process_die(container, state, name, exit_code, event_time)
 
         elif action == "oom":
-            # OOM takes precedence over a pending crash even if events are reordered.
-            matched_pending = False
-            if self._lifecycle_enabled:
-                matched_pending = self._lifecycle.record("oom", container_id)
+            failure_type = "oom"
+            with state.lock:
+                if has_automatic_restart_policy(container):
+                    failure_at = event_time if event_time is not None else time.time()
+                    state.last_failure_time = max(state.last_failure_time, failure_at)
+                active_loop = state.alerted_for == "restart-loop"
+            # A late OOM paired to pending die must not leave a marker that
+            # accidentally suppresses the next, unrelated die event.
+            matched_pending = (self._lifecycle.record("oom", container_id)
+                               if self._lifecycle_enabled and container_id else False)
+            if matched_pending:
                 self._lifecycle_wake.set()
-            # A late OOM attached to a queued die must not suppress the NEXT die.
-            if not matched_pending:
+            else:
                 self._oom_containers.add(name)
-            if self._claim_alert(state, "oom"):
-                payload = build_payload(container, "oom", self.host, self.runbook_base,
+            if active_loop:
+                log.info("%s: OOM during active restart-loop — suppressing per-cycle OOM alert", name)
+                return
+            if self._claim_alert(state, failure_type):
+                payload = build_payload(container, failure_type, self.host,
+                                        self.runbook_base,
                                         extra_context=get_memory_stats(container),
                                         probe_detail="OOM probe failed - container was OOM-killed by the kernel")
                 self._dispatch(payload)
@@ -1585,6 +1736,10 @@ class Watchdog:
                 cycles = state.unhealthy_cycles
             threshold = self._unhealthy_threshold
             log.debug("%s unhealthy cycle %d/%d", name, cycles, threshold)
+            with state.lock:
+                active_loop = state.alerted_for == "restart-loop"
+            if active_loop:
+                return  # keep the primary incident until sustained recovery
             if cycles >= threshold:
                 failure_type = "unhealthy"
                 if self._claim_alert(state, failure_type):
@@ -1600,34 +1755,6 @@ class Watchdog:
                     log.info("%s recovered — resetting unhealthy counter", name)
                 state.unhealthy_cycles = 0
             self._maybe_alert_recovery(container, state)
-
-    def _check_expected_running(self, observed: dict[str, str], now: float) -> None:
-        """Opt-in check: planned maintenance must not hide prolonged downtime."""
-        for name in sorted(self._expected_running):
-            status = observed.get(name, "missing")
-            if status in ("running", "unknown"):
-                self._expected_down_since.pop(name, None)
-                continue
-            down_since = self._expected_down_since.setdefault(name, now)
-            if now - down_since < self._expected_running_grace:
-                continue
-            state = self.state.get(name)
-            with state.lock:
-                open_reason = state.alerted_for
-            if open_reason and open_reason not in ("recovered", "not-running"):
-                # A crash/OOM/health alert already describes this outage.
-                continue
-            if self._claim_alert(state, "not-running"):
-                payload = AlertPayload(
-                    severity="CRITICAL", container_name=name, container_id="",
-                    host=self.host, failure_type="not-running",
-                    exit_code=None, log_tail="",
-                    recommended_action=ACTIONS["not-running"][1],
-                    runbook_url=self.runbook_base,
-                    probe_detail=(f"Expected-running container is {status}; "
-                                  f"not running for at least {self._expected_running_grace}s."),
-                )
-                self._dispatch(payload)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
     def _poll_loop(self) -> None:
@@ -1647,7 +1774,6 @@ class Watchdog:
         unhealthy_threshold = self._unhealthy_threshold
         now                 = time.time()
         seen_names: set[str] = set()
-        observed_statuses: dict[str, str] = {}
 
         for container in self.client.containers.list(all=True):
             name = container.name
@@ -1658,13 +1784,12 @@ class Watchdog:
             try:
                 container.reload()
             except Exception:
-                observed_statuses[name] = "unknown"
                 continue
 
-            observed_statuses[name] = container.status
             status = container.status               # running, exited, restarting, etc.
             health = self._get_health(container)    # healthy, unhealthy, none
             state  = self.state.get(name)
+            self._sync_container_identity(state, container)
 
             # Restart tracking reads Docker's RestartCount rather than counting
             # polls that observe status == "restarting": one slow restart seen on
@@ -1676,16 +1801,23 @@ class Watchdog:
                 restart_count = 0
 
             with state.lock:
-                state.restart_times = [t for t in state.restart_times
-                                       if now - t < restart_window]
+                state.restart_times = [
+                    t for t in state.restart_times if now - t < restart_window
+                ]
                 if state.last_restart_count < 0 or restart_count < state.last_restart_count:
-                    # First sighting, or the container was recreated (count resets):
-                    # take a baseline instead of alerting on history we never saw.
-                    state.last_restart_count = restart_count
+                    # First observation or counter reset: do not count history.
+                    state.restart_times.clear()
                 elif restart_count > state.last_restart_count:
-                    new_restarts = restart_count - state.last_restart_count
-                    state.restart_times.extend([now] * min(new_restarts, restart_threshold))
-                    state.last_restart_count = restart_count
+                    if state.last_restart_poll_at and now - state.last_restart_poll_at < restart_window:
+                        delta = restart_count - state.last_restart_count
+                        state.restart_times.extend([now] * min(delta, restart_threshold))
+                    else:
+                        # A long pause makes the age of increments unknowable.
+                        # Baseline rather than risking a false 10-minute loop.
+                        log.info("%s: skipping %d restarts after polling gap",
+                                 name, restart_count - state.last_restart_count)
+                state.last_restart_count = restart_count
+                state.last_restart_poll_at = now
                 restarts = len(state.restart_times)
 
             if restarts >= restart_threshold:
@@ -1705,7 +1837,9 @@ class Watchdog:
                 with state.lock:
                     state.unhealthy_cycles += 1
                     cycles = state.unhealthy_cycles
-                if cycles >= unhealthy_threshold:
+                with state.lock:
+                    active_loop = state.alerted_for == "restart-loop"
+                if cycles >= unhealthy_threshold and not active_loop:
                     failure_type = "unhealthy"
                     if self._claim_alert(state, failure_type):
                         probe_detail = get_docker_health_log(container) or "Docker health probe failed - health_status: unhealthy (poll-detected)"
@@ -1737,7 +1871,9 @@ class Watchdog:
                         "%s: health check failed — cycle %d/%d",
                         name, cycles, unhealthy_threshold,
                     )
-                    if cycles >= unhealthy_threshold:
+                    with state.lock:
+                        active_loop = state.alerted_for == "restart-loop"
+                    if cycles >= unhealthy_threshold and not active_loop:
                         failure_type = "unhealthy"
                         if self._claim_alert(state, failure_type):
                             payload = build_payload(container, failure_type,
@@ -1749,21 +1885,15 @@ class Watchdog:
                         if state.unhealthy_cycles > 0:
                             log.info("%s: check recovered — resetting counters", name)
                         state.unhealthy_cycles = 0
-                        # restart_times ages out on its own. Clearing it here would
-                        # declare recovery for a container merely caught healthy
-                        # between two crashes of an ongoing restart loop.
-                        still_looping = (state.alerted_for == "restart-loop"
-                                         and len(state.restart_times) >= restart_threshold)
-                    if not still_looping:
-                        self._maybe_alert_recovery(container, state)
+                        # Recovery is gated on continuous Docker uptime below,
+                        # not on whether the last poll happened to see RUNNING.
+                    self._maybe_alert_recovery(container, state)
 
             else:
                 log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
 
         # During the post-reboot window a restored container may not exist yet —
         # keep its open alert so the recovery still fires once it comes back.
-        self._check_expected_running(observed_statuses, time.monotonic())
-        seen_names.update(self._expected_running)
         self.state.cleanup_stale(seen_names, retain_open=bool(self._grace_until))
         # Clean up discovery cache for containers no longer running
         for _name in self._discovered_checks.keys() - seen_names:
