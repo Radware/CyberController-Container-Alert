@@ -251,7 +251,7 @@ syslog:
 ```
 
 Syslog is an **alert and error stream**, not a per-poll health feed. It sends
-one structured, single-line event="container_alert" record per emitted incident
+one structured, single-line event="watchdog_alert" record per emitted incident
 (including INFO recoveries and reboot summaries), plus watchdog ERROR/CRITICAL
 diagnostics. Routine INFO/WARNING polling messages stay local; per-container
 poll output is available at log_level: DEBUG. The alert records include the
@@ -260,6 +260,10 @@ with special previous/new active-node fields for HA. The syslog priority is
 CRITICAL=2, HIGH=3 (error), WARNING=4 and INFO=6; the facility remains
 configurable. Values are quoted, escaped and length-limited for ingestion.
 Syslog is configured independently from alert_channels.
+Local log_level controls only console/file verbosity; INFO recoveries and
+WARNING HA alerts still reach Syslog when local log_level is WARNING or ERROR.
+HA and reboot-summary records omit pseudo-container fields.
+
 
 ### SMTP (Email)
 
@@ -300,7 +304,11 @@ snmp_trap:
   # v3_local_engine_id: ""                 # hex engine ID pinned from first-run log; see DEPLOYMENT.md
 ```
 
-SNMP retains its five existing var-binds and OIDs for NMS compatibility.\nThe human-readable cwSummary contains severity; cwProbeDetail contains\ndetection evidence. No additional SNMP objects are introduced in v1.6.0.\n\nEach trap carries five var-binds, all under the Radware enterprise OID arc (`1.3.6.1.4.1.89.110`):
+SNMP retains its five existing var-binds and OIDs for NMS compatibility.
+The human-readable cwSummary contains severity; cwProbeDetail contains
+detection evidence. No additional SNMP objects are introduced in v1.6.0.
+
+Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3.6.1.4.1.89.110`):
 
 | OID | Object | Value |
 |-----|--------|-------|

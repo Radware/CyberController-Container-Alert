@@ -183,6 +183,19 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
                 restarted._poll_ha(restarted._session)
             restarted._dispatch.assert_not_called()
 
+    def test_ha_exporter_failure_is_error_but_throttled(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = self.create_shell(f"{td}/state.json")
+            with patch("watchdog.read_ha_observation", side_effect=TimeoutError("offline")), \
+                 patch("watchdog.time.monotonic", side_effect=[1000, 1000, 1100, 1301, 1301]), \
+                 patch("watchdog.log.error") as err:
+                w._poll_ha(w._session)
+                w._poll_ha(w._session)
+                w._poll_ha(w._session)
+            self.assertEqual(err.call_count, 2)
+            self.assertIn("HA check unavailable", err.call_args.args[0])
+            w._dispatch.assert_not_called()
+
     def test_failed_exporter_does_not_overwrite_state_or_alert(self):
         with tempfile.TemporaryDirectory() as td:
             w = self.create_shell(f"{td}/state.json")

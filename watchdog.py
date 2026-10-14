@@ -47,6 +47,7 @@ log = logging.getLogger("watchdog")
 def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = None) -> None:
     numeric = getattr(logging, level.upper(), logging.INFO)
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    syslog_active = False
     if log_file:
         log_dir = os.path.dirname(log_file)
         if log_dir:
@@ -56,6 +57,8 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
                 log_file, maxBytes=10 * 1024 * 1024, backupCount=5
             )
         )
+    for handler in handlers:
+        handler.setLevel(numeric)
     if syslog_cfg and syslog_cfg.get("enabled"):
         host = syslog_cfg.get("host", "localhost")
         port = int(syslog_cfg.get("port", 514))
@@ -78,11 +81,15 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
             log.warning("Syslog disabled — cannot reach %s:%d (%s): %s", host, port, proto, exc)
         else:
             syslog_handler.setFormatter(logging.Formatter(SYSLOG_FORMAT))
+            syslog_handler.setLevel(logging.INFO)
             syslog_handler.addFilter(AlertSyslogFilter())
             handlers.append(syslog_handler)
+            syslog_active = True
             # Use a plain formatter for other handlers, syslog gets its own
             log.info("Syslog handler added: %s:%d (%s)", host, port, proto)
-    logging.basicConfig(level=numeric, format=LOG_FORMAT, handlers=handlers, force=True)
+    # Let INFO recovery alerts reach Syslog even when local logs are WARNING/ERROR.
+    root_level = min(numeric, logging.INFO) if syslog_active else numeric
+    logging.basicConfig(level=root_level, format=LOG_FORMAT, handlers=handlers, force=True)
     # Suppress noisy third-party debug chatter (urllib3 Docker socket calls, etc.)
     for noisy in ("urllib3", "urllib3.connectionpool", "docker", "requests"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -460,18 +467,19 @@ def _syslog_field(value: object, limit: int = 512) -> str:
 def format_syslog_alert(payload: AlertPayload) -> str:
     """Same incident facts as human-facing notifications; bounded for UDP syslog."""
     details = {
-        "event": "container_alert",
+        "event": "watchdog_alert",
         "severity": payload.severity,
         "failure_type": payload.failure_type,
         "time_utc": payload.timestamp,
         "host": payload.host,
-        "container": payload.container_name,
-        "container_id": payload.container_id,
         "probe_type": payload.probe_type,
         "detection": payload.probe_detail,
         "action": payload.recommended_action,
         "runbook": payload.runbook_url,
     }
+    if payload.failure_type not in ("ha-failover", "reboot-summary"):
+        details["container"] = payload.container_name
+        details["container_id"] = payload.container_id
     if payload.exit_code is not None:
         details["exit_code"] = payload.exit_code
     if payload.failure_type == "ha-failover":
@@ -1129,19 +1137,17 @@ def get_docker_health_log(container) -> str:
 
 
 def get_memory_stats(container) -> str:
+    """Best-effort post-event sample, not memory usage at the time of the OOM."""
     try:
-        stats = container.stats(stream=False)
-        mem   = stats.get("memory_stats", {})
-        usage = mem.get("usage", 0)
-        limit = mem.get("limit", 0)
-        peak  = mem.get("max_usage", 0)
-        def _mb(b: int) -> str:
-            return f"{b / 1024 / 1024:.1f} MB"
-        return (
-            f"memory usage={_mb(usage)}  limit={_mb(limit)}  peak={_mb(peak)}"
-        )
-    except Exception as exc:
-        return f"(memory stats unavailable: {exc})"
+        mem = container.stats(stream=False).get("memory_stats") or {}
+        parts = []
+        for key, label in (("usage", "usage"), ("limit", "limit"), ("max_usage", "peak")):
+            value = mem.get(key)
+            if type(value) is int and value > 0:
+                parts.append(f"{label}={value / 1024 / 1024:.1f} MB")
+        return ("post-event memory snapshot: " + ", ".join(parts)) if parts else ""
+    except Exception:
+        return ""
 
 
 def get_container_id(container) -> str:
@@ -1838,7 +1844,7 @@ class Watchdog:
                                         self.runbook_base,
                                         extra_context=memory,
                                         probe_detail=("OOM probe failed - container was OOM-killed by the kernel"
-                                                      + (f"; {memory}" if memory.startswith("memory usage=") else "")))
+                                                      + (f"; {memory}" if memory else "")))
                 self._dispatch(payload)
 
         elif action == "health_status: unhealthy":
@@ -1878,7 +1884,7 @@ class Watchdog:
             self._ha_tracker.reset_candidate()
             if time.monotonic() - self._ha_error_log_at >= 300:
                 self._ha_error_log_at = time.monotonic()
-                log.warning("HA check unavailable (%s): %s", type(exc).__name__, exc)
+                log.error("HA check unavailable (%s): %s", type(exc).__name__, exc)
             return
 
         changed, change = self._ha_tracker.observe(observation)
