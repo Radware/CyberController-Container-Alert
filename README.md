@@ -629,8 +629,13 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 ## 10. Version History
 
+**Release status (2026-10-14):** `VERSION` remains `1.5.4`. The changes below are merged into `main` but **unreleased**: the running `watchdog:1.5.4` image does not acquire them from `git pull`.
+
+**Release procedure:** After validating a release candidate, increment `VERSION`, add a dated entry here, build and verify `watchdog:<VERSION>`, and package the matching `watchdog.tar` for offline installs. Pin deployment with `WATCHDOG_VERSION` in `.env`; verify upgrade and rollback before tagging the exact released commit (`vX.Y.Z`) and publishing release notes. Do not overwrite an old versioned image with new code. GitHub CI checks PRs but does not publish releases automatically; as of this update, no Git tags or GitHub Releases exist.
+
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
+| Unreleased (post-1.5.4) | 2026-10-14 | Radware engineering | [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6): Docker event ID resolution and bounded missing-container warnings; [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5): authoritative `RestartCount`, deduplicated restart-loop incidents, stable recovery; [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7): planned Docker stop correlation and corrected exit-137 handling; [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4): optional independent HA active-node change alerts. |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
