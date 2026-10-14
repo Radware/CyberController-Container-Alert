@@ -12,6 +12,7 @@ class MissingContainerEventTests(unittest.TestCase):
         monitor = object.__new__(watchdog.Watchdog)
         monitor._excluded = set()
         monitor._missing_events = {}
+        monitor._lifecycle_enabled = False
         monitor.client = SimpleNamespace(containers=Mock())
         monitor.client.containers.get.side_effect = docker.errors.NotFound("removed")
         return monitor

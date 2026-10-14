@@ -59,7 +59,11 @@ Alerts are deduplicated via a **cooldown** — once an alert fires for a contain
 
 Two additional deduplication rules suppress redundant alerts at the event level:
 - **OOM → die suppression**: when a container is OOM-killed, Docker emits both an `oom` event and an immediately following `die` event. The watchdog fires the `oom` CRITICAL alert and suppresses the subsequent `crashed` alert to avoid a duplicate for the same incident.
-- **Restart-loop incident coalescing**: Docker `die`/OOM events provide an immediate first failure alert. Only periodic Docker `RestartCount` increments determine the number of automatic restarts and whether the `restart_threshold` has been reached within `restart_window_minutes`; event deliveries are **never** added to the restart total. One HIGH `restart-loop` alert then suppresses per-cycle crashes, OOMs and failed Docker, manual or auto-discovered probes until sustained recovery, regardless of cooldown. Docker IDs identify distinct container instances even when names are reused.
+- **Restart-loop incident coalescing**: Docker `die`/OOM events initiate the first failure alert (nonzero `die` events may be held for the short stop-correlation window). Only periodic Docker `RestartCount` increments determine the number of automatic restarts and whether the `restart_threshold` has been reached within `restart_window_minutes`; event deliveries are **never** added to the restart total. One HIGH `restart-loop` alert then suppresses per-cycle crashes, OOMs and failed Docker, manual or auto-discovered probes until sustained recovery, regardless of cooldown. Docker IDs identify distinct container instances even when names are reused.
+
+**Docker-requested stops and exit 137:** An exit status of 137 means SIGKILL; it does **not** prove an OOM. Docker may deliver a stop event shortly after die, so nonzero exits are briefly held for lifecycle_detection.correlation_window_seconds (default 3 seconds). A matching stop from the same container ID suppresses that instance's misleading CRASH and is logged instead; a direct docker kill, an unconfirmed stop, or a genuine OOM still produces the normal CRITICAL incident. A start event prevents the following run's stop from masking an earlier crash. This correlation only provides evidence of a **Docker-requested stop**, not evidence that stopping the service was authorized. The existing restart-loop counting, recovery rules, and alert delivery remain authoritative. Set lifecycle_detection.enabled to false to disable the correlation.
+
+Planned-stop correlation does not implement an availability policy: long-running services stopped intentionally will not produce a downtime alert unless another monitoring rule detects their outage. Optional expected-running monitoring and HA-specific planned-shutdown handling are tracked separately.
 
 **Recovery alerts**: once a previously-alarmed container is healthy and running, the watchdog sends a one-time INFO `recovered` notification (if `alert_on_recovery: true`). For an auto-restarting container recovering from `crashed`, `oom`, or `restart-loop`, a fleeting `running` state is *not* recovery: Docker's `State.StartedAt` must prove at least `restart_recovery_stability_seconds` continuous uptime (default 120 seconds), with no intervening failure. On recovery, restart history is reset to avoid immediate re-alerting. Docker health events cannot bypass this check. Other container recovery checks preserve their existing behavior.
 
@@ -72,6 +76,7 @@ Two additional deduplication rules suppress redundant alerts at the event level:
 ```
 .
 ├── watchdog.py                  # Main monitor script
+├── lifecycle.py                 # Bounded Docker stop/die evidence correlation
 ├── watchdog-config.yaml         # All configuration (no secrets)
 ├── docker-compose.yaml          # Production / offline runtime (image only)
 ├── docker-compose.build.yaml    # Developer / online build

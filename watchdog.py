@@ -26,6 +26,8 @@ import requests
 import socket
 import yaml
 
+from lifecycle import DockerLifecycleCorrelator
+
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 SYSLOG_FORMAT = "watchdog[%(process)d]: %(levelname)s %(name)s: %(message)s"
@@ -87,6 +89,7 @@ DEFAULT_CONFIG = {
     "restart_threshold": 5,
     "restart_window_minutes": 10,
     "restart_recovery_stability_seconds": 120,  # prevent false recovery between restarts
+    "lifecycle_detection": {"enabled": True, "correlation_window_seconds": 3},
     "unhealthy_cycles_threshold": 3,
     "alert_on_recovery": True,
     "excluded_containers": [],
@@ -973,7 +976,7 @@ ACTIONS = {
     "crashed": (
         "CRITICAL",
         "Check exit code and logs. Run: docker logs <name> --tail 50. "
-        "If exit code 137, likely OOM — increase memory limit.",
+        "Exit 137 means SIGKILL, not necessarily OOM. Check Docker stop/oom events and OOMKilled.",
     ),
     "oom": (
         "CRITICAL",
@@ -1278,6 +1281,17 @@ class Watchdog:
         self._discovered_checks: dict[str, dict | None] = {}  # auto-discovery cache
         self._oom_containers: set[str] = set()  # suppress die alert when oom already fired
         self._missing_events: dict[str, tuple[float, set[str]]] = {}
+        lc = cfg.get("lifecycle_detection") or {}
+        self._lifecycle_enabled = lc.get("enabled", True) is True
+        try:
+            window = float(lc.get("correlation_window_seconds", 3))
+            if not 0.5 <= window <= 30:
+                raise ValueError("out of range")
+        except (TypeError, ValueError):
+            log.warning("Invalid lifecycle correlation window; using 3 seconds")
+            window = 3.0
+        self._lifecycle = DockerLifecycleCorrelator(window)
+        self._lifecycle_wake = threading.Event()
         self._auto_cfg: dict = cfg.get("auto_health_check", {})
         _manual = cfg.get("container_health_checks") or {}
         self._manual_checks: dict = _manual if isinstance(_manual, dict) else {}
@@ -1482,10 +1496,97 @@ class Watchdog:
                                  probe_detail=f"Recovered from '{previous}'")
         self._dispatch(payload)
 
+
+    def _process_die(self, container, state: ContainerState, name: str,
+                     exit_code: int | None, event_time: float | None) -> None:
+        """Existing PR #5 incident rules: the ONLY place that emits a die/crash."""
+        # Consume paired OOM/die events, but never count event deliveries
+        # as restarts: Docker RestartCount is authoritative.
+        oom_die = name in self._oom_containers
+        if oom_die:
+            self._oom_containers.discard(name)
+        automatic = has_automatic_restart_policy(container)
+        if exit_code != 0:
+            with state.lock:
+                failure_at = event_time if event_time is not None else time.time()
+                state.last_failure_time = max(state.last_failure_time, failure_at)
+                previous = state.alerted_for
+        else:
+            with state.lock:
+                previous = state.alerted_for
+
+        if previous == "restart-loop":
+            log.info("%s: die event during active restart-loop — suppressing crashed alert", name)
+            return
+
+        # OOM kills also emit a die; count the restart above but do not
+        # downgrade the OOM incident into a redundant crashed alert.
+        if oom_die:
+            log.info("%s: die event follows OOM — suppressing duplicate crashed alert", name)
+            return
+
+        if exit_code == 0:
+            log.info("%s exited cleanly (code 0) — no crashed alert", name)
+            return
+
+        if exit_code == 137:
+            log.warning("%s: exit 137 (SIGKILL) without a confirmed Docker stop; "
+                        "check OOMKilled and Docker event history", name)
+        # One CRASH for the initial incident; subsequent crashes coalesce
+        # until restart-loop escalation or sustained recovery.
+        if previous == "crashed" or (automatic and previous == "oom"):
+            log.debug("%s: additional die within open %s incident — suppressing",
+                      name, previous)
+            return
+        if self._claim_alert(state, "crashed"):
+            payload = build_payload(
+                container, "crashed", self.host, self.runbook_base, exit_code,
+                probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
+            self._dispatch(payload)
+
+    def _resolve_lifecycle_death(self, death) -> None:
+        state = self.state.get(death.name)
+        with state.lock:
+            # A replacement using the same name must never inherit the old death.
+            replaced = bool(state.last_container_id and
+                            state.last_container_id != death.container_id)
+            stale = bool(death.event_time is not None and state.last_recovery_time
+                         and death.event_time <= state.last_recovery_time)
+        if replaced or stale:
+            log.debug("%s: discard outdated pending death (replaced=%s stale=%s)",
+                      death.name, replaced, stale)
+            return
+        if death.oom:
+            log.debug("%s: die matched OOM; no duplicate CRASH", death.name)
+            return
+        if death.stopped:
+            if death.exit_code == 137:
+                log.warning("%s: Docker-requested stop ended with SIGKILL (137), "
+                            "not proof of OOM", death.name)
+            else:
+                log.info("%s: Docker-requested stop (exit %s)", death.name, death.exit_code)
+            return
+        self._process_die(death.container, state, death.name, death.exit_code,
+                          death.event_time)
+
+    def _lifecycle_worker(self) -> None:
+        """Resolve bounded stop/die evidence outside the Docker event reader."""
+        while not self._stop_event.is_set():
+            self._lifecycle_wake.wait(0.2)
+            self._lifecycle_wake.clear()
+            for death in self._lifecycle.drain_ready():
+                try:
+                    self._resolve_lifecycle_death(death)
+                except Exception:
+                    log.exception("Failed to handle pending death for %s", death.name)
+
     # ── Event stream listener ─────────────────────────────────────────────────
     def _event_listener(self) -> None:
         log.info("Docker event listener started")
-        filters = {"type": "container", "event": ["die", "oom", "health_status"]}
+        events = ["die", "oom", "health_status"]
+        if self._lifecycle_enabled:
+            events += ["stop", "start"]
+        filters = {"type": "container", "event": events}
         try:
             for event in self.client.events(decode=True, filters=filters):
                 if self._stop_event.is_set():
@@ -1506,6 +1607,14 @@ class Watchdog:
             return
 
         log.debug("Docker event: %s on %s", action, name)
+
+        # Start and stop are evidence, not incidents; even removed containers
+        # can produce these events, so do not inspect them through Docker.
+        if action in ("start", "stop") and self._lifecycle_enabled:
+            cid = event.get("Actor", {}).get("ID") or event.get("id")
+            self._lifecycle.record(action, cid)
+            self._lifecycle_wake.set()
+            return
 
         # Keep recent missing IDs so late events do not repeatedly hit Docker.
         # An ID-less legacy event must still be looked up: its name can be reused.
@@ -1583,49 +1692,18 @@ class Watchdog:
                 )
                 return
 
-            # Consume paired OOM/die events, but never count event deliveries
-            # as restarts: Docker RestartCount is authoritative.
-            oom_die = name in self._oom_containers
-            if oom_die:
-                self._oom_containers.discard(name)
-            automatic = has_automatic_restart_policy(container)
-            if exit_code != 0:
+            if self._lifecycle_enabled and container_id and exit_code not in (0, None):
+                # Record failure time immediately so a concurrent poll cannot
+                # declare stable recovery while this die is awaiting stop evidence.
                 with state.lock:
-                    failure_at = event_time if event_time is not None else time.time()
-                    state.last_failure_time = max(state.last_failure_time, failure_at)
-                    previous = state.alerted_for
-            else:
-                with state.lock:
-                    previous = state.alerted_for
-
-            if previous == "restart-loop":
-                log.info("%s: die event during active restart-loop — suppressing crashed alert", name)
+                    failed_at = event_time if event_time is not None else time.time()
+                    state.last_failure_time = max(state.last_failure_time, failed_at)
+                self._lifecycle.record("die", container_id, name=name,
+                                       container=container, exit_code=exit_code,
+                                       event_time=event_time)
+                self._lifecycle_wake.set()
                 return
-
-            # OOM kills also emit a die; count the restart above but do not
-            # downgrade the OOM incident into a redundant crashed alert.
-            if oom_die:
-                log.info("%s: die event follows OOM — suppressing duplicate crashed alert", name)
-                return
-
-            if exit_code == 0:
-                log.info("%s exited cleanly (code 0) — no crashed alert", name)
-                return
-
-            if exit_code == 137:
-                log.warning("%s: exit 137 not suppressed — signals: %s",
-                            name, _mariadb_helper_signals(container, attributes))
-            # One CRASH for the initial incident; subsequent crashes coalesce
-            # until restart-loop escalation or sustained recovery.
-            if previous == "crashed" or (automatic and previous == "oom"):
-                log.debug("%s: additional die within open %s incident — suppressing",
-                          name, previous)
-                return
-            if self._claim_alert(state, "crashed"):
-                payload = build_payload(
-                    container, "crashed", self.host, self.runbook_base, exit_code,
-                    probe_detail=f"Crash probe failed - container exited with exit code {exit_code}")
-                self._dispatch(payload)
+            self._process_die(container, state, name, exit_code, event_time)
 
         elif action == "oom":
             failure_type = "oom"
@@ -1634,7 +1712,14 @@ class Watchdog:
                     failure_at = event_time if event_time is not None else time.time()
                     state.last_failure_time = max(state.last_failure_time, failure_at)
                 active_loop = state.alerted_for == "restart-loop"
-            self._oom_containers.add(name)  # mark so the imminent die event is suppressed
+            # A late OOM paired to pending die must not leave a marker that
+            # accidentally suppresses the next, unrelated die event.
+            matched_pending = (self._lifecycle.record("oom", container_id)
+                               if self._lifecycle_enabled and container_id else False)
+            if matched_pending:
+                self._lifecycle_wake.set()
+            else:
+                self._oom_containers.add(name)
             if active_loop:
                 log.info("%s: OOM during active restart-loop — suppressing per-cycle OOM alert", name)
                 return
@@ -2143,6 +2228,9 @@ class Watchdog:
             target=self._event_listener, name="event-listener", daemon=True
         )
         event_thread.start()
+        if self._lifecycle_enabled:
+            threading.Thread(target=self._lifecycle_worker, name="lifecycle-worker",
+                             daemon=True).start()
         # Poll runs in the main thread
         try:
             self._poll_loop()
@@ -2154,6 +2242,7 @@ class Watchdog:
     def stop(self) -> None:
         log.info("Watchdog shutting down")
         self._stop_event.set()
+        self._lifecycle_wake.set()
         self.state.save(self._boot_time)
 
 

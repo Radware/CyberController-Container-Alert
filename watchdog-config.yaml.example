@@ -24,6 +24,13 @@ restart_recovery_stability_seconds: 120  # require 2 min continuous uptime befor
 unhealthy_cycles_threshold:  3    # consecutive unhealthy cycles before alerting
 alert_on_recovery:        true    # send an INFO "recovered" alert when a container returns to normal
 
+# A Docker-requested stop can end in exit 137 when the process ignores SIGTERM.
+# Wait briefly for stop evidence (Docker may emit stop after die) before a CRASH.
+# Without that evidence, unexpected nonzero exits still generate CRITICAL alerts.
+lifecycle_detection:
+  enabled: true
+  correlation_window_seconds: 3  # valid range 0.5-30 seconds
+
 # Containers to never alert on (debug, test, or one-shot containers)
 excluded_containers: []
   # - my-temp-container

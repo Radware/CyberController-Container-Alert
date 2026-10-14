@@ -48,6 +48,7 @@ def make_watchdog(container, threshold=3, stable=120):
     wd._discovered_checks = {}
     wd._oom_containers = set()
     wd._missing_events = {}  # PR #6 event cache (normal Watchdog init owns it)
+    wd._lifecycle_enabled = False
     wd._auto_cfg = {"enabled": False}
     wd._manual_checks = {}
     wd._boot_time = 1
