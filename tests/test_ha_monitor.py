@@ -351,9 +351,12 @@ class NotificationTests(unittest.TestCase):
 
     def test_syslog_logging_includes_transition_and_dispatches_snmp(self):
         alert = self.make_alert()
-        with patch("watchdog.log.warning") as warn, patch("watchdog.send_snmp_trap") as trap:
+        with patch("watchdog.log.log") as logged, patch("watchdog.send_snmp_trap") as trap:
             watchdog.dispatch_alert(alert, {"alert_channels": ["snmp_trap", "syslog"]})
-        self.assertIn(f"{A} -> {B}", warn.call_args.args[1])
+        self.assertEqual(logged.call_args.args[0], watchdog.logging.WARNING)
+        self.assertIn(f'previous_active="{A}"', logged.call_args.args[1])
+        self.assertIn(f'new_active="{B}"', logged.call_args.args[1])
+        self.assertTrue(logged.call_args.kwargs["extra"]["watchdog_alert"])
         trap.assert_called_once()
 
     def test_smtp_ha_notification_identifies_role_change(self):
