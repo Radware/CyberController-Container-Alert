@@ -1232,6 +1232,7 @@ class Watchdog:
         self._ignored_events: list[dict] = cfg.get("ignored_container_events") or []
         self._discovered_checks: dict[str, dict | None] = {}  # auto-discovery cache
         self._oom_containers: set[str] = set()  # suppress die alert when oom already fired
+        self._missing_events: dict[str, tuple[float, set[str]]] = {}
         self._auto_cfg: dict = cfg.get("auto_health_check", {})
         _manual = cfg.get("container_health_checks") or {}
         self._manual_checks: dict = _manual if isinstance(_manual, dict) else {}
@@ -1406,10 +1407,43 @@ class Watchdog:
 
         log.debug("Docker event: %s on %s", action, name)
 
+        # Keep recent missing IDs so late events do not repeatedly hit Docker.
+        # An ID-less legacy event must still be looked up: its name can be reused.
+        container_id = event.get("Actor", {}).get("ID") or event.get("id")
+        cache_key = container_id or f"name:{name}"
+        now = time.monotonic()
+        missing = self._missing_events.get(cache_key)
+        if missing is not None and now - missing[0] >= 60:
+            self._missing_events.pop(cache_key)
+            missing = None
+
+        if container_id and missing is not None:
+            if action not in missing[1]:
+                missing[1].add(action)
+                log.warning("Container %s (%s) already removed before %s event could be processed",
+                            name, container_id, action)
+            return
+
         try:
-            container = self.client.containers.get(name)
+            container = self.client.containers.get(container_id or name)
         except docker.errors.NotFound:
-            log.warning("Container %s not found for event %s", name, action)
+            if missing is None:
+                missing = (now, set())
+                self._missing_events[cache_key] = missing
+                # Insertion-ordered dict: evict the oldest entry even during a burst.
+                if len(self._missing_events) > 1024:
+                    self._missing_events.pop(next(iter(self._missing_events)))
+            if action not in missing[1]:
+                missing[1].add(action)
+                log.warning("Container %s (%s) already removed before %s event could be processed",
+                            name, container_id or "unknown ID", action)
+            return
+
+        # Events may carry the previous name of a renamed container. Incident
+        # tracking, recovery, OOM suppression, and probe caches use the name
+        # reported by the resolved container, consistent with the poll loop.
+        name = container.name
+        if name in self._excluded:
             return
 
         if is_ignored_container_event(container, attributes, action, self._ignored_events):
