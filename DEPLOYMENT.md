@@ -487,12 +487,13 @@ Before running `git pull` (see [6.3 Upgrade Guide](#63-upgrade-guide)), record t
 git rev-parse HEAD > backup/previous-commit.txt
 ```
 
-To roll back to the previous version after a failed upgrade:
+To restore the prior source checkout:
 
 ```bash
 git checkout "$(cat backup/previous-commit.txt)"
-docker compose up -d
 ```
+
+This **does not roll back the running container**. To revert deployed behavior, restore the previous `WATCHDOG_VERSION` and redeploy the corresponding image as described in [5.2 Image Rollback](#52-roll-back-an-image-upgrade).
 
 Also restore the `.env` and `watchdog-config.yaml` files backed up before the upgrade — see [6.3 Upgrade Guide](#63-upgrade-guide).
 
@@ -574,7 +575,7 @@ docker compose up -d
 
 ### 6.3 Upgrade Guide
 
-There are two ways to upgrade the Watchdog: the application code, or the Docker image only.
+Updating the source checkout and upgrading the running Docker image are different operations. Only deploying a new image changes the running watchdog code.
 
 #### Before You Begin (Recommended)
 
@@ -596,72 +597,26 @@ cp backup/watchdog-config.yaml.bak watchdog-config.yaml
 
 ---
 
-#### Upgrade Application Only
+#### Update Source Code (Not a Running Image)
 
-##### Option A: Upgrade from Git Repository
+The application (`watchdog.py`, `lifecycle.py`, `ha_monitor.py`) is **built into the Docker image**, not bind-mounted. Updating the Git checkout alone **does not deploy code**, and `docker compose up -d` with the same pinned image will not apply the latest changes. Do not stop the running watchdog just to update source files.
 
-*Note* - Requires internet connectivity.
+To update the repository without changing the running container:
 
-1. Navigate to the project directory:
+```bash
+mkdir -p backup
+git rev-parse HEAD > backup/previous-commit.txt
+git fetch origin
+git pull --ff-only origin main
+```
 
-   ```bash
-   cd Container_Alert
-   ```
-
-2. Record the current commit, for [rollback](#53-roll-back-an-application-upgrade-git) if needed:
-
-   ```bash
-   mkdir -p backup
-   git rev-parse HEAD > backup/previous-commit.txt
-   ```
-
-3. Stop the running container:
-
-   ```bash
-   docker compose down
-   ```
-
-4. Download the latest source code:
-
-   ```bash
-   git fetch origin
-   git pull origin main
-   ```
-
-5. Start the updated container:
-
-   ```bash
-   docker compose up -d
-   ```
-
-6. Verify:
-
-   ```bash
-   docker ps
-   docker compose logs docker-container-watchdog
-   ```
-
-   If verification fails, see [5.3 Roll Back an Application Upgrade (Git)](#53-roll-back-an-application-upgrade-git).
-
----
-
-##### Option B: Upgrade Application Only (Offline)
-
-1. Obtain the latest version of the application. You can either obtain the latest archive from the RE team or download it directly from GitHub (https://github.com/Radware/CyberController-Container-Alert.git).
-2. Uninstall the current version — see [6.4 Uninstalling](#64-uninstalling).
-3. Replace the existing files in the application directory:
-
-   ```bash
-   cd /path/to/Container_Alert
-   ```
-
-4. Redeploy the latest version — see [3. Deployment Steps](#3-deployment-steps).
+To deploy new code, first prepare a **new numbered release**: update `VERSION` and the README version history, build and test the matching `watchdog:<VERSION>` image using `docker-compose.build.yaml`, and verify it contains all required Python modules. Keep the previous versioned image for rollback; update `.env`'s `WATCHDOG_VERSION` only when deploying the verified new image. For offline deployments, distribute the new `VERSION` and matching `watchdog.tar`, then use `install.sh`. See [Deployment Steps](#3-deployment-steps), [Image Rollback](#52-roll-back-an-image-upgrade), and [README Version History](README.md#10-version-history).
 
 ---
 
 #### Upgrade Docker Image Only
 
-Automatic upgrades are **not enabled** by default. Before upgrading, tag the current image so it can be [rolled back](#52-roll-back-an-image-upgrade) if the new image misbehaves:
+Automatic upgrades are **not enabled**. Preserve the existing versioned `watchdog:<VERSION>` image for [rollback](#52-roll-back-an-image-upgrade). Only if the old image exists solely as `watchdog:latest`, save that image as `watchdog:rollback` before loading the replacement:
 
 ```bash
 docker tag watchdog:latest watchdog:rollback
@@ -671,7 +626,7 @@ There are two ways to upgrade the image — online or offline. Follow only one o
 
 ##### Option A: Online Image Upgrade
 
-If you have internet access, pull the latest image:
+If a new versioned image has been published to the image registry configured for this deployment, pull that tag. A local-only `watchdog:<VERSION>` image is not available via `docker compose pull`; build it or load the release archive instead:
 
 ```bash
 docker compose pull
