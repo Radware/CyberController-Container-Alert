@@ -371,6 +371,8 @@ load_docker_image() {
             trap "rm -rf '${tmpdir}'" EXIT
             cp "${INSTALL_DIR}/Dockerfile"   "${tmpdir}/"
             cp "${INSTALL_DIR}/watchdog.py"  "${tmpdir}/"
+            cp "${INSTALL_DIR}/lifecycle.py" "${tmpdir}/"
+            cp "${INSTALL_DIR}/ha_monitor.py" "${tmpdir}/"
             if ! docker build -t "${IMAGE_NAME}" "${tmpdir}"; then
                 print_error "Build failed — cannot produce ${IMAGE_NAME}"
                 exit 1
