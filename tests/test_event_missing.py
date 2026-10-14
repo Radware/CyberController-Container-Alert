@@ -80,7 +80,7 @@ class MissingContainerEventTests(unittest.TestCase):
 
     def test_rename_and_name_reuse_records_old_container_not_new(self):
         monitor = self.make_subject()
-        old = SimpleNamespace(name="service-old", attrs={"Config": {"Labels": {}}})
+        old = SimpleNamespace(name="service-old", id="old-id", attrs={"Config": {"Labels": {}}})
         monitor.client.containers.get.side_effect = None
         monitor.client.containers.get.return_value = old
         monitor._ignored_events = []
