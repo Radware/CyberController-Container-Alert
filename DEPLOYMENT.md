@@ -410,6 +410,41 @@ docker exec docker-container-watchdog tail -f /var/log/watchdog/watchdog.log
 
 ---
 
+### Optional HA role-change verification
+
+This check is only for **two-node CyberController HA** installations and is
+disabled by default. On **each HA host**:
+
+1. Verify the local exporter is active: curl -fsS http://127.0.0.1:9664/metrics.
+2. Confirm metrics for Pacemaker resources, quorum, collector scrape success,
+   and local node identity are present. Port 9664 is the verified lab setting;
+   read /etc/ha_cluster_exporter.yaml if different.
+3. Enable ha_monitor.enabled: true in watchdog-config.yaml on **both**
+   nodes; restart only the watchdog service using the normal documented
+   configuration-change procedure.
+4. Verify the baseline is stored under ha_monitor.active_node in the persistent
+   watchdog state.json; startup should send **no** HA event.
+5. During an approved HA maintenance window, perform one controlled switchover
+   and failback using the supported CyberController operations procedure.
+   Confirm exactly one notification from the newly active node for each
+   transition; check docker logs docker-container-watchdog on both hosts.
+6. Disable by setting ha_monitor.enabled: false and restarting the watchdog.
+   This clears its saved HA baseline; re-enabling starts with a fresh, quiet
+   baseline (no notification for transitions that occurred while disabled).
+   An ordinary restart while HA remains enabled keeps the confirmed baseline.
+   No HA service or Pacemaker configuration changes are necessary.
+
+Delivery is best-effort. Test the actual alert receiver on **both** nodes:
+an HA alert in watchdog logs does not prove a syslog or SMTP destination
+received it. This release has no persisted notification retry queue.
+
+Do not attempt a network-partition simulation on a cluster with STONITH
+disabled: split-brain and database inconsistency are possible. The native
+Prometheus port mismatch (9002 vs exporter 9664) is a separate appliance
+configuration issue; it does not block the watchdog's direct localhost check.
+
+---
+
 ## 5. Rollback
 
 ### 5.1 Roll Back a Failed Deployment
@@ -825,8 +860,14 @@ Configuration for the SNMP Traps channel is in [2.4.4 SNMP Traps](#244-snmp-trap
 | `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
 | `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
 | `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` / `ha-failover` |
 | `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
+
+**HA trap mapping:** this release uses the existing Container Watchdog MIB.
+For HA, cwContainerName is (HA cluster), cwFailureType is ha-failover, and the
+summary/detail fields contain previous and new active nodes. NMS rules should
+match cwFailureType instead of treating all traps as container failures. No
+new trap OID is introduced.
 
 **SNMPv3 notes:**
 

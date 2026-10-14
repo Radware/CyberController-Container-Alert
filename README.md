@@ -69,6 +69,65 @@ Planned-stop correlation does not implement an availability policy: long-running
 
 ---
 
+### Optional HA active-node change alert
+
+On CyberController HA installations, the watchdog can optionally alert when the
+**promoted HA Operator resource** moves from one cluster node to another.
+This is an additional application event check; it does not replace or modify
+existing Docker container health checks.
+
+Enable the following block on **both** HA nodes, after verifying that each
+node has a local Pacemaker HA cluster exporter:
+
+~~~yaml
+ha_monitor:
+  enabled: true
+  exporter_url: http://127.0.0.1:9664/metrics
+~~~
+
+The watchdog reads HA cluster resource metrics and validates local-node identity,
+cluster quorum, and Pacemaker scrape success. The first valid reading
+establishes a baseline without alerting. A new active node must be confirmed
+on two consecutive successful polls (usually 60 seconds apart). Only the
+newly active node sends one **WARNING: CyberController HA active node changed**,
+using the already configured Syslog, SMTP, Slack, and/or SNMP channels.
+Failback is handled the same way; HA state persists in the normal state.json.
+HA polling runs in its own lightweight thread with a separate HTTP session, so
+slow or unavailable Docker API probes do not block HA detection.
+
+An ordinary watchdog restart with HA enabled retains its baseline. If HA
+monitoring is **disabled and the watchdog restarted**, the old HA baseline is
+cleared; re-enabling and restarting establishes a new baseline silently rather
+than reporting an unobserved, potentially old role change.
+
+**Delivery is best-effort:** after confirming a change, the watchdog saves its
+new baseline before dispatching. If SMTP/Slack/SNMP/syslog delivery fails,
+this event is logged but is **not retried** by the HA monitor. Validate the
+notification path on both HA nodes. A failed state-file save may result in a
+duplicate alert after a restart.
+
+**SNMP compatibility:** HA events use the existing Container Watchdog MIB with
+cwFailureType=`ha-failover`, cwContainerName=`(HA cluster)`, and old/new
+node values in cwSummary/cwProbeDetail. NMS integrations should distinguish
+HA events by cwFailureType, not by the container-name field.
+
+This check is **off by default**. It does not install an HA exporter, open a
+firewall port, execute Pacemaker commands, or modify cluster roles. Both
+watchdogs/exporters must be running and able to send notifications for detection
+of a failure of the original active node. If a node is newly installed after
+the failover, the first reading is a quiet baseline and **cannot reconstruct
+the earlier event**. Loss of quorum or exporter connectivity is logged locally,
+not misreported as a completed failover. Observed time may be later than the
+actual Pacemaker transition. A confirmed promotion does not guarantee all
+CyberController services have recovered.
+
+The exporter may use port **9664** even when the built-in CyberController
+Prometheus configuration references **9002**. This optional check reads the
+exporter directly and makes **no changes** to native Prometheus configuration.
+See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
+
+---
+
 ## 2. System Overview
 
 ### Project Structure

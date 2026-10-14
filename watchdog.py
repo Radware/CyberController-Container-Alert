@@ -27,6 +27,7 @@ import socket
 import yaml
 
 from lifecycle import DockerLifecycleCorrelator
+from ha_monitor import HARoleTracker, read_ha_observation
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -105,6 +106,7 @@ DEFAULT_CONFIG = {
     "log_level": "INFO",
     # Alert state survives restarts so recovery alerts still fire after a reboot.
     "state_file": "/var/log/watchdog/state.json",
+    "ha_monitor": {"enabled": False, "exporter_url": "http://127.0.0.1:9664/metrics"},
     # After a host reboot, hold alerts this long and emit one summary instead.
     "boot_grace_seconds": 180,
     "syslog": {
@@ -181,12 +183,25 @@ class WatchdogState:
         self._save_lock = threading.Lock()
         self._states: dict[str, ContainerState] = {}
         self._state_file = state_file
+        self._ha_state: dict[str, str] = {}  # independent of container failure state
 
     def get(self, name: str) -> ContainerState:
         with self._lock:
             if name not in self._states:
                 self._states[name] = ContainerState(name)
             return self._states[name]
+
+    def get_ha_node(self) -> str:
+        with self._lock:
+            return self._ha_state.get("active_node", "")
+
+    def set_ha_node(self, node: str) -> None:
+        with self._lock:
+            self._ha_state = {"active_node": node}
+
+    def clear_ha_node(self) -> None:
+        with self._lock:
+            self._ha_state.clear()
 
     def cleanup_stale(self, active_names: set, retain_open: bool = False) -> None:
         with self._lock:
@@ -222,6 +237,10 @@ class WatchdogState:
                 log.warning("State file %s has version %s (expected %d) — ignoring",
                             self._state_file, data.get("version"), _STATE_VERSION)
                 return {}, 0
+            ha = data.get("ha_monitor")
+            if isinstance(ha, dict) and isinstance(ha.get("active_node"), str):
+                with self._lock:
+                    self._ha_state = {"active_node": ha["active_node"][:255]}
             return data.get("containers") or {}, int(data.get("boot_time") or 0)
         except Exception as exc:
             # A corrupt state file must never stop monitoring.
@@ -237,6 +256,7 @@ class WatchdogState:
         with self._save_lock:
             with self._lock:
                 states = list(self._states.values())
+                ha_state = dict(self._ha_state)
             containers: dict[str, dict] = {}
             for st in states:
                 with st.lock:
@@ -252,6 +272,8 @@ class WatchdogState:
                 "saved_at": time.time(),
                 "containers": containers,
             }
+            if ha_state:
+                record["ha_monitor"] = ha_state
             tmp = f"{self._state_file}.tmp"
             try:
                 parent = os.path.dirname(self._state_file)
@@ -293,6 +315,7 @@ def _default_probe_type(failure_type: str) -> str:
         "oom":          "Docker event (OOM)",
         "unhealthy":    "Docker HEALTHCHECK",
         "restart-loop": "Restart-loop tracking",
+        "ha-failover": "Pacemaker HA exporter",
     }.get(failure_type, "")
 
 
@@ -309,7 +332,11 @@ class AlertPayload:
         recommended_action: str,
         runbook_url: str,
         probe_detail: str = "",
+        ha_previous_node: str = "",
+        ha_new_node: str = "",
     ):
+        self.ha_previous_node = ha_previous_node
+        self.ha_new_node = ha_new_node
         self.severity = severity           # CRITICAL / HIGH / WARNING
         self.container_name = container_name
         self.container_id = container_id[:12] if container_id else "N/A"
@@ -324,6 +351,9 @@ class AlertPayload:
         self.timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def subject(self) -> str:
+        if self.failure_type == "ha-failover":
+            return (f"[{self.severity}] CyberController HA active node changed: "
+                    f"{self.ha_previous_node} -> {self.ha_new_node} on {self.host}")
         probe = f" ({self.probe_type})" if self.probe_type else ""
         return (
             f"[{self.severity}] Container {self.failure_type.upper()}{probe}: "
@@ -369,11 +399,21 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
         if payload.probe_detail
         else []
     )
+    ha_event = payload.failure_type == "ha-failover"
+    ha_fields = [
+        {"title": "Event", "value": "HA active-node change", "short": True},
+        {"title": "Previous active", "value": payload.ha_previous_node, "short": True},
+        {"title": "New active", "value": payload.ha_new_node, "short": True},
+        {"title": "Host", "value": payload.host, "short": True},
+        {"title": "Time (UTC)", "value": payload.timestamp, "short": True},
+        *probe_field,
+        {"title": "Action", "value": payload.recommended_action, "short": False},
+    ]
     body = {
         "attachments": [{
             "color": color,
             "title": payload.subject(),
-            "fields": [
+            "fields": ha_fields if ha_event else [
                 {"title": "Container", "value": payload.container_name, "short": True},
                 {"title": "Host",      "value": payload.host,           "short": True},
                 {"title": "Failure",   "value": payload.failure_type,   "short": True},
@@ -385,7 +425,8 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
                 {"title": "Action",    "value": payload.recommended_action, "short": False},
                 {"title": "Runbook",   "value": payload.runbook_url,    "short": False},
             ],
-            "footer": f"Container ID: {payload.container_id}",
+            "footer": ("Source: HA cluster exporter" if ha_event
+                       else f"Container ID: {payload.container_id}"),
             "ts": int(time.time()),
         }]
     }
@@ -402,11 +443,15 @@ def dispatch_alert(payload: AlertPayload, cfg: dict) -> None:
     """Send alert to all configured channels."""
     channels = cfg.get("alert_channels", ["slack"])
     log_fn = log.info if payload.failure_type == "recovered" else log.warning
-    log_fn(
-        "ALERT [%s] %s — %s (channels: %s)",
-        payload.severity, payload.container_name,
-        payload.failure_type, channels,
-    )
+    if payload.failure_type == "ha-failover":
+        log_fn("ALERT %s (channels: %s) — %s",
+               payload.subject(), channels, payload.probe_detail)
+    else:
+        log_fn(
+            "ALERT [%s] %s — %s (channels: %s)",
+            payload.severity, payload.container_name,
+            payload.failure_type, channels,
+        )
     if "slack"  in channels: send_slack(payload, cfg)
     if "smtp"   in channels: send_smtp(payload, cfg)
     if "snmp_trap"  in channels: send_snmp_trap(payload, cfg)
@@ -467,8 +512,19 @@ def send_smtp(payload: AlertPayload, cfg: dict) -> None:
         return
 
     # ── Build message
-    subject = f"[{payload.severity}] {payload.container_name}: {payload.failure_type}"
-    body = f"""Container: {payload.container_name}
+    ha_event = payload.failure_type == "ha-failover"
+    subject = (payload.subject() if ha_event else
+               f"[{payload.severity}] {payload.container_name}: {payload.failure_type}")
+    if ha_event:
+        body = (f"CyberController HA active node changed\n"
+                f"Previous active: {payload.ha_previous_node}\n"
+                f"New active: {payload.ha_new_node}\n"
+                f"Host: {payload.host}\n"
+                f"Observed (UTC): {payload.timestamp}\n"
+                f"Evidence: {payload.probe_detail}\n\n"
+                f"Action: {payload.recommended_action}")
+    else:
+        body = f"""Container: {payload.container_name}
 Host: {payload.host}
 Status: {payload.failure_type}
 Severity: {payload.severity}
@@ -865,10 +921,9 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
         mp_model      = 0 if version == "v1" else 1  # 0=SNMPv1, 1=SNMPv2c
         security_data = CommunityData(community, mpModel=mp_model)
 
-    summary = (
-        f"[{payload.severity}] {payload.container_name} on {payload.host}: "
-        f"{payload.failure_type}"
-    )
+    summary = (payload.subject() if payload.failure_type == "ha-failover" else
+               f"[{payload.severity}] {payload.container_name} on {payload.host}: "
+               f"{payload.failure_type}")
 
     # ── 6. Log the effective engine ID (needed for snmptrapd createUser -e) ───
     if _eid_source == "config":
@@ -931,7 +986,7 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
                 (f"{_ENTERPRISE_ARC}.1.2.0", OctetString(summary.encode("utf-8", errors="replace"))),
                 # cwContainerName (.1.3.0) — STRING — container name
                 (f"{_ENTERPRISE_ARC}.1.3.0", OctetString(payload.container_name.encode("utf-8", errors="replace"))),
-                # cwFailureType (.1.4.0) — STRING — crashed | oom | unhealthy | restart-loop
+                # cwFailureType (.1.4.0) — STRING — container failure or ha-failover
                 (f"{_ENTERPRISE_ARC}.1.4.0", OctetString(payload.failure_type.encode("utf-8", errors="replace"))),
                 # cwProbeDetail (.1.5.0) — STRING — what probe failed and why
                 (f"{_ENTERPRISE_ARC}.1.5.0", OctetString((payload.probe_detail or "").encode("utf-8", errors="replace"))),
@@ -1306,6 +1361,16 @@ class Watchdog:
         self._manual_exec_lock = threading.Lock()
         self._manual_exec_inflight: set[str] = set()
         self._restore_state()
+        _ha = cfg.get("ha_monitor")
+        self._ha_cfg = _ha if isinstance(_ha, dict) else {}
+        self._ha_enabled = self._ha_cfg.get("enabled") is True
+        if not self._ha_enabled and self.state.get_ha_node():
+            # An explicit disabled run breaks the observation history. On the
+            # next enable, establish a fresh quiet baseline, not a stale alert.
+            self.state.clear_ha_node()
+            self.state.save(self._boot_time)
+        self._ha_tracker = HARoleTracker(self.state.get_ha_node())
+        self._ha_error_log_at = float("-inf")
 
     # ── State restore ─────────────────────────────────────────────────────────
     def _restore_state(self) -> None:
@@ -1755,6 +1820,61 @@ class Watchdog:
                     log.info("%s recovered — resetting unhealthy counter", name)
                 state.unhealthy_cycles = 0
             self._maybe_alert_recovery(container, state)
+
+    def _poll_ha(self, session: requests.Session) -> None:
+        """Read HA state without Docker API calls; do not alter Pacemaker."""
+        if self._grace_until and time.time() < self._grace_until:
+            return  # Never fold HA events into the host reboot-summary.
+        url = self._ha_cfg.get("exporter_url", "http://127.0.0.1:9664/metrics")
+        try:
+            observation = read_ha_observation(session, url)
+        except Exception as exc:
+            self._ha_tracker.reset_candidate()
+            if time.monotonic() - self._ha_error_log_at >= 300:
+                self._ha_error_log_at = time.monotonic()
+                log.warning("HA check unavailable (%s): %s", type(exc).__name__, exc)
+            return
+
+        changed, change = self._ha_tracker.observe(observation)
+        if changed:
+            self.state.set_ha_node(self._ha_tracker.confirmed)
+            self.state.save(self._boot_time)
+        if change is None:
+            return
+        if not change.should_notify:
+            log.info("HA role changed %s -> %s; new owner will notify",
+                     change.previous, change.current)
+            return
+        detail = (f"Previous active: {change.previous}; New active: {change.current}; "
+                  "HAOperatorRep-Res is promoted/active on the new node "
+                  "(Pacemaker HA exporter)")
+        payload = AlertPayload(
+            severity="WARNING",
+            container_name="(HA cluster)",
+            container_id="",
+            host=self.host,
+            failure_type="ha-failover",
+            exit_code=None,
+            log_tail="",
+            recommended_action="Verify whether the HA switchover was expected and check service health.",
+            runbook_url=self.runbook_base,
+            probe_detail=detail,
+            ha_previous_node=change.previous,
+            ha_new_node=change.current,
+        )
+        self._dispatch(payload)
+
+    def _ha_poll_loop(self) -> None:
+        """Separate HA scheduling and HTTP session so Docker probes cannot delay it."""
+        interval = self.cfg.get("check_interval_seconds", 60)
+        log.info("HA poll loop started — interval: %ds", interval)
+        with requests.Session() as session:
+            while not self._stop_event.is_set():
+                try:
+                    self._poll_ha(session)
+                except Exception as exc:
+                    log.error("HA poll error: %s", exc)
+                self._stop_event.wait(interval)
 
     # ── Poll loop ─────────────────────────────────────────────────────────────
     def _poll_loop(self) -> None:
@@ -2231,13 +2351,21 @@ class Watchdog:
         if self._lifecycle_enabled:
             threading.Thread(target=self._lifecycle_worker, name="lifecycle-worker",
                              daemon=True).start()
-        # Poll runs in the main thread
+        ha_thread = None
+        if self._ha_enabled:
+            ha_thread = threading.Thread(
+                target=self._ha_poll_loop, name="ha-poller", daemon=True
+            )
+            ha_thread.start()
+        # Docker polling remains in the main thread, independent of HA.
         try:
             self._poll_loop()
         except KeyboardInterrupt:
             pass
         finally:
             self.stop()
+            if ha_thread:
+                ha_thread.join(timeout=5)
 
     def stop(self) -> None:
         log.info("Watchdog shutting down")
