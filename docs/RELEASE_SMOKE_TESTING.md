@@ -4,9 +4,9 @@
 
 ## Safety rule
 
-**NEVER run `tests/release-smoke.sh` on CyberController, its HA nodes, m920q, a customer system, or another shared machine.** Do not try to make a live host "safe" by changing its watchdog exclusions, switching off its notifications, labelling dummy containers, or setting a live-host opt-in flag.
+**NEVER run `tests/release-smoke.sh` on CyberController, customer systems, or any shared Docker host.** Do not try to make a live host "safe" by changing its watchdog exclusions, switching off its notifications, labelling dummy containers, or setting a live-host opt-in flag.
 
-Instead run the workflow [Release smoke (isolated)](../.github/workflows/release-smoke.yml). It executes on a **GitHub-hosted disposable runner** and creates a second, empty, short-lived, uniquely labelled Docker-in-Docker Engine. Only that Engine's Docker socket is mounted inside the test observer. The temporary outer Engine is visible to the GitHub runner's Docker daemon, never to CyberController or m920q. All test-created resources are disposable and contained within that hosted worker.
+Instead run the workflow [Release smoke (isolated)](../.github/workflows/release-smoke.yml). It executes on a **GitHub-hosted disposable runner** and creates a second, empty, short-lived, uniquely labelled Docker-in-Docker Engine. Only that Engine's Docker socket is mounted inside the test observer. The temporary outer Engine is visible to the GitHub runner's Docker daemon, never to any operational host. All test-created resources are disposable and contained within that hosted worker.
 
 The workflow has no corporate customer credentials, no HA exporter dependency, no CyberController Docker socket, no external notification destinations, and no network access from the disposable failure fixtures.
 
@@ -63,11 +63,9 @@ Within the verified Engine, each fixture uses unique names and a per-run ownersh
 | Syslog | Locally generated structured alerts received exactly once as real UDP Syslog |
 | Cleanup | No leftover test-labelled containers/volumes, no unauthorized modifications |
 
-## Important historical correction
+## Isolation lesson
 
-An earlier 2026-10-14 validation ran a nested Engine on **m920q**. Its outer `ca-v160-isolated-engine` container was monitored by the existing `watchdog:1.5.4` and generated HIGH UNHEALTHY and CRITICAL OOM alerts on the **normal SMTP channel**. That test Engine was subsequently removed, but its existence demonstrates that nesting alone is **not production isolation**. Do not repeat that method.
-
-Earlier acceptance JSON and reports remain in `docs/` as traceability, not authorization to rerun those procedures on operational Docker hosts.
+Earlier development tests showed that a nested test Docker Engine remains visible to its parent host. Destructive acceptance tests must run on a disposable hosted runner, not a shared or operational host.
 
 ## Operator verification (read-only only)
 

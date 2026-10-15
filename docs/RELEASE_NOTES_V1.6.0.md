@@ -1,6 +1,6 @@
 # v1.6.0 Release — Changes Since 1.5.4
 
-**Status:** Release candidate, not yet tagged or published. Version remains `1.6.0` in `VERSION`. The [release PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9) targets `main`. This file documents everything included in the upcoming release relative to v1.5.4, not a claim that an image or deployment has been published.
+This document describes version **1.6.0** and its changes since v1.5.4. Building, publishing, and deploying its image are separate release steps.
 
 ## Feature and fix inventory
 
@@ -42,7 +42,7 @@ The CRASH read-only logs command is intended for authorized diagnostic access. C
 - Automated regression tests run in CI without destructive Docker operations. The additional smoke guard tests use a fake Docker executable and must confirm unsafe endpoints are rejected without contacting Docker.
 - Destructive real Docker failure testing is **only** through the manually dispatched [Release smoke (isolated)](../.github/workflows/release-smoke.yml) workflow on an ephemeral GitHub-hosted runner with an empty labelled nested Engine. See [procedure](RELEASE_SMOKE_TESTING.md).
 - Historical test evidence is retained: [v1.6.0 final 2026-10-14 acceptance](RELEASE_ACCEPTANCE_V1.6.0_FINAL.md), [earlier live HA-lab findings](RELEASE_VALIDATION_V1.6.0.md), and JSON files in this directory. **That evidence predates the latest notification wording and fail-closed test-runner changes**. A fresh hosted workflow result must be associated with the current PR commit.
-- During previous m920q nested-engine testing, the outer test container was visible to the host's normal watchdog and caused genuine HIGH/CRITICAL notifications. This is why the nested Engine is now allowed **only on a disposable hosted CI machine** and never on m920q or CyberController.
+- Earlier nested-engine tests on a shared host generated real watchdog alerts. Destructive acceptance is therefore restricted to disposable hosted CI.
 - Existing lab watchdog images are **not automatically upgraded** by a PR push. The final image must be built from the approved merge commit, identified by image digest, and deployed through the existing versioned release process.
 
 ## Exclusions, limitations and release gating

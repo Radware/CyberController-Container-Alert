@@ -13,7 +13,7 @@ import watchdog
 
 def alert(severity="CRITICAL", failure="crashed"):
     return watchdog.AlertPayload(
-        severity, "demo-service", "abcdef123456789", "vision", failure, 137,
+        severity, "demo-service", "abcdef123456789", "test-host", failure, 137,
         "", "Inspect Docker events and logs.", "https://example.invalid/runbook",
         'Crash probe failed - SIGKILL; OOM not confirmed',
     )
@@ -46,7 +46,7 @@ class NotificationTests(unittest.TestCase):
                         recovery.exit_code = None
                         watchdog.dispatch_alert(recovery, {"alert_channels": []})
                         ha = watchdog.AlertPayload(
-                            "WARNING", "(HA cluster)", "", "vision", "ha-failover",
+                            "WARNING", "(HA cluster)", "", "test-host", "ha-failover",
                             None, "", "Check cluster health", "",
                             "HA Operator promoted to new node",
                             ha_previous_node="node-a", ha_new_node="node-b"
@@ -83,7 +83,7 @@ class NotificationTests(unittest.TestCase):
         ):
             with self.subTest(failure=failure):
                 p = watchdog.AlertPayload(
-                    "INFO", container_name, "", "vision", failure, None, "",
+                    "INFO", container_name, "", "test-host", failure, None, "",
                     "Check cluster", "", "Event details",
                     ha_previous_node="node-a", ha_new_node="node-b")
                 record = watchdog.format_syslog_alert(p)
@@ -91,7 +91,7 @@ class NotificationTests(unittest.TestCase):
                 self.assertIn(f'failure_type="{failure}"', record)
                 self.assertNotIn('container=', record)
                 self.assertNotIn('container_id=', record)
-                self.assertIn('host="vision"', record)
+                self.assertIn('host="test-host"', record)
                 if failure == "ha-failover":
                     self.assertIn('previous_active="node-a"', record)
                     self.assertIn('new_active="node-b"', record)
@@ -144,7 +144,7 @@ class NotificationTests(unittest.TestCase):
         data = watchdog.format_syslog_alert(p)
         for fragment in ('event="watchdog_alert"', 'severity="CRITICAL"',
                          'failure_type="crashed"', 'exit_code="137"',
-                         'host="vision"', 'container="demo-service"',
+                         'host="test-host"', 'container="demo-service"',
                          'container_id="abcdef123456"',
                          'probe_type="Docker event (crash)"',
                          'action="Inspect Docker events and logs."'):

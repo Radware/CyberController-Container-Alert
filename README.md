@@ -83,7 +83,7 @@ node has a local Pacemaker HA cluster exporter:
 ha_monitor:
   enabled: true
   exporter_url: http://127.0.0.1:9664/metrics
-~~~
+```
 
 The watchdog reads HA cluster resource metrics and validates local-node identity,
 cluster quorum, and Pacemaker scrape success. The first valid reading
@@ -250,21 +250,6 @@ syslog:
   facility: local0
 ```
 
-Syslog is an **alert and error stream**, not a per-poll health feed. It sends
-one structured, single-line event="watchdog_alert" record per emitted incident
-(including INFO recoveries and reboot summaries), plus watchdog ERROR/CRITICAL
-diagnostics. Routine INFO/WARNING polling messages stay local; per-container
-poll output is available at log_level: DEBUG. The alert records include the
-severity, UTC time, host, container, failure type, detection evidence and action,
-with special previous/new active-node fields for HA. The syslog priority is
-CRITICAL=2, HIGH=3 (error), WARNING=4 and INFO=6; the facility remains
-configurable. Values are quoted, escaped and length-limited for ingestion.
-Syslog is configured independently from alert_channels.
-Local log_level controls only console/file verbosity; INFO recoveries and
-WARNING HA alerts still reach Syslog when local log_level is WARNING or ERROR.
-HA and reboot-summary records omit pseudo-container fields.
-
-
 ### SMTP (Email)
 
 Add `smtp` to `alert_channels` to enable.
@@ -290,7 +275,7 @@ Add `snmp_trap` to `alert_channels` to enable. Sends SNMP traps (v1, v2c, or v3)
 ```yaml
 snmp_trap:
   enabled: true
-  host: 155.1.1.4                          # IP or hostname of your SNMP trap receiver
+  host: syslog.example.com                          # IP or hostname of your SNMP trap receiver
   port: 162                                # Standard SNMP trap port
   version: v2c                             # SNMP version: v1, v2c, or v3
   community: public                        # SNMPv1/v2c community string (ignored for v3)
@@ -303,10 +288,6 @@ snmp_trap:
   # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
   # v3_local_engine_id: ""                 # hex engine ID pinned from first-run log; see DEPLOYMENT.md
 ```
-
-SNMP retains its five existing var-binds and OIDs for NMS compatibility.
-The human-readable cwSummary contains severity; cwProbeDetail contains
-detection evidence. No additional SNMP objects are introduced in v1.6.0.
 
 Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3.6.1.4.1.89.110`):
 
@@ -355,58 +336,27 @@ Every alert includes two probe fields that identify exactly how and why the fail
 | `crashed` | `Docker event (crash)` | `Crash probe failed — container exited with exit code 1` |
 | `oom` | `Docker event (OOM)` | `OOM probe failed — container was OOM-killed by the kernel` |
 | `unhealthy` (Docker native HEALTHCHECK) | `Docker HEALTHCHECK` | `Docker health probe failed — exit code 1, output: connection refused` |
-| `unhealthy` (HTTP auto-probe) | `HTTP GET` | `HTTP probe failed — error response 503 Service Unavailable, URI http://172.18.0.5:8080/health` |
-| `unhealthy` (TCP connect) | `TCP connect` | `TCP probe failed — connection refused or timed out on 172.18.0.5:6379 (Connection refused)` |
+| `unhealthy` (HTTP auto-probe) | `HTTP GET` | `HTTP probe failed — error response 503 Service Unavailable, URI http://192.0.2.100:8080/health` |
+| `unhealthy` (TCP connect) | `TCP connect` | `TCP probe failed — connection refused or timed out on 192.0.2.100:6379 (Connection refused)` |
 | `unhealthy` (/proc fallback) | `/proc alive check` | `/proc alive check failed — PID 1 is zombie/stopped (exit code 1)` |
 
 > **Restart-loop detection** uses Docker `RestartCount` from the polling loop as its sole restart count. The first poll establishes a baseline without interpreting historical restarts. Counter increases are timestamped when observed, so detection can take up to one polling interval; the rolling window is approximate to polling precision. After a polling gap longer than the restart window, unknown-age increments are ignored rather than misattributed to the current window. Delayed Docker events cannot double-count restarts; timestamps on events also prevent failures from before confirmed recovery from reopening an incident.
 
 ---
 
-## 7. Testing
+## 7. Verify Watchdog Operation
 
-**Production / CyberController safety boundary:** Do **not** simulate crashes, OOM
-events, restart loops, or recovery by running `docker kill`, `docker stop`,
-`docker restart`, disposable stress containers, or other destructive experiments
-on a CyberController node or another shared/operational Docker Engine.
-Even supposedly disposable test containers can consume shared resources or
-trigger real monitoring, and a nested Docker-in-Docker container remains visible
-to the host's normal watchdog. The earlier host-based examples were removed
-for this reason.
-
-### Safe verification on an operational host (read-only)
-
-Authorized operators may review the existing watchdog's current health and
-its own recent logs without altering any container:
+On an installed system, use these read-only checks:
 
 ```bash
-docker inspect docker-container-watchdog   --format 'state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
+docker ps --filter name=docker-container-watchdog
+docker inspect docker-container-watchdog --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'
 docker logs --tail 50 docker-container-watchdog
 ```
 
-To validate an alert without changing a running service, use the unit/format
-regression tests on a development workstation or the normal pull-request CI.
-No failure injection is required for message formatting or severity checks.
+Expected: the watchdog is running/healthy and monitoring logs are current. Check the configured notification receiver for any existing alerts. A healthy system does not need to generate a new alert just for verification.
 
-### Destructive real Docker acceptance — disposable hosted runner ONLY
-
-Use the **Release smoke (isolated)** GitHub Actions workflow on the intended
-release PR (automatically for in-repository PR changes, or manual rerun once the
-workflow exists on the default branch); it uses an ephemeral GitHub-hosted worker
-with an empty, specially labelled Docker Engine, separate alert state, and a
-temporary UDP Syslog receiver. The smoke runner aborts before creating any
-test resource unless it verifies the dedicated hosted worker, exact localhost
-test endpoint, unique engine label, and zero existing containers. **There is no
-live-host override.**
-
-The [smoke-test procedure](docs/RELEASE_SMOKE_TESTING.md) details acceptance
-criteria, evidence capture, cleanup, and use of the workflow. The normal PR CI
-runs only non-destructive Python, shell and build validations; destructive Docker
-scenarios run only in the separate, GitHub-hosted release workflow.
-
-Do not start a test Engine on CyberController or m920q. The previous 2026-10-14
-m920q Docker-in-Docker test inadvertently generated real host watchdog alerts;
-that approach must not be repeated.
+Do not simulate failures on operational hosts. Developers can use the isolated release test procedure in [Release Smoke Testing](docs/RELEASE_SMOKE_TESTING.md).
 
 ## 8. Troubleshooting
 
@@ -439,18 +389,11 @@ Common causes:
 - Confirm `alert_on_recovery` is not set to `false` in the live `watchdog-config.yaml`.
 - Confirm the container was actually alarmed first — `state.alerted_for` must be non-empty; a container that was never flagged won't generate a recovery alert.
 - For containers with a Docker `HEALTHCHECK`, confirm Docker actually reports `healthy` — `docker inspect <name> --format '{{json .State.Health}}'`. If it's stuck on `starting`, the watchdog is waiting on Docker, not the other way around.
-- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, the probe (often `auto_health_check`) is misjudging the service; add a manual entry under `container_health_checks` instead.
+- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, the probe (often `auto_health_check`) is misjudging the service; contact Radware support before changing the health-check configuration.
 
 ### Duplicate and Excessive Alert Notifications
 
-Increase `cooldown_minutes` in `watchdog-config.yaml` (default: `5` minutes per container per failure type). To silence a noisy container entirely, add it to `excluded_containers`:
-
-```yaml
-excluded_containers:
-  - debug-shell
-  - load-test
-  - my-noisy-container
-```
+Review the affected container's alert history and probe details. Contact Radware support or the responsible engineering team before changing monitoring thresholds, health checks or exclusions.
 
 ### Probe Type Not as Expected
 
@@ -545,13 +488,13 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 ## 10. Version History
 
-**Release status (2026-10-15):** `VERSION` remains `1.6.0` for the **upcoming, untagged** release candidate. PR #9 is open. The complete changes since 1.5.4, approved customer-facing alert wording, release acceptance and destructive-test isolation are documented in [v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). Historical HA and isolated Docker tests passed on earlier candidates; the final hosted-runner safety workflow must pass against the latest commit before publication. No v1.6.0 tag or final offline package is published; deployed lab images are not automatically updated by this branch.
+**Version 1.6.0 (2026-10-15):** This section documents v1.6.0 and changes since v1.5.4. Release artifacts are built, tested and published separately; updating the source checkout does not upgrade running containers.
 
 **Release procedure:** After validating a release candidate, increment `VERSION`, add a dated entry here, build and verify `watchdog:<VERSION>`, and package the matching `watchdog.tar` for offline installs. Pin deployment with `WATCHDOG_VERSION` in `.env`; verify upgrade and rollback before tagging the exact released commit (`vX.Y.Z`) and publishing release notes. Do not overwrite an old versioned image with new code. GitHub CI checks PRs but does not publish releases automatically; as of this update, no Git tags or GitHub Releases exist.
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| 1.6.0 | 2026-10-15 | Radware engineering | Upcoming since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, installer fallback, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). |
+| 1.6.0 | 2026-10-15 | Radware engineering | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, installer fallback, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
@@ -560,7 +503,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 | 1.4.0 | 2026-08-17 | Rahul Kumar | Added INFO "recovered" alert |
 | 1.3.3 | 2026-08-05 | Rahul Kumar | Added Auth True/false |
 | 1.3.2 | 2026-07-28 | Rahul Kumar | Fixed SMTP Auth issue |
-| 1.3.1 | 2026-07-21 | Egor Egorov | Updated Readme and Deployment guides |
+| 1.3.1 | 2026-07-21 | Engineering | Updated Readme and Deployment guides |
 | 1.3.0 | 2026-07-16 | Rahul Kumar | Added Upgrade Guide |
 | 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
 | 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |

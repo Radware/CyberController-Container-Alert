@@ -19,7 +19,7 @@
       "/app/lifecycle.py": "55b6a06ebb69cb5a70f6c1566798087510228ef93eeceb810dcadb5da09d81f9",
       "/app/ha_monitor.py": "0fb3ba165035c9970f91854914709fd7492e21a7583c74f34174275c12083dbd"
     },
-    "host": "b6df39059ff7",
+    "host": "isolated-test-engine",
     "revision": "",
     "image_id": "sha256:670cbdd3a24317aa39c04036d1c90c72420c97a0afe32ad5e4a77e06ef464be9",
     "observer": "ca-smoke-261014224323244-observer",

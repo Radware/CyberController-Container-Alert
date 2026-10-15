@@ -4,12 +4,12 @@
 > **Historical acceptance evidence (October 14, 2026), not current test instructions.**
 > These records predate the v1.6.0 hosted-only smoke-test safety guard and final
 > customer-facing message updates. Do **not** rerun their Docker commands on
-> m920q, CyberController or another operational Engine. The prior outer
-> Docker-in-Docker test container triggered genuine m920q watchdog alerts.
+> any shared or operational Docker Engine. Earlier nested testing triggered
+> real notifications on its parent host.
 > See [current release notes](RELEASE_NOTES_V1.6.0.md) and
 > [safe smoke workflow](RELEASE_SMOKE_TESTING.md).
 
-> **Historical baseline (pre-fix).** This page records the original HA-lab smoke-test failures. They were subsequently investigated using a separate real Docker Engine on m920q, and a minimal recovery fix passed the complete [final release acceptance report](RELEASE_ACCEPTANCE_V1.6.0_FINAL.md). Retain this document as evidence of the original findings, not the current release verdict.
+> **Historical baseline (pre-fix).** This page records the original HA-lab smoke-test failures. They were subsequently investigated using a separate real Docker Engine on a dedicated development host, and a minimal recovery fix passed the complete [final release acceptance report](RELEASE_ACCEPTANCE_V1.6.0_FINAL.md). Retain this document as evidence of the original findings, not the current release verdict.
 
 **Date:** October 14, 2026 (UTC)
 **Repository:** `Radware/CyberController-Container-Alert`
@@ -21,7 +21,7 @@
 
 ## Test methods and safeguards
 
-- Tested against the real Docker Engine on `ha-test-admin-ea-iad1` (`10.199.0.241`). No simulated Docker events.
+- Tested against a real Docker Engine in the HA test environment (`192.0.2.41`). No simulated Docker events.
 - A separate resource-limited v1.6.0 observer used its own Docker volume/state, 2-second Docker polling, real 5-restart threshold, and **real 120-second** recovery requirement. SMTP disabled only on the observer; Syslog sent to the **existing** DFC UDP/514 receiver. Production-style main watchdog and cluster were not reconfigured.
 - Used uniquely prefixed, labeled disposable containers, restricted to 0.2 CPU and 64–128 MiB each, with `--network none`. Verified actual Docker state, events, watchdog structured alert records, and DFC `/var/log/syslog` deliveries.
 - No host packages, new Docker networks, Pacemaker operations, or host service modifications. Cleanup removed all smoke-owned containers and volumes. Original watchdog stayed healthy.
@@ -31,7 +31,7 @@
 
 | Check | Acceptance | Result |
 |---|---|---|
-| Automated regression suite | All tests pass against final built source | **PASS — 108/108** inside m920q Docker image |
+| Automated regression suite | All tests pass against final built source | **PASS — 108/108** inside a test Docker image |
 | GitHub CI for PR #9 head | Green | **PASS** on `3b1de153` (before adding this documentation) |
 | Release code/image integrity | Embedded `watchdog.py`, `lifecycle.py`, `ha_monitor.py` hashes match Git | **PASS** |
 | `install.sh` / smoke script syntax | `bash -n`, smoke embedded Python compiles | **PASS** |
@@ -44,13 +44,13 @@
 
 | Scenario | Acceptance | Actual result |
 |---|---|---|
-| Baseline | Both nodes agree `.241` active, no startup failover | **PASS** |
-| Failover `.241 → .242` | One WARNING on new owner, zero on previous | **PASS** — alert on `.242` at **20:56:16 UTC**; `.241` logged "new owner will notify" |
-| HA Syslog on `.242` | Structured failover record delivered to DFC | **PASS** — stored in DFC `/var/log/syslog` |
-| Failback `.242 → .241` | One WARNING on new owner, zero on previous | **PASS** — alert on `.241` at **21:09:47 UTC**; `.242` logged owner defer |
-| HA Syslog on `.241` | Structured failback record delivered to DFC | **PASS** |
-| Final cluster status | One promoted HA Operator, quorum, both watchdogs healthy | **PASS** — `.241` active; both watchdogs image `1.6.0`, healthy, zero restarts |
-| Transient exporter ambiguity during transition | No fabricated failover | **PASS** — `.242` logged one invalid-promoted-owner observation at 20:54:16 UTC, then recovered and sent correct alert |
+| Baseline | Both nodes agree `.41` active, no startup failover | **PASS** |
+| Failover `.41 → .42` | One WARNING on new owner, zero on previous | **PASS** — alert on `.42` at **20:56:16 UTC**; `.41` logged "new owner will notify" |
+| HA Syslog on `.42` | Structured failover record delivered to DFC | **PASS** — stored in DFC `/var/log/syslog` |
+| Failback `.42 → .41` | One WARNING on new owner, zero on previous | **PASS** — alert on `.41` at **21:09:47 UTC**; `.42` logged owner defer |
+| HA Syslog on `.41` | Structured failback record delivered to DFC | **PASS** |
+| Final cluster status | One promoted HA Operator, quorum, both watchdogs healthy | **PASS** — `.41` active; both watchdogs image `1.6.0`, healthy, zero restarts |
+| Transient exporter ambiguity during transition | No fabricated failover | **PASS** — `.42` logged one invalid-promoted-owner observation at 20:54:16 UTC, then recovered and sent correct alert |
 | SMTP delivery | Excluded by test owner | **EXCLUDED** — SMTP network timeouts are not part of this verdict |
 
 ## 3. Real Docker acceptance — final run
@@ -84,7 +84,7 @@
 
 ### Investigation: out-of-band restarts
 
-The live event capture on `.241` included **37 `restart` actions, 57 starts, 54 dies, and 12 `oom` actions** for test-tagged containers. Importantly, some affected fixtures had `HostConfig.RestartPolicy.Name=no`, yet their Docker IDs were started/restarted repeatedly. The initiator of these restarts was **not established**; do not attribute them to Container Alert without additional evidence.
+The live event capture on `.41` included **37 `restart` actions, 57 starts, 54 dies, and 12 `oom` actions** for test-tagged containers. Importantly, some affected fixtures had `HostConfig.RestartPolicy.Name=no`, yet their Docker IDs were started/restarted repeatedly. The initiator of these restarts was **not established**; do not attribute them to Container Alert without additional evidence.
 
 The planned-stop fixture initially emitted real `kill(SIGTERM)`, `kill(SIGKILL)`, `stop`, and `die(137)` events. The unwanted CRASH appeared **later**, when that fixture had already been restarted and the test suite used force-remove to clean it up; that final kill had no `stop` evidence. This is not evidence that the original `docker stop` was misclassified.
 

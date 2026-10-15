@@ -14,7 +14,7 @@
     }
   ],
   "facts": {
-    "host": "b6df39059ff7",
+    "host": "isolated-test-engine",
     "revision": "",
     "image_id": "sha256:3a9942e74f643b0c2b38c82bcd0ef2b805cd13dd0f7c100031080f2cf06e494a",
     "observer": "ca-smoke-261014223252035-observer",

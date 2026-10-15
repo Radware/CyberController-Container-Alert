@@ -5,15 +5,7 @@ The **CyberController Container Watchdog** is an autonomous monitoring service t
 This guide covers initial deployment, alert channel configuration, and ongoing operational management of the watchdog service.
 
 
-> **v1.6.0 release safety / customer messaging:** Do **not** run destructive
-> Docker failure simulations on CyberController, HA nodes or shared operational
-> Docker Engines. See the [hosted-only release test procedure](docs/RELEASE_SMOKE_TESTING.md).
-> Container Alert notification descriptions are informational and do not direct
-> customers to modify Compose YAML, resource limits, restart policies or other
-> production settings. Such remediation requires the applicable Radware R&D /
-> authorized change process. The optional CRASH `docker logs` command is read-only
-> and is intended for authorized diagnostic access. See
-> [v1.6.0 changes since 1.5.4](docs/RELEASE_NOTES_V1.6.0.md).
+> **Production safety:** Verify watchdog operation using read-only status and log checks. Do not simulate failures on operational hosts. Contact Radware support before changing production monitoring settings.
 
 ---
 
@@ -209,7 +201,7 @@ Enable the syslog block in `watchdog-config.yaml`:
 # ── Syslog (remote / central log server) ─────────────────────────────────────
 syslog:
   enabled: true             # set to true to enable
-  host: 155.1.1.4           # IP or hostname of your syslog server
+  host: syslog.example.com           # IP or hostname of your syslog server
   port: 514                 # 514 = standard syslog (UDP); 601 = reliable syslog (TCP)
   protocol: udp             # udp (fire-and-forget) or tcp (reliable)
   facility: local0          # syslog facility: local0–local7, daemon, user, etc.
@@ -288,7 +280,7 @@ Add `snmp_trap` to `alert_channels` in `watchdog-config.yaml` and configure the 
 # Requires: pip install pysnmp (already in requirements-watchdog.txt)
 snmp_trap:
   enabled: false                     # set to true to enable
-  host: 155.1.1.1                    # IP or hostname of your SNMP trap receiver (NMS)
+  host: nms.example.com                    # IP or hostname of your SNMP trap receiver (NMS)
   port: 162                          # UDP port — 162 is the standard SNMP trap port
   version: v2c                       # SNMP version: v1, v2c, or v3
   community: public                  # SNMPv1/v2c community string (ignored for v3)
@@ -848,6 +840,4 @@ new trap OID is introduced.
 
 If you have trouble accessing the `watchdog.tar` download link, or need an updated offline image from the Radware RE team, contact:
 
-- rahulku@radware.com
-- Egore@radware.com
 - northamericare@radware.com

@@ -13,17 +13,19 @@ Customer request: alert when CyberController HA changes its active node, includi
 
 This is an **observed active-node change** alert, not a claim to identify why a failover happened or that all CyberController applications are healthy.
 
-## 2. Verified appliance evidence (read-only inspection)
+## 2. HA validation evidence (read-only inspection)
 
-On the two-node HA environment ha-test-admin-ea-iad1, Pacemaker reports nodes 10.199.0.241 and 10.199.0.242 online. The HA Operator, OpenSearch, PostgreSQL, MariaDB, and Failback promotable resources are currently **Promoted on .241** and **Unpromoted on .242**. The Pacemaker DC is .242; **DC is not the CyberController active node**.
+Node addresses below are anonymized using documentation-only IPs.
 
-- HA exporter: **ha_cluster_exporter.service**, active on .241, serving port **9664** and reachable at **http://127.0.0.1:9664/metrics** (HTTP 200).
-- Promoted role metric: **ha_cluster_pacemaker_resources** includes resource=HAOperatorRep-Res, role=promoted, status=active, node=10.199.0.241, value 1.
-- Host identity metric: **ha_cluster_corosync_member_votes** includes local=true, node=10.199.0.241.
+In the two-node HA test environment, Pacemaker reports nodes 192.0.2.41 and 192.0.2.42 online. The HA Operator, OpenSearch, PostgreSQL, MariaDB, and Failback promotable resources are currently **Promoted on .41** and **Unpromoted on .42**. The Pacemaker DC is .42; **DC is not the CyberController active node**.
+
+- HA exporter: **ha_cluster_exporter.service**, active on .41, serving port **9664** and reachable at **http://127.0.0.1:9664/metrics** (HTTP 200).
+- Promoted role metric: **ha_cluster_pacemaker_resources** includes resource=HAOperatorRep-Res, role=promoted, status=active, node=192.0.2.41, value 1.
+- Host identity metric: **ha_cluster_corosync_member_votes** includes local=true, node=192.0.2.41.
 - Data-quality signals: **ha_cluster_scrape_success{collector="pacemaker"} = 1** and **ha_cluster_corosync_quorate = 1**.
-- Existing Watchdog v1.5.4 runs on .241 in **host network** mode, polls every 60 seconds, has persistent state, and currently delivers syslog.
+- Existing Watchdog v1.5.4 runs on .41 in **host network** mode, polls every 60 seconds, has persistent state, and currently delivers syslog.
 - Prometheus's native HA target is misconfigured: it scrapes **localhost:9002**, while the exporter serves **9664**. The existing rule **ha_failover_occured** compares per-node location-constraint sum vs average and is not reliable for an actual role change. Correcting the native configuration is a **separate Radware/R&D action**, not part of this feature.
-- Standby .242 did **not** accept cross-node connections to 9664/9099/9093. It has not been inspected locally, so its exporter/watchdog installation is **unverified**. Release testing must cover both nodes.
+- Standby .42 did **not** accept cross-node connections to 9664/9099/9093. It has not been inspected locally, so its exporter/watchdog installation is **unverified**. Release testing must cover both nodes.
 
 ## 3. Small architecture
 
@@ -104,10 +106,10 @@ Retain a **small optional ha_monitor section in the existing state.json** (backw
 
 ~~~text
 [WARNING] CyberController HA active node changed
-Previous active: 10.199.0.241
-New active:      10.199.0.242
+Previous active: 192.0.2.41
+New active:      192.0.2.42
 Observed at:     <UTC timestamp>
-Evidence:        HAOperatorRep-Res promoted on 10.199.0.242 (Pacemaker exporter)
+Evidence:        HAOperatorRep-Res promoted on 192.0.2.42 (Pacemaker exporter)
 Next step:       Confirm expected switchover and application health.
 ~~~
 
@@ -164,7 +166,7 @@ The implementation is ready for review/release when all automated tests and CI p
 
 ## 7. Release gates, risks, and intentional exclusions
 
-**Before release:** confirm both HA nodes can send notifications end-to-end. Both watchdogs and local exporters were confirmed running during the manual .242 -> .241 test. The standby's earlier *remote* exporter connection refusal reflected an inaccessible cross-node port, not a missing local service. No inter-node exporter access is required.
+**Before release:** confirm both HA nodes can send notifications end-to-end. Both watchdogs and local exporters were confirmed running during the manual .42 -> .41 test. The standby's earlier *remote* exporter connection refusal reflected an inaccessible cross-node port, not a missing local service. No inter-node exporter access is required.
 
 **Known limitations:** If the surviving node has no running watchdog/exporter or has never recorded the original active node, this check cannot reconstruct the failover after the fact. Polling can miss a transition that changes twice between samples. Metrics cannot distinguish planned switchover vs unexpected failover, and promotion does not guarantee the entire application is healthy.
 

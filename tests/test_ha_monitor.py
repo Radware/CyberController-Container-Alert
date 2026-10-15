@@ -13,8 +13,8 @@ from ha_monitor import (
     parse_ha_metrics, read_ha_observation,
 )
 
-A = "10.199.0.241"
-B = "10.199.0.242"
+A = "192.0.2.41"
+B = "192.0.2.42"
 
 
 def metrics(owner=A, local=A, *, pacemaker=1, quorum=1, extras=""):
@@ -84,7 +84,7 @@ class HAReaderTests(unittest.TestCase):
             "http://127.0.0.1:9664/metrics", timeout=3, stream=True, allow_redirects=False)
 
     def test_rejects_remote_or_wrong_path_endpoints(self):
-        for url in ("http://10.199.0.242:9664/metrics",
+        for url in ("http://192.0.2.42:9664/metrics",
                     "http://localhost:9664/admin", "https://localhost:9664/metrics",
                     "http://localhost:9664/metrics?x=1"):
             with self.subTest(url=url), self.assertRaises(ValueError):

@@ -49,7 +49,7 @@ class SmokeSafetyTests(unittest.TestCase):
         rc, calls = self.try_runner({
             "GITHUB_ACTIONS": "true", "SMOKE_RUNNER_KIND": "github-hosted",
             "SMOKE_ENGINE_MARKER": "ci-123-1",
-            "DOCKER_HOST": "tcp://10.199.0.241:2375"})
+            "DOCKER_HOST": "tcp://192.0.2.41:2375"})
         self.assertNotEqual(rc, 0)
         self.assertEqual(calls, [])
 

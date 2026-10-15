@@ -105,7 +105,7 @@
     }
   ],
   "facts": {
-    "host": "cc-ea-iad1",
+    "host": "ha-validation-host",
     "revision": "3b1de153e4d6c1b5ef33ca90c0b6ef755727fb05",
     "image_id": "sha256:e3d02f6ef56cde0bc7021919def9e240505434a15769aac3884cf15ac8f0ccff",
     "observer": "ca-smoke-261014214436754-observer",
