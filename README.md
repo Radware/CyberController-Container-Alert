@@ -365,151 +365,47 @@ Every alert includes two probe fields that identify exactly how and why the fail
 
 ## 7. Testing
 
-The sections below describe optional manual tests that validate the watchdog's detection and alerting paths. Each creates a temporary Docker container and cleans up after itself.
+**Production / CyberController safety boundary:** Do **not** simulate crashes, OOM
+events, restart loops, or recovery by running `docker kill`, `docker stop`,
+`docker restart`, disposable stress containers, or other destructive experiments
+on a CyberController node or another shared/operational Docker Engine.
+Even supposedly disposable test containers can consume shared resources or
+trigger real monitoring, and a nested Docker-in-Docker container remains visible
+to the host's normal watchdog. The earlier host-based examples were removed
+for this reason.
 
-### OOM Simulation
+### Safe verification on an operational host (read-only)
 
-Two options — choose based on whether the host has internet access.
-
-#### Option A — `polinux/stress` *(requires internet access)*
-
-> Pulls `polinux/stress` from Docker Hub.
-
-```bash
-# --memory-swap=32m disables swap so the kernel is forced to OOM-kill rather than swap out
-# Note: the polinux/stress entrypoint IS the stress binary — do not repeat "stress" in the args
-docker run -d --name oom-test --memory=32m --memory-swap=32m polinux/stress \
-  --vm 1 --vm-bytes 64M --vm-keep
-```
+Authorized operators may review the existing watchdog's current health and
+its own recent logs without altering any container:
 
 ```bash
-# Clean up
-docker rm -f oom-test
-docker rmi polinux/stress
+docker inspect docker-container-watchdog   --format 'state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{end}}'
+docker logs --tail 50 docker-container-watchdog
 ```
 
-#### Option B — `watchdog:latest` *(no internet required)*
+To validate an alert without changing a running service, use the unit/format
+regression tests on a development workstation or the normal pull-request CI.
+No failure injection is required for message formatting or severity checks.
 
-> Uses the Watchdog image that is already present on the host, avoiding the need to pull the image during deployment.
+### Destructive real Docker acceptance — disposable hosted runner ONLY
 
-```bash
-docker run -d --name oom-test --memory=32m --memory-swap=32m watchdog:latest \
-  python3 -c "x = b'\xff' * (64 * 1024 * 1024)"
-```
+Run the **Release smoke (isolated)** GitHub Actions workflow on the intended
+release branch (`workflow_dispatch`); it uses an ephemeral GitHub-hosted worker
+with an empty, specially labelled Docker Engine, separate alert state, and a
+temporary UDP Syslog receiver. The smoke runner aborts before creating any
+test resource unless it verifies the dedicated hosted worker, exact localhost
+test endpoint, unique engine label, and zero existing containers. **There is no
+live-host override.**
 
-```bash
-# Clean up — container only (keep the watchdog image)
-docker rm -f oom-test
-```
+The [smoke-test procedure](docs/RELEASE_SMOKE_TESTING.md) details acceptance
+criteria, evidence capture, cleanup, and use of the workflow. The normal PR CI
+runs only non-destructive Python, shell and build validations; destructive Docker
+scenarios require manual dispatch of the separate hosted workflow.
 
-Docker kills the container with exit code `137` and emits an `oom` event. The watchdog captures memory stats and the last 20 log lines, then dispatches a CRITICAL alert — all within seconds of the kill.
-
-> **If the container exits cleanly (exit code 0) instead of being OOM-killed**, cgroup memory accounting may be disabled on this host. Verify with:
-> ```bash
-> docker info 2>&1 | grep -i "memory limit"
-> ```
-> `WARNING: No memory limit support` means the `--memory` flag is silently ignored. Enable cgroup memory accounting by adding `cgroup_enable=memory swapaccount=1` to `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, then run `sudo update-grub` and reboot.
-
----
-
-### Probe Testing
-
-> **Optional — requires internet access.** These tests pull images from Docker Hub and create temporary containers on the host.
-> Each section includes full cleanup instructions (container + image).
-
-#### HTTP Probe
-
-```bash
-# Start a container where every HTTP path returns 503
-# Note: the full server { } block is required — a bare location { } directive is not valid nginx config
-docker run -d --name http-probe-test \
-  nginx:alpine \
-  sh -c "printf 'server { listen 80; location / { return 503; } }' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
-
-# Verify the container is running:
-docker ps | grep http-probe-test
-
-# Wait one poll cycle (60s), then check watchdog detected it:
-grep "http-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f http-probe-test
-docker rmi nginx:alpine
-```
-
-During auto-discovery the watchdog sends an HTTP GET to `/-/healthy` on port 80. Nginx returns 503, so the watchdog immediately caches that endpoint as failing and reports unhealthy. After `unhealthy_cycles_threshold` consecutive unhealthy cycles an alert fires with Detection value `HTTP probe failed — error response 503 Service Unavailable, URI http://<ip>:80/-/healthy`.
-
----
-
-#### TCP Connect Probe
-
-```bash
-# Expose port 9999 but run nothing on it — TCP connect will be refused
-docker run -d --name tcp-probe-test \
-  --expose 9999 \
-  alpine \
-  sh -c "sleep infinity"
-
-# Watch the watchdog fall through HTTP → TCP and alert:
-grep "tcp-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f tcp-probe-test
-docker rmi alpine
-```
-
-After `unhealthy_cycles_threshold` consecutive failed cycles an alert fires with Detection value `TCP probe failed — connection refused or timed out on <ip>:9999`.
-
----
-
-#### `/proc` Alive Check
-
-```bash
-# No EXPOSE — watchdog falls straight to /proc alive check
-docker run -d --name proc-probe-test \
-  alpine \
-  sleep infinity
-
-# Verify the container is running:
-docker ps | grep proc-probe-test
-
-# After one poll cycle, confirm the watchdog selected /proc as the probe type:
-grep "proc-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f proc-probe-test
-docker rmi alpine
-```
-
-With no exposed ports, auto-discovery skips HTTP and TCP and falls back to reading `/proc/1/status` inside the container via `exec_run`. Since `sleep` is PID 1 in a live `S` (sleeping) state, no alert fires. The log will show `falling back to /proc alive-check` confirming the probe type was selected. In production, this probe fires when PID 1 enters zombie (`Z`) or stopped (`T`) state.
-
----
-
-### Recovery Alert Test
-
-Validates the INFO `recovered` alert fires once a previously-alarmed container is healthy again. Use any real, already-monitored container — no throwaway container needed.
-
-```bash
-# 1. Force a failure (SIGKILL → non-zero exit code → CRITICAL "crashed" alert)
-docker kill <container-name>
-
-# 2. Confirm the crashed alert was logged/dispatched
-grep "<container-name>" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log | grep CRITICAL
-
-# 3. Bring it back
-docker start <container-name>
-
-# 4. Wait for it to report healthy again, then confirm the recovery alert:
-grep "<container-name>" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log | grep -i recovered
-```
-
-Expected log line: `ALERT [INFO] <container-name> — recovered (channels: [...])`.
-
-- Containers with a Docker `HEALTHCHECK` recover via the `health_status: healthy` **event** — near-instant once Docker reports healthy (subject to the image's own `start_period`/`interval`).
-- Containers on HTTP/TCP/`/proc` active probes recover on the **next poll cycle** (`check_interval_seconds`).
-- No alert fires if `alert_on_recovery: false` is set, or if the container was never in an alarmed state (`state.alerted_for` empty).
-
----
+Do not start a test Engine on CyberController or m920q. The previous 2026-10-14
+m920q Docker-in-Docker test inadvertently generated real host watchdog alerts;
+that approach must not be repeated.
 
 ## 8. Troubleshooting
 
@@ -648,13 +544,13 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 ## 10. Version History
 
-**Release status (2026-10-14):** `VERSION` is set to `1.6.0` for the release candidate. Real HA failover/failback and the recovery-fixed image passed release acceptance tests; see [final validation](docs/RELEASE_ACCEPTANCE_V1.6.0_FINAL.md). PR #9 remains open, and the final Git tag, GitHub Release, and offline package have not been published. The HA labs still run the earlier v1.6.0 candidate; m920q continues to run `watchdog:1.5.4`.
+**Release status (2026-10-15):** `VERSION` remains `1.6.0` for the **upcoming, untagged** release candidate. PR #9 is open. The complete changes since 1.5.4, approved customer-facing alert wording, release acceptance and destructive-test isolation are documented in [v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). Historical HA and isolated Docker tests passed on earlier candidates; the final hosted-runner safety workflow must pass against the latest commit before publication. No v1.6.0 tag or final offline package is published; deployed lab images are not automatically updated by this branch.
 
 **Release procedure:** After validating a release candidate, increment `VERSION`, add a dated entry here, build and verify `watchdog:<VERSION>`, and package the matching `watchdog.tar` for offline installs. Pin deployment with `WATCHDOG_VERSION` in `.env`; verify upgrade and rollback before tagging the exact released commit (`vX.Y.Z`) and publishing release notes. Do not overwrite an old versioned image with new code. GitHub CI checks PRs but does not publish releases automatically; as of this update, no Git tags or GitHub Releases exist.
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| 1.6.0 | 2026-10-14 | Radware engineering | [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6): Docker event ID resolution and bounded missing-container warnings; [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5): authoritative `RestartCount`, deduplicated restart-loop incidents, stable recovery; [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7): planned Docker stop correlation and corrected exit-137 handling; [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4): optional independent HA active-node change alerts; PR #10: corrected notification consistency and Syslog priorities; release validation: require stable uptime before CRASH/OOM recovery, including manual/external container restarts. |
+| 1.6.0 | 2026-10-15 | Radware engineering | Upcoming since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, installer fallback, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 

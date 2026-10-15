@@ -1,0 +1,88 @@
+name: Release smoke (isolated)
+
+# Only an explicitly dispatched GitHub-hosted worker runs destructive tests.
+# This workflow never connects to CyberController or any shared Docker Engine.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-docker:
+    name: Real Docker (disposable GitHub runner)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release candidate on disposable runner
+        run: docker build --pull=false --tag "watchdog:$(cat VERSION)" .
+
+      - name: Create empty, labelled isolated Docker Engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "SMOKE_ENGINE_MARKER=${marker}" >> "${GITHUB_ENV}"
+          docker run -d --name ca-smoke-engine --restart no \
+            --privileged --cpus 2 --memory 2g --pids-limit 768 \
+            --network bridge -p 127.0.0.1::2375 \
+            -e DOCKER_TLS_CERTDIR="" \
+            docker:27.5-dind \
+            --storage-driver=vfs --iptables=false --ip6tables=false \
+            --bridge=none \
+            --label "com.radware.container-alert.smoke-engine=${marker}"
+          port="$(docker port ca-smoke-engine 2375/tcp | tail -1 | awk -F: '{print $NF}')"
+          test -n "${port}"
+          echo "DOCKER_HOST=tcp://127.0.0.1:${port}" >> "${GITHUB_ENV}"
+          for i in $(seq 1 40); do
+            if DOCKER_HOST="tcp://127.0.0.1:${port}" docker info >/dev/null 2>&1; then
+              echo "SMOKE_DOCKER_SOCKET_GID=$(docker exec ca-smoke-engine stat -c '%g' /var/run/docker.sock)" >> "${GITHUB_ENV}"
+              echo "Disposable Engine ready."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Disposable Engine failed to start" >&2
+          exit 1
+
+      - name: Load exact built image into isolated Engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          DOCKER_HOST=unix:///var/run/docker.sock docker save "watchdog:$(cat VERSION)" | DOCKER_HOST="${DOCKER_HOST}" docker load
+          DOCKER_HOST="${DOCKER_HOST}" docker image inspect "watchdog:$(cat VERSION)" >/dev/null
+
+      - name: Real Docker acceptance (15 scenarios, no operational access)
+        shell: bash
+        env:
+          SMOKE_RUNNER_KIND: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          SMOKE_IMAGE="watchdog:$(cat VERSION)" bash tests/release-smoke.sh
+
+      - name: Real OOM then external restart (full 120-second recovery)
+        shell: bash
+        env:
+          SMOKE_RUNNER_KIND: ${{ runner.environment }}
+          SMOKE_ONLY: T15_EXTERNAL_OOM
+        run: |
+          set -euo pipefail
+          SMOKE_IMAGE="watchdog:$(cat VERSION)" bash tests/release-smoke.sh
+
+      - name: Upload test reports (test-only synthetic data)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-alert-release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/container-alert-smoke-*/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Remove disposable test Engine
+        if: always()
+        shell: bash
+        run: |
+          DOCKER_HOST=unix:///var/run/docker.sock docker rm -f ca-smoke-engine 2>/dev/null || true

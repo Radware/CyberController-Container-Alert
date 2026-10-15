@@ -1,5 +1,14 @@
 # Container Alert v1.6.0 - Final release-candidate acceptance
 
+
+> **Historical acceptance evidence (October 14, 2026), not current test instructions.**
+> These records predate the v1.6.0 hosted-only smoke-test safety guard and final
+> customer-facing message updates. Do **not** rerun their Docker commands on
+> m920q, CyberController or another operational Engine. The prior outer
+> Docker-in-Docker test container triggered genuine m920q watchdog alerts.
+> See [current release notes](RELEASE_NOTES_V1.6.0.md) and
+> [safe smoke workflow](RELEASE_SMOKE_TESTING.md).
+
 **Validation date:** October 14, 2026 (UTC)
 **Release PR:** [#9](https://github.com/Radware/CyberController-Container-Alert/pull/9)
 **Source basis:** release branch including merged [PR #10](https://github.com/Radware/CyberController-Container-Alert/pull/10), plus the targeted recovery fix in this PR

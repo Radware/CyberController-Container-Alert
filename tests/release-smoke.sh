@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Container Alert v1.6.0: real Docker engine smoke tests, without host installations.
-# Run on an authorized lab admin client with docker CLI, Python 3, a local DFC syslog receiver.
-# Creates only clearly labelled disposable containers and Docker named volumes.
+# Destructive tests are allowed ONLY on an empty, labelled Docker Engine launched
+# on an ephemeral GitHub-hosted runner. Never use CyberController or shared hosts.
+# Preflight fails closed before creating any containers/volumes.
 set -euo pipefail
+SMOKE_SOURCE_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
+export SMOKE_SOURCE_DIR
 exec python3 - "$@" <<'PY'
 import datetime as dt
+import hashlib
 import json
 import os
 import pathlib
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -19,8 +24,8 @@ EXPECTED_REV = os.environ.get("SMOKE_EXPECTED_REV", "")
 TAG = dt.datetime.now(dt.timezone.utc).strftime("%y%m%d%H%M%S") + str(os.getpid())[-3:]
 PREFIX = "ca-smoke-" + TAG
 LABEL = "container-alert.smoke=" + TAG
-ISOLATED = os.environ.get("SMOKE_ISOLATED", "") == "1"
-RECEIVER = PREFIX + "-syslog-receiver" if ISOLATED else "config_dfc_1"
+ISOLATED = True  # no live-engine execution path exists
+RECEIVER = PREFIX + "-syslog-receiver"
 HOST = "release-smoke-" + TAG
 OBS = PREFIX + "-observer"
 STATE_VOL = PREFIX + "-state"
@@ -28,6 +33,7 @@ BASE = pathlib.Path(os.environ.get("SMOKE_OUTPUT_DIR", "/tmp")) / ("container-al
 START = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 containers, volumes, results, facts = [], [], [], {}
 EVENT_PROC, EVENT_FILE = None, None
+ENGINE_VERIFIED = False
 BASE.mkdir(parents=True, exist_ok=False)
 start_mono = time.monotonic()
 
@@ -75,6 +81,38 @@ def run(argv, timeout=30, check=True):
 
 def log(s):
     print(s, flush=True)
+
+def verify_engine_is_test_only():
+    """Never issue any mutating Docker command without independent safeguards.
+
+    A non-default, localhost-only endpoint is necessary but NOT sufficient:
+    require an ephemeral GitHub-hosted worker, a unique daemon-side test label,
+    and a completely empty target Engine. Do not support live-host opt-in flags.
+    """
+    global ENGINE_VERIFIED
+    ensure(os.environ.get("GITHUB_ACTIONS") == "true" and
+           os.environ.get("SMOKE_RUNNER_KIND") == "github-hosted",
+           "Refusing destructive tests outside an ephemeral GitHub-hosted runner")
+    ensure(not os.environ.get("DOCKER_CONTEXT"), "DOCKER_CONTEXT could override DOCKER_HOST")
+    endpoint = os.environ.get("DOCKER_HOST", "")
+    ensure(re.fullmatch(r"tcp://127\.0\.0\.1:[0-9]{2,5}", endpoint) is not None,
+           "DOCKER_HOST must be the isolated localhost Docker TCP endpoint")
+    marker = os.environ.get("SMOKE_ENGINE_MARKER", "")
+    ensure(re.fullmatch(r"ci-[0-9]+-[0-9]+", marker) is not None,
+           "Missing unique CI test-engine marker")
+    info = json.loads(run(["info", "--format", "{{json .}}"], timeout=12))
+    expected_label = "com.radware.container-alert.smoke-engine=" + marker
+    ensure(expected_label in (info.get("Labels") or []),
+           "Target Docker Engine is not the labelled disposable test Engine")
+    ensure(info.get("Containers") == 0,
+           "Refusing Engine with pre-existing containers: " + str(info.get("Containers")))
+    ENGINE_VERIFIED = True
+    facts["isolated_engine_id"] = info.get("ID")
+    facts["isolated_engine_label"] = expected_label
+    facts["runner_kind"] = "github-hosted"
+    log("ISOLATION_VERIFIED " + str(info.get("ID")))
+
+
 
 def mark(name, expected, evidence):
     evidence = str(evidence)
@@ -186,47 +224,34 @@ def wait_restarts(name, minimum, limit=120):
     raise AssertionError("restart count did not reach " + str(minimum))
 
 def require_syslog():
-    # Keep the isolated collector's raw received packets as separate evidence.
-    if ISOLATED:
-        data = run(["exec", RECEIVER, "cat", "/var/log/syslog"], timeout=20)
-        (BASE/"syslog-udp-raw.txt").write_text(data+"\n")
-    else:
-        data = run(["exec", RECEIVER, "sh", "-c",
-                    "grep -F " + "'host=" + '"' + HOST + '"' + "'" +
-                    " /var/log/syslog || true"], timeout=20, check=False)
-    return [x for x in data.splitlines()
-            if 'host="' + HOST + '"' in x and 'event="watchdog_alert"' in x]
+    raw = run(["exec", RECEIVER, "cat", "/var/log/syslog"], timeout=20)
+    (BASE/"syslog-udp-raw.txt").write_text(raw + "\n")
+    return [line for line in raw.splitlines()
+            if 'host="' + HOST + '"' in line and 'event="watchdog_alert"' in line]
+
 
 def init():
-    if not ISOLATED:
-        ensure(run(["inspect", "--format", "{{.State.Health.Status}}",
-                    "docker-container-watchdog"]) == "healthy", "existing watchdog not healthy")
+    # verify_engine_is_test_only() has already established the trust boundary.
     revision = run(["image", "inspect", "--format",
                     '{{index .Config.Labels "org.opencontainers.image.revision"}}', IMAGE])
     if EXPECTED_REV:
         ensure(revision == EXPECTED_REV, "wrong image source revision " + revision)
     image_id = run(["image", "inspect", "--format", "{{.Id}}", IMAGE])
-    embedded = run(["run", "--rm", "--network", "none", "--entrypoint", "sha256sum",
-                    IMAGE, "/app/watchdog.py", "/app/lifecycle.py", "/app/ha_monitor.py"])
+    sources = Path(os.environ["SMOKE_SOURCE_DIR"])
     expected_sha = {
-        "/app/watchdog.py": os.environ.get(
-            "SMOKE_EXPECTED_WATCHDOG_SHA256",
-            "4df8451b496a2935eba17fd56cc87459c87b4f96d9c2ace5bee9161fdf2c60fa"),
-        "/app/lifecycle.py": "55b6a06ebb69cb5a70f6c1566798087510228ef93eeceb810dcadb5da09d81f9",
-        "/app/ha_monitor.py": "0fb3ba165035c9970f91854914709fd7492e21a7583c74f34174275c12083dbd",
+        "/app/" + name: hashlib.sha256((sources/name).read_bytes()).hexdigest()
+        for name in ("watchdog.py", "lifecycle.py", "ha_monitor.py")
     }
+    embedded = run(["run", "--rm", "--network", "none", "--entrypoint", "sha256sum",
+                    IMAGE, *expected_sha.keys()])
     actual_sha = {line.split()[-1]: line.split()[0] for line in embedded.splitlines()}
     ensure(actual_sha == expected_sha, "release image source SHA mismatch: " + repr(actual_sha))
     facts["embedded_source_sha256"] = actual_sha
-    if not ISOLATED:
-        ensure(RECEIVER in run(["ps", "--format", "{{.Names}}"]).splitlines(),
-               "DFC syslog receiver not running")
     existing = run(["ps", "-a", "--format", "{{.Names}}"]).splitlines()
     ensure(not any(n.startswith(PREFIX) for n in existing), "smoke prefix collision")
     ensure(not run(["volume", "ls", "--filter", "label=" + LABEL, "-q"]), "old test volumes")
-    if ISOLATED:
-        collector = make_volume("syslogdata")
-        udp_code = """import socket
+    collector = make_volume("syslogdata")
+    udp_code = """import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 s.bind(("0.0.0.0",514))
 with open("/var/log/syslog","a",buffering=1) as output:
@@ -235,22 +260,22 @@ with open("/var/log/syslog","a",buffering=1) as output:
         packet,source=s.recvfrom(65535)
         output.write(packet.decode(errors="replace")+"\\n")
 """
-        run(["run", "-d", "--name", RECEIVER, "--label", LABEL, "--network", "host",
-             "--restart", "no", "--memory", "64m", "--pids-limit", "32",
-             "--volume", collector + ":/var/log", "--user", "0:0",
-             "--entrypoint", "python3", IMAGE, "-u", "-c", udp_code])
-        containers.append(RECEIVER)
-        receiver_logs = ""
-        for _ in range(18):
-            time.sleep(1)
-            receiver_logs = run(["logs", RECEIVER], check=False)
-            if "SMOKE_SYSLOG_RECEIVER_READY" in receiver_logs:
-                break
-            if inspect(RECEIVER, "{{.State.Status}}") == "exited":
-                break
-        ensure("SMOKE_SYSLOG_RECEIVER_READY" in receiver_logs,
-               "isolated UDP syslog collector failed; state=" +
-               inspect(RECEIVER, "{{.State.Status}}") + ", log=" + receiver_logs[-1000:])
+    run(["run", "-d", "--name", RECEIVER, "--label", LABEL, "--network", "host",
+         "--restart", "no", "--memory", "64m", "--pids-limit", "32",
+         "--volume", collector + ":/var/log", "--user", "0:0",
+         "--entrypoint", "python3", IMAGE, "-u", "-c", udp_code])
+    containers.append(RECEIVER)
+    receiver_logs = ""
+    for _ in range(18):
+        time.sleep(1)
+        receiver_logs = run(["logs", RECEIVER], check=False)
+        if "SMOKE_SYSLOG_RECEIVER_READY" in receiver_logs:
+            break
+        if inspect(RECEIVER, "{{.State.Status}}") == "exited":
+            break
+    ensure("SMOKE_SYSLOG_RECEIVER_READY" in receiver_logs,
+           "isolated UDP syslog collector failed; state=" +
+           inspect(RECEIVER, "{{.State.Status}}") + ", log=" + receiver_logs[-1000:])
     vol = make_volume("state")
     excludes = sorted(set(existing + [OBS]))
     config = {
@@ -275,7 +300,8 @@ with open("/var/log/syslog","a",buffering=1) as output:
          "-e", "SMOKE_CONFIG=" + json.dumps(config),
          "--volume", vol + ":/data", "--entrypoint", "python3",
          IMAGE, "-c", setup], timeout=30)
-    gid = int(os.environ.get("SMOKE_DOCKER_SOCKET_GID", os.stat("/var/run/docker.sock").st_gid))
+    gid_value = os.environ.get("SMOKE_DOCKER_SOCKET_GID")
+    gid = int(gid_value) if gid_value is not None else os.stat("/var/run/docker.sock").st_gid
     arm_events()
     args = ["run", "-d", "--name", OBS, "--label", LABEL, "--restart", "no",
             "--label", "com.docker.compose.project=release-smoke",
@@ -305,7 +331,7 @@ with open("/var/log/syslog","a",buffering=1) as output:
                   "syslog_source_host": HOST, "observer_poll_seconds": 2,
                   "restart_threshold": 5, "recovery_stability_seconds": 120,
                   "excluded_existing_containers": len(existing),
-                  "syslog_backend": "isolated UDP test collector" if ISOLATED else "real DFC",
+                  "syslog_backend": "isolated UDP test collector",
                   "docker_engine_endpoint": os.environ.get("DOCKER_HOST", "default")})
     log("REAL_DOCKER_TEST_READY " + HOST + " image=" + image_id[:24])
 
@@ -515,13 +541,24 @@ def t11_fast_removal():
     names = []
     for k in range(3):
         name = PREFIX + "-rm" + str(k)
-        run(["run", "--rm", "--name", name, "--label", LABEL,
-             "--network", "none", "--memory", "128m", "--memory-swap", "128m",
-             "--pids-limit", "64", "--cpus", "0.2", "--cap-drop", "ALL",
-             "--entrypoint", "python3", IMAGE, "-c", "raise SystemExit(2)"],
-            timeout=30, check=False)
+        argv = ["docker", "run", "--rm", "--name", name, "--label", LABEL,
+                "--network", "none", "--memory", "128m", "--memory-swap", "128m",
+                "--pids-limit", "64", "--cpus", "0.2", "--cap-drop", "ALL",
+                "--entrypoint", "python3", IMAGE, "-c", "raise SystemExit(2)"]
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        ensure(result.returncode == 2,
+               "Fast removal fixture did not exit 2: " + name +
+               ", actual=" + str(result.returncode) + ", stderr=" + result.stderr[-500:])
         names.append(name)
     time.sleep(8)
+    observed = [json.loads(line) for line in
+                (BASE/"docker-events-live.jsonl").read_text().splitlines() if line.strip()]
+    for name in names:
+        ensure(any(ev.get("Action") == "die" and
+                   ev.get("Actor", {}).get("Attributes", {}).get("name") == name and
+                   ev.get("Actor", {}).get("Attributes", {}).get("exitCode") == "2"
+                   for ev in observed),
+               "Missing genuine Docker die event / exit 2: " + name)
     wd_logs = run(["logs", "--since", START, OBS], timeout=20)
     misses = [x for x in wd_logs.splitlines() if "already removed before" in x and
               any(n in x for n in names)]
@@ -556,8 +593,7 @@ def t13_dfc():
     facts["watchdog_alert_count"] = len(sent)
     facts["dfc_received_count"] = len(received)
     ensure(sent, "watchdog generated no alert records")
-    for name in (("crash", "sigkill", "oom", "loop", "reuse", "health", "external")
-                 if ISOLATED else ("crash", "sigkill", "oom", "loop", "reuse", "health")):
+    for name in ("crash", "sigkill", "oom", "loop", "reuse", "health", "external"):
         actual = PREFIX + "-" + name
         local = [x for x in sent if 'container="' + actual + '"' in x]
         remote = [x for x in received if 'container="' + actual + '"' in x]
@@ -575,8 +611,7 @@ def t13_dfc():
                    'severity="' + severity + '"' in x for x in received),
                "DFC missing " + kind + "/" + severity)
     return str(len(sent)) + " watchdog alerts delivered as " + str(len(received)) + \
-           (" isolated UDP syslog messages" if ISOLATED else " DFC syslog messages") + \
-           "; CRITICAL/HIGH/INFO fields correct"
+           " isolated UDP syslog messages; CRITICAL/HIGH/INFO fields correct"
 
 def collect():
     stop_events()
@@ -618,26 +653,53 @@ def collect():
             pass
 
 def cleanup():
+    """Remove only resources created by this run and verify none remain."""
+    errors = facts.setdefault("cleanup_errors", [])
     for n in reversed(containers):
-        if n == OBS:
+        if not n.startswith(PREFIX):
+            errors.append("Refusing to remove non-test container " + n)
             continue
         try:
-            run(["rm", "-f", n], timeout=30, check=False)
-        except Exception as e:
-            facts.setdefault("cleanup_errors", []).append(n + ": " + str(e))
-    if OBS in containers:
-        try:
-            run(["stop", "-t", "12", OBS], timeout=25, check=False)
-            run(["rm", "-f", OBS], timeout=25, check=False)
-        except Exception as e:
-            facts.setdefault("cleanup_errors", []).append(OBS + ": " + str(e))
+            label = run(["inspect", "--format",
+                         '{{index .Config.Labels "container-alert.smoke"}}',
+                         n], check=False)
+            if not label:
+                continue  # Already removed by the test.
+            if label != TAG:
+                errors.append("Refusing mismatched test label on " + n + ": " + label)
+                continue
+            run(["rm", "-f", n], timeout=30)
+        except Exception as exc:
+            errors.append(n + ": " + str(exc))
     for vol in reversed(volumes):
+        if not vol.startswith(PREFIX):
+            errors.append("Refusing to remove non-test volume " + vol)
+            continue
         try:
+            label = run(["volume", "inspect", "--format",
+                         '{{index .Labels "container-alert.smoke"}}',
+                         vol], check=False)
+            if not label:
+                continue
+            if label != TAG:
+                errors.append("Refusing mismatched test volume label " + vol)
+                continue
             run(["volume", "rm", vol], timeout=30)
-        except Exception as e:
-            facts.setdefault("cleanup_errors", []).append(vol + ": " + str(e))
+        except Exception as exc:
+            errors.append(vol + ": " + str(exc))
+    for kind, command in (
+        ("containers", ["ps", "-a", "--filter", "label=" + LABEL, "-q"]),
+        ("volumes", ["volume", "ls", "--filter", "label=" + LABEL, "-q"]),
+    ):
+        try:
+            leftover = run(command)
+            if leftover:
+                errors.append("Leftover test " + kind + ": " + leftover)
+        except Exception as exc:
+            errors.append("Cannot verify cleanup of " + kind + ": " + str(exc))
 
 try:
+    verify_engine_is_test_only()
     init()
     if os.environ.get("SMOKE_ONLY") == "T13_SYSLOG_QUICK":
         ensure(ISOLATED, "SMOKE_ONLY quick test requires isolated engine")
@@ -666,31 +728,33 @@ try:
         checked("T05_REAL_OOM", "OOMKilled=true sends only CRITICAL OOM", t05_oom)
         checked("T06_TO_T09_RESTART_LIFECYCLE",
                 "CRASH -> RESTART-LOOP -> stability -> RECOVERED, interrupted recovery", t06_t08_loop)
-        if ISOLATED:
-            checked("T14_EXTERNAL_RESTART", "manual start after CRASH waits 120s before RECOVERED",
-                    t14_external_restart)
+        checked("T14_EXTERNAL_RESTART", "manual start after CRASH waits 120s before RECOVERED",
+                t14_external_restart)
         checked("T10_NAME_REUSE", "replacement with same name gets new incident", t10_name_reuse)
         checked("T11_FAST_REMOVAL", "no event flood, event listener survives", t11_fast_removal)
         checked("T12_NATIVE_HEALTHCHECK", "unhealthy -> recovered", t12_healthcheck)
-        checked("T13_SYSLOG" if ISOLATED else "T13_DFC_SYSLOG",
-                "all expected structured alerts reach " + ("test UDP collector" if ISOLATED else "DFC"),
+        checked("T13_SYSLOG", "all expected structured alerts reach test UDP collector",
                 t13_dfc)
 except Exception as e:
     issue("PREFLIGHT_OR_FATAL", "observer initializes and tests run", repr(e))
     facts["fatal_traceback"] = traceback.format_exc()
 finally:
-    try:
-        collect()
-    except Exception as e:
-        facts["collect_error"] = repr(e)
-    finally:
-        stop_events()
-    cleanup()
+    if ENGINE_VERIFIED:
+        try:
+            collect()
+        except Exception as e:
+            facts["collect_error"] = repr(e)
+        finally:
+            stop_events()
+        cleanup()
     finished = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00","Z")
     facts["total_seconds"] = round(time.monotonic() - start_mono, 1)
     data = {"run_id": TAG, "started_utc": START, "finished_utc": finished,
             "status": ("FAIL" if any(x["status"] == "FAIL" for x in results)
-                       or facts.get("cleanup_errors") else "PASS"),
+                       or facts.get("cleanup_errors")
+                       or facts.get("collect_error")
+                       or facts.get("syslog_read_error")
+                       or not ENGINE_VERIFIED else "PASS"),
             "image": IMAGE, "results": results, "facts": facts}
     (BASE/"report.json").write_text(json.dumps(data, indent=2, default=str) + "\n")
     lines = ["# Container Alert v1.6.0 real Docker smoke test",

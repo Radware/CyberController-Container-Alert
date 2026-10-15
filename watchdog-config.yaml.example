@@ -20,7 +20,7 @@ check_interval_seconds:     60    # how often to poll all containers
 cooldown_minutes:            5    # suppress duplicate alerts per container
 restart_threshold:           5    # Docker RestartCount increments within the window trigger alert
 restart_window_minutes:     10    # rolling window for restart counting
-restart_recovery_stability_seconds: 120  # require 2 min continuous uptime before RECOVERED for auto-restarting containers
+restart_recovery_stability_seconds: 120  # require stable Docker uptime before CRASH/OOM/RESTART-LOOP recovery
 unhealthy_cycles_threshold:  3    # consecutive unhealthy cycles before alerting
 alert_on_recovery:        true    # send an INFO "recovered" alert when a container returns to normal
 

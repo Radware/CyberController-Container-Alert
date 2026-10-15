@@ -18,10 +18,17 @@ jobs:
         run: |
           bash -n install.sh
           bash -n uninstall.sh
+          bash -n tests/release-smoke.sh
 
       - name: Validate Python syntax
         run: |
           python3 -m py_compile watchdog.py
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          script = Path("tests/release-smoke.sh").read_text()
+          code = script.split("<<'PY'", 1)[1].rsplit("\nPY", 1)[0]
+          compile(code, "release-smoke", "exec")
+          PYCODE
 
       - name: Install test dependencies
         run: |

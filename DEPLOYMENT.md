@@ -4,6 +4,17 @@ The **CyberController Container Watchdog** is an autonomous monitoring service t
 
 This guide covers initial deployment, alert channel configuration, and ongoing operational management of the watchdog service.
 
+
+> **v1.6.0 release safety / customer messaging:** Do **not** run destructive
+> Docker failure simulations on CyberController, HA nodes or shared operational
+> Docker Engines. See the [hosted-only release test procedure](docs/RELEASE_SMOKE_TESTING.md).
+> Container Alert notification descriptions are informational and do not direct
+> customers to modify Compose YAML, resource limits, restart policies or other
+> production settings. Such remediation requires the applicable Radware R&D /
+> authorized change process. The optional CRASH `docker logs` command is read-only
+> and is intended for authorized diagnostic access. See
+> [v1.6.0 changes since 1.5.4](docs/RELEASE_NOTES_V1.6.0.md).
+
 ---
 
 ## Table of Contents

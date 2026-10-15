@@ -424,7 +424,7 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
         {"title": "Host", "value": payload.host, "short": True},
         {"title": "Time (UTC)", "value": payload.timestamp, "short": True},
         *probe_field,
-        {"title": "Action", "value": payload.recommended_action, "short": False},
+        {"title": "Context", "value": payload.recommended_action, "short": False},
         {"title": "Runbook", "value": payload.runbook_url, "short": False},
     ]
     body = {
@@ -440,7 +440,7 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
                 *exit_field,
                 *probe_type_field,
                 *probe_field,
-                {"title": "Action",    "value": payload.recommended_action, "short": False},
+                {"title": "Context",    "value": payload.recommended_action, "short": False},
                 {"title": "Runbook",   "value": payload.runbook_url,    "short": False},
             ],
             "footer": ("Source: HA cluster exporter" if ha_event
@@ -570,7 +570,7 @@ def send_smtp(payload: AlertPayload, cfg: dict) -> None:
                 f"Severity: {payload.severity}\n"
                 f"Observed (UTC): {payload.timestamp}\n"
                 f"Evidence: {payload.probe_detail}\n"
-                f"Action: {payload.recommended_action}\n"
+                f"Context: {payload.recommended_action}\n"
                 f"Runbook: {payload.runbook_url}")
     else:
         body = f"""Container: {payload.container_name}
@@ -582,7 +582,7 @@ Container ID: {payload.container_id}
 Exit Code: {payload.exit_code if payload.exit_code is not None else 'N/A'}
 Probe Type: {payload.probe_type or 'N/A'}
 Detection: {payload.probe_detail or 'N/A'}
-Action: {payload.recommended_action}
+Context: {payload.recommended_action}
 Runbook: {payload.runbook_url or 'N/A'}"""
     
     # Build an RFC-compliant MIME message.  smtplib.sendmail(str) tries to
@@ -1082,31 +1082,32 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
 ACTIONS = {
     "crashed": (
         "CRITICAL",
-        "Check exit code and logs. Run: docker logs <name> --tail 50. "
-        "Exit 137 means SIGKILL, not necessarily OOM. Check Docker stop/oom events and OOMKilled.",
+        "Docker reported an unexpected container termination. "
+        "Run: docker logs <name> --tail 50. "
+        "The exit code and detection details provide additional context.",
     ),
     "oom": (
         "CRITICAL",
-        "Container was OOM-killed. Increase memory limit in docker-compose.yaml "
-        "or investigate memory leak. Run: docker stats <name>.",
+        "Docker reported that the container was terminated due to an out-of-memory condition.",
     ),
     "unhealthy": (
         "HIGH",
-        "Container is running but health probe is failing. "
-        "Check the application inside the container. Run: docker inspect <name>.",
+        "The container is running, but a monitoring health check is failing.",
     ),
     "restart-loop": (
         "HIGH",
-        "Container is repeatedly restarting. Inspect docker logs and the "
-        "restart policy; fix application crash, OOM, or dependency failure.",
+        "The container has restarted repeatedly within the configured monitoring window. "
+        "This pattern may be associated with application errors, resource pressure, "
+        "or unavailable dependencies. The underlying cause has not been determined.",
     ),
     "recovered": (
         "INFO",
-        "Container is back to normal operation. No action required.",
+        "The previously reported alert condition has cleared according to the available monitoring checks.",
     ),
     "reboot-summary": (
         "INFO",
-        "Post-reboot status summary. No action required unless containers are listed as still failing.",
+        "Monitoring has resumed following a host reboot. The reported summary includes "
+        "container status, recovered incidents, and any conditions that remain unresolved.",
     ),
 }
 
@@ -1289,7 +1290,7 @@ def build_payload(
     extra_context: str = "",
     probe_detail: str = "",
 ) -> AlertPayload:
-    severity, action = ACTIONS.get(failure_type, ("WARNING", "Investigate container."))
+    severity, action = ACTIONS.get(failure_type, ("WARNING", "A container monitoring event was reported. The failure type and available detection details provide additional context."))
     log_tail = get_log_tail(container)
     if extra_context:
         log_tail = f"{extra_context}\n\n{log_tail}"
