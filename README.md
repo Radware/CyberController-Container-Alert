@@ -12,13 +12,7 @@ The **CyberController Container Watchdog** is a lightweight, autonomous monitori
    - [Image Size](#image-size)
    - [Python Dependencies](#python-dependencies)
 3. [Configuration](#3-configuration)
-   - [Configuration Keys](#configuration-keys)
-   - [Environment Variables](#environment-variables)
 4. [Supported Alert Channels](#4-supported-alert-channels)
-   - [Slack](#slack)
-   - [Syslog](#syslog)
-   - [SMTP (Email)](#smtp-email)
-   - [SNMP Traps](#snmp-traps)
 5. [Deployment Instructions](#5-deployment-instructions)
 6. [Failure Types & Severities](#6-failure-types--severities)
 7. [Verify Watchdog Operation](#7-verify-watchdog-operation)
@@ -76,7 +70,7 @@ existing Docker container health checks.
 Enable the following block on **both** HA nodes, after verifying that each
 node has a local Pacemaker HA cluster exporter:
 
-~~~yaml
+```yaml
 ha_monitor:
   enabled: true
   exporter_url: http://127.0.0.1:9664/metrics
@@ -180,121 +174,24 @@ pysnmp>=6.2
 
 ## 3. Configuration
 
-All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, passwords) are stored in `.env` and never committed to version control. Restart the container after editing either file — no image rebuild is needed.
+The guided installer creates `watchdog-config.yaml` (monitoring policy, probes, logging and notification endpoints) and `.env` (credentials and runtime identity). The configuration is preserved on an upgrade unless the operator explicitly chooses to reconfigure it.
 
-### Configuration Keys
+**For the complete list of settings, defaults, YAML examples, and instructions for applying changes after installation, see [Deployment — Configuration Reference](DEPLOYMENT.md#4-configuration-reference).** The annotated [YAML template](watchdog-config.yaml.example) and [environment template](.env.example) are also available.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `alert_channels` | `["slack"]` | Active destinations: `slack`, `smtp`, `snmp_trap` |
-| `check_interval_seconds` | `60` | How often the poll loop runs |
-| `cooldown_minutes` | `5` | Suppress duplicate alerts per container per failure type |
-| `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |
-| `restart_window_minutes` | `10` | Rolling window for restart counting |
-| `restart_recovery_stability_seconds` | `120` | Minimum uninterrupted running time before a recovered alert for automatically restarted crash/OOM/restart-loop incidents |
-| `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy cycles before alerting |
-| `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
-| `excluded_containers` | `[]` | Container names to never alert on |
-| `ignored_container_events` | MariaDB syntax-check label rule | Label-based event suppressions for intentional temporary containers |
-| `auto_health_check` | enabled | Probe containers reporting `health=none` by discovering an HTTP/TCP endpoint |
-| `container_health_checks` | `{}` | Per-container probe overrides (`type: http` or `type: exec`) for `health=none` containers; takes precedence over `auto_health_check` |
-| `log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `log_file` | `/var/log/watchdog/watchdog.log` | Bind-mounted to `./watchdog/watchdog.log` on host. Rotates at 10 MB, 5 backups. Set to `null` to disable |
-| `state_file` | `/var/log/watchdog/state.json` | Persists open alerts and the host boot time so recovery and reboot reporting survive a restart. Set to `""` to disable |
-| `boot_grace_seconds` | `180` | After a detected host reboot, hold alerts this long while services start, then send one `reboot-summary`. `0` alerts immediately and sends the summary on the first poll |
-| `runbook_base_url` | — | URL included in every alert |
-
-Preferred suppression: Temporary MariaDB HA syntax-check containers should be created with Docker label `com.radware.cybercontroller.role=mariadb-ha-syntax-check`. The watchdog ignores only configured events for containers carrying that explicit label; normal service containers still alert.
-
-Temporary fallback: until that label exists, dynamic MariaDB dump helper containers are not alerted as crashes only when all identifying signals match together: image `kvision_infra_mariadb`, container name is not `config_kvision-infra-mariadb_1`, Docker `AutoRemove` is `true`, a mount contains `/mnt/cli/tmp/mariadb_dump.sql.gz`, and the exit code is `137`. The primary MariaDB container remains monitored.
-
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SLACK_WEBHOOK_URL` | Yes (if Slack enabled) | Slack incoming webhook URL |
-| `SMTP_USERNAME` | Yes (if SMTP enabled) | SMTP username or login email used for login |
-| `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or api key value |
-| `SNMP_V3_AUTH_KEY` | Yes (if SNMPv3 enabled) | SNMPv3 authentication passphrase — minimum 8 characters (RFC 3414) |
-| `SNMP_V3_PRIV_KEY` | Yes (if SNMPv3 authPriv) | SNMPv3 privacy passphrase — minimum 8 characters; requires auth key also set |
-| `WATCHDOG_CONFIG` | No | Path to config file (default: `/etc/watchdog/watchdog-config.yaml`) |
-| `WATCHDOG_HOST` | No | Hostname shown in alerts (default: system hostname) |
+A YAML-only change takes effect after restarting the watchdog. A changed `.env` value requires recreating **only** the watchdog container. Neither action rebuilds Python code into the image. Thresholds, exclusions, custom exec probes, and monitoring suppressions require authorized review; do not use them merely to silence alerts.
 
 ---
 
 ## 4. Supported Alert Channels
 
-Configure at least one channel and add its identifier to `alert_channels` in `watchdog-config.yaml`. Multiple channels can be active simultaneously.
+| Channel | YAML identifier | Credentials or other setup |
+|---|---|---|
+| Syslog | `syslog` | Syslog destination, port, protocol and facility |
+| SMTP (email) | `smtp` | Mail server, sender, recipients, TLS/auth; credentials in `.env` if applicable |
+| SNMP Trap | `snmp_trap` | NMS destination, SNMP version; SNMPv3 keys in `.env` |
+| Slack | `slack` | Webhook URL stored in `.env` |
 
-### Slack
-
-Add `slack` to `alert_channels` and set `SLACK_WEBHOOK_URL` in `.env`:
-
-```yaml
-slack:
-  enabled: true
-  webhook_url_env: SLACK_WEBHOOK_URL
-```
-
-### Syslog
-
-```yaml
-syslog:
-  enabled: true
-  host: <syslog-server-ip>
-  port: 514
-  protocol: udp       # udp or tcp
-  facility: local0
-```
-
-### SMTP (Email)
-
-Add `smtp` to `alert_channels` to enable.
-
-```yaml
-smtp:
-  enabled: true
-  host: smtp.radware.com
-  port: 587
-  sender: noc-alerts@radware.com
-  username_env: SMTP_USERNAME     # env var: SMTP username or app token
-  recipients:
-    - ops-team@radware.com
-    - oncall@radware.com
-  tls: true
-  password_env: SMTP_PASSWORD        # env var: SMTP password or app token
-```
-
-### SNMP Traps
-
-Add `snmp_trap` to `alert_channels` to enable. Sends SNMP traps (v1, v2c, or v3) to your NMS/SIEM on every alert.
-
-```yaml
-snmp_trap:
-  enabled: true
-  host: syslog.example.com                          # IP or hostname of your SNMP trap receiver
-  port: 162                                # Standard SNMP trap port
-  version: v2c                             # SNMP version: v1, v2c, or v3
-  community: public                        # SNMPv1/v2c community string (ignored for v3)
-  trap_oid: "1.3.6.1.4.1.89.110.0.1"      # Radware enterprise container-alert notification OID
-  # SNMPv3 only — add SNMP_V3_AUTH_KEY / SNMP_V3_PRIV_KEY to .env
-  # v3_username:        watchdog-user
-  # v3_auth_protocol:   SHA                # MD5 | SHA | SHA256 | SHA384 | SHA512
-  # v3_auth_key_env:    SNMP_V3_AUTH_KEY   # min 8 chars
-  # v3_priv_protocol:   AES                # AES (recommended) | AES192 | AES256 | DES (weak)
-  # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
-  # v3_local_engine_id: ""                 # hex engine ID; see docs/DEPLOYMENT_ADVANCED.md
-```
-
-Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3.6.1.4.1.89.110`):
-
-| OID | Object | Value |
-|-----|--------|-------|
-| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
-| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
-| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` |
-| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
+At least one channel must be selected in the installer; multiple channels may be enabled together. **See [Deployment — Notification Channels](DEPLOYMENT.md#43-notification-channels) for all configuration fields and examples.** The [advanced reference](docs/DEPLOYMENT_ADVANCED.md#snmp-trap-receiver-reference) retains SNMPv3 receiver setup and the Radware trap OID/var-bind definitions.
 
 ---
 
@@ -377,20 +274,15 @@ Common causes:
 1. Check `alert_channels` in `watchdog-config.yaml` — ensure at least one channel is listed and configured
 2. Check watchdog logs for errors:
    ```bash
-   grep -E "ERROR|CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+   grep -E "ERROR|CRITICAL" watchdog/watchdog.log
    ```
-3. For Slack: verify `SLACK_WEBHOOK_URL` is set in `.env` and test manually:
-   ```bash
-   curl -X POST -H 'Content-type: application/json' \
-     --data '{"text":"Watchdog test"}' "$SLACK_WEBHOOK_URL"
-   ```
-   Expected response: `ok`
+3. For Slack: confirm `SLACK_WEBHOOK_URL` is present in `.env` and that the destination is reachable. Use an authorized test receiver if end-to-end validation is required; do not trigger application failures to test alert delivery.
 
 **Recovery alert (`recovered`) specifically not received:**
 - Confirm `alert_on_recovery` is not set to `false` in the live `watchdog-config.yaml`.
 - Confirm the container was actually alarmed first — `state.alerted_for` must be non-empty; a container that was never flagged won't generate a recovery alert.
 - For containers with a Docker `HEALTHCHECK`, confirm Docker actually reports `healthy` — `docker inspect <name> --format '{{json .State.Health}}'`. If it's stuck on `starting`, the watchdog is waiting on Docker, not the other way around.
-- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, the probe (often `auto_health_check`) is misjudging the service;
+- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, review the actual endpoint and probe evidence with the responsible engineering team before changing monitoring.
 
 ### Duplicate and Excessive Alert Notifications
 
@@ -401,7 +293,7 @@ Review the affected container's alert history and probe details.
 Check which probe was cached at startup:
 
 ```bash
-grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+grep -E "auto-discover|falling back" watchdog/watchdog.log
 ```
 
 ### Viewing Logs
@@ -413,20 +305,23 @@ Log destinations (simultaneous):
 
 ```bash
 # Live tail (preferred — host path, no need to exec into the container)
-tail -f /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+tail -f watchdog/watchdog.log
 
 # Last 100 lines
-tail -100 /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+tail -100 watchdog/watchdog.log
 
-# Alerts and errors only
-grep -E "ALERT|ERROR|CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+# All structured alerts, including INFO recoveries
+grep 'watchdog_alert' watchdog/watchdog.log
+
+# Errors and critical lines
+grep -E "ERROR|CRITICAL" watchdog/watchdog.log
 
 # Filter by container name
-grep "my-container" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+grep "my-container" watchdog/watchdog.log
 
 # Search across rotated logs
-grep "CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log \
-             /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log.1
+grep "CRITICAL" watchdog/watchdog.log \
+             watchdog/watchdog.log.1
 
 # Via Docker (stdout only)
 docker compose logs -f docker-container-watchdog
@@ -484,7 +379,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 > **Verify what was actually cached after startup:**
 > ```bash
-> grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
+> grep -E "auto-discover|falling back" watchdog/watchdog.log
 > ```
 
 ## 10. Version History

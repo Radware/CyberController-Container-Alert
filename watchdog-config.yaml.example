@@ -4,8 +4,8 @@
 # SECRETS: All passwords and webhook URLs are read from environment
 # variables, never hardcoded here. Set them in your .env file.
 #
-# Copy this file to /opt/radware/storage/scripts/Alert_Container/watchdog-config.yaml
-# and update the values for your environment.
+# Reference template only: install.sh creates watchdog-config.yaml in your
+# chosen installation directory. Edit that active file after installation.
 
 # ── Alert channels ────────────────────────────────────────────────────────────
 # Empty for local testing — alerts are still logged to stdout/file.
@@ -35,9 +35,16 @@ lifecycle_detection:
 excluded_containers: []
   # - my-temp-container
 
+# Narrow, approved exception for Radware-designated temporary syntax checks.
+ignored_container_events:
+  - label:
+      com.radware.cybercontroller.role: mariadb-ha-syntax-check
+    events:
+      - die
+
  
 # ── Logging ───────────────────────────────────────────────────────────────────
-log_level: DEBUG    # DEBUG | INFO | WARNING | ERROR
+log_level: INFO     # DEBUG | INFO | WARNING | ERROR (default INFO)
 log_file: /var/log/watchdog/watchdog.log   # bind-mounted to ./watchdog/watchdog.log on host
 
 # Alert state is persisted here so recovery alerts still fire after the host or
@@ -75,7 +82,7 @@ smtp:
 # ── SNMP Traps ────────────────────────────────────────────────────────────────
 # Sends SNMP traps (v1, v2c, or v3) to your NMS/SIEM on every alert.
 # Add "snmp_trap" to alert_channels above to enable.
-# Requires: pip install pysnmp (already in requirements-watchdog.txt)
+# Dependencies are included in the release image; no host pip install.
 snmp_trap:
   enabled: false                     # set to true to enable
   host: nms.example.com  # replace with your NMS receiver
