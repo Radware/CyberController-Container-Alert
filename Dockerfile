@@ -2,6 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Version is set by the release build and checked by install.sh.
+ARG WATCHDOG_VERSION=unknown
+LABEL org.opencontainers.image.version="$WATCHDOG_VERSION"
+
 # Install dependencies
 RUN pip install --no-cache-dir \
     docker==7.1.0 \

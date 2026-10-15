@@ -21,10 +21,7 @@ The **CyberController Container Watchdog** is a lightweight, autonomous monitori
    - [SNMP Traps](#snmp-traps)
 5. [Deployment Instructions](#5-deployment-instructions)
 6. [Failure Types & Severities](#6-failure-types--severities)
-7. [Testing](#7-testing)
-   - [OOM Simulation](#oom-simulation)
-   - [Probe Testing](#probe-testing)
-   - [Recovery Alert Test](#recovery-alert-test)
+7. [Verify Watchdog Operation](#7-verify-watchdog-operation)
 8. [Troubleshooting](#8-troubleshooting)
    - [Service Fails to Start](#service-fails-to-start)
    - [Alert Notifications Not Received](#alert-notifications-not-received)
@@ -138,13 +135,13 @@ See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
 ├── lifecycle.py                 # Bounded Docker stop/die evidence correlation
 ├── watchdog-config.yaml         # All configuration (no secrets)
 ├── docker-compose.yaml          # Production / offline runtime (image only)
-├── docker-compose.build.yaml    # Developer / online build
+├── docker-compose.build.yaml    # Developer-only source build
 ├── Dockerfile                   # Image build definition (python:3.11-slim)
 ├── requirements-watchdog.txt    # Python dependencies (reference; Dockerfile pip-installs inline)
-├── install.sh                   # Offline install script
+├── install.sh                   # Guided online/offline installation
 ├── uninstall.sh                 # Stop + remove script
 ├── VERSION                       # Release version — drives the image tag and installer
-├── watchdog.tar                  # Pre-built Docker image (provided, no internet needed)
+├── watchdog.tar                  # Optional: image supplied in offline release package
 └── .env                          # Secrets — NOT committed to git
 ```
 
@@ -158,11 +155,11 @@ See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
 | Running container (memory) | ~50–80 MB baseline; capped at `mem_limit: 256m` in `docker-compose.yaml` |
 | `watchdog.tar` export | ~170 MB |
 
-> **Note:** The values above are approximate and may vary depending on the host operating system, Docker version, and installed dependencies. If usage approaches the 256 MB limit (check with `docker stats docker-container-watchdog`), raise `mem_limit`/`mem_reservation` in `docker-compose.yaml` rather than removing the limit — and raise `memswap_limit` to at least the new `mem_limit` in **both** `docker-compose.yaml` and `docker-compose.build.yaml`, since Docker rejects a config where `memswap_limit` is lower than `mem_limit`.
+> **Note:** Image size and memory usage vary with the installed release. If resource usage is abnormal, capture Docker health, logs, and usage observations for engineering review before making production resource-limit changes.
 
 ### Container Hardening
 
-By default the container runs as **root** so `docker compose up` works with zero configuration — no host-specific group setup needed to read `/var/run/docker.sock`. [install.sh](install.sh) instead auto-detects the socket's GID and opts into running the container as **non-root UID/GID 1000** (joined to that group via `group_add`), with no manual input required; manual installs can do the same by setting `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env` (see [DEPLOYMENT.md](DEPLOYMENT.md#22-configure-environment-variables-env)). Either way, the container is constrained by a read-only root filesystem, no extra Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID caps (`cpus: "0.50"`, `pids_limit: 200`, `mem_limit: 256m`), which contain a leak or runaway condition to this container instead of the host. Note that access to `/var/run/docker.sock` is effectively host-root-equivalent for **any** user (root or not): anything that can reach the socket can create privileged containers or bind-mount the host filesystem, so a compromise of the watchdog process is **not** contained by these controls — treat `docker.sock` access as the primary trust boundary when deciding who/what can reach this host.
+By default the container runs as **root** so `docker compose up` works with zero configuration — no host-specific group setup needed to read `/var/run/docker.sock`. [install.sh](install.sh) instead auto-detects the socket's GID and opts into running the container as **non-root UID/GID 1000** (joined to that group via `group_add`), with no manual input required; manual installs can do the same by setting `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env` (see [Advanced Deployment](docs/DEPLOYMENT_ADVANCED.md#configuration-files)). Either way, the container is constrained by a read-only root filesystem, no extra Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID caps (`cpus: "0.50"`, `pids_limit: 200`, `mem_limit: 256m`), which contain a leak or runaway condition to this container instead of the host. Note that access to `/var/run/docker.sock` is effectively host-root-equivalent for **any** user (root or not): anything that can reach the socket can create privileged containers or bind-mount the host filesystem, so a compromise of the watchdog process is **not** contained by these controls — treat `docker.sock` access as the primary trust boundary when deciding who/what can reach this host.
 
 
 ### Python Dependencies
@@ -286,7 +283,7 @@ snmp_trap:
   # v3_auth_key_env:    SNMP_V3_AUTH_KEY   # min 8 chars
   # v3_priv_protocol:   AES                # AES (recommended) | AES192 | AES256 | DES (weak)
   # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
-  # v3_local_engine_id: ""                 # hex engine ID pinned from first-run log; see DEPLOYMENT.md
+  # v3_local_engine_id: ""                 # hex engine ID; see docs/DEPLOYMENT_ADVANCED.md
 ```
 
 Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3.6.1.4.1.89.110`):
@@ -303,13 +300,17 @@ Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3
 
 ## 5. Deployment Instructions
 
-For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
-
-**Quick start (automated):**
+Use the same installer for Internet-connected and offline hosts. With access to GitHub, clone the default **main** branch:
 
 ```bash
+git clone https://github.com/Radware/CyberController-Container-Alert.git
+cd CyberController-Container-Alert
 bash install.sh
 ```
+
+For a disconnected host, extract the approved offline release package and run `bash install.sh` inside the extracted installation directory. The wizard offers download or local-image selection, asks for the selected notification channels, and verifies the watchdog. Customer installations do not build Docker images.
+
+See [Deployment Guide](DEPLOYMENT.md) for the short procedure, and [Advanced Deployment](docs/DEPLOYMENT_ADVANCED.md) for developer and release-maintainer details.
 
 ---
 
@@ -336,8 +337,8 @@ Every alert includes two probe fields that identify exactly how and why the fail
 | `crashed` | `Docker event (crash)` | `Crash probe failed — container exited with exit code 1` |
 | `oom` | `Docker event (OOM)` | `OOM probe failed — container was OOM-killed by the kernel` |
 | `unhealthy` (Docker native HEALTHCHECK) | `Docker HEALTHCHECK` | `Docker health probe failed — exit code 1, output: connection refused` |
-| `unhealthy` (HTTP auto-probe) | `HTTP GET` | `HTTP probe failed — error response 503 Service Unavailable, URI http://192.0.2.100:8080/health` |
-| `unhealthy` (TCP connect) | `TCP connect` | `TCP probe failed — connection refused or timed out on 192.0.2.100:6379 (Connection refused)` |
+| `unhealthy` (HTTP auto-probe) | `HTTP GET` | `HTTP probe failed — error response 503 Service Unavailable, URI http://172.18.0.5:8080/health` |
+| `unhealthy` (TCP connect) | `TCP connect` | `TCP probe failed — connection refused or timed out on 172.18.0.5:6379 (Connection refused)` |
 | `unhealthy` (/proc fallback) | `/proc alive check` | `/proc alive check failed — PID 1 is zombie/stopped (exit code 1)` |
 
 > **Restart-loop detection** uses Docker `RestartCount` from the polling loop as its sole restart count. The first poll establishes a baseline without interpreting historical restarts. Counter increases are timestamped when observed, so detection can take up to one polling interval; the rolling window is approximate to polling precision. After a polling gap longer than the restart window, unknown-age increments are ignored rather than misattributed to the current window. Delayed Docker events cannot double-count restarts; timestamps on events also prevent failures from before confirmed recovery from reopening an incident.
@@ -367,9 +368,9 @@ docker compose logs docker-container-watchdog
 ```
 
 Common causes:
-- **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
+- **Missing `.env` file** — complete the initial installer wizard, or restore it from a previous-installation backup
 - **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
-- **Image not loaded** — run `docker images watchdog`; if empty, set `WATCHDOG_VERSION=$(cat VERSION)` and build with `WATCHDOG_VERSION="$WATCHDOG_VERSION" docker compose -f docker-compose.build.yaml build` (see [DEPLOYMENT.md](DEPLOYMENT.md) for details)
+- **Release image unavailable** — rerun `bash install.sh` and select online download, or supply the approved offline `watchdog.tar` and choose the local-image option (see [Deployment Guide](DEPLOYMENT.md))
 
 ### Alert Notifications Not Received
 
@@ -389,11 +390,11 @@ Common causes:
 - Confirm `alert_on_recovery` is not set to `false` in the live `watchdog-config.yaml`.
 - Confirm the container was actually alarmed first — `state.alerted_for` must be non-empty; a container that was never flagged won't generate a recovery alert.
 - For containers with a Docker `HEALTHCHECK`, confirm Docker actually reports `healthy` — `docker inspect <name> --format '{{json .State.Health}}'`. If it's stuck on `starting`, the watchdog is waiting on Docker, not the other way around.
-- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, the probe (often `auto_health_check`) is misjudging the service; contact Radware support before changing the health-check configuration.
+- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, the probe (often `auto_health_check`) is misjudging the service;
 
 ### Duplicate and Excessive Alert Notifications
 
-Review the affected container's alert history and probe details. Contact Radware support or the responsible engineering team before changing monitoring thresholds, health checks or exclusions.
+Review the affected container's alert history and probe details.
 
 ### Probe Type Not as Expected
 
@@ -494,7 +495,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| 1.6.0 | 2026-10-15 | Radware engineering | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, installer fallback, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). |
+| 1.6.0 | 2026-10-15 | Egor Egorov | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, installer fallback, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
@@ -503,7 +504,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 | 1.4.0 | 2026-08-17 | Rahul Kumar | Added INFO "recovered" alert |
 | 1.3.3 | 2026-08-05 | Rahul Kumar | Added Auth True/false |
 | 1.3.2 | 2026-07-28 | Rahul Kumar | Fixed SMTP Auth issue |
-| 1.3.1 | 2026-07-21 | Engineering | Updated Readme and Deployment guides |
+| 1.3.1 | 2026-07-21 | Egor Egorov | Updated Readme and Deployment guides |
 | 1.3.0 | 2026-07-16 | Rahul Kumar | Added Upgrade Guide |
 | 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
 | 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |

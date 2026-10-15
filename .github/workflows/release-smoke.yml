@@ -8,6 +8,12 @@ on:
       - main
     paths:
       - "watchdog.py"
+      - "lifecycle.py"
+      - "ha_monitor.py"
+      - "install.sh"
+      - "VERSION"
+      - "docker-compose.yaml"
+      - "docker-compose.build.yaml"
       - "tests/release-smoke.sh"
       - ".github/workflows/release-smoke.yml"
       - "Dockerfile"
@@ -27,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build release candidate on disposable runner
-        run: docker build --pull=false --tag "watchdog:$(cat VERSION)" .
+        run: docker build --pull=false --build-arg "WATCHDOG_VERSION=$(cat VERSION)" --tag "watchdog:$(cat VERSION)" .
 
       - name: Create empty, labelled isolated Docker Engine
         shell: bash

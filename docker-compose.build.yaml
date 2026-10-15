@@ -1,22 +1,15 @@
-# ── DEVELOPER / ONLINE BUILD ──────────────────────────────────────────────────
-# Use this file when you have internet access and want to build a fresh image.
-#
-# Usage:
-#   export WATCHDOG_VERSION=$(cat VERSION)
-#   docker compose -f docker-compose.build.yaml build
-#   docker compose -f docker-compose.build.yaml up -d
-#
-# After a successful build, export the image for offline customers — always
-# ship the versioned tag so install.sh can pin the deployment to it:
-#   docker tag watchdog:"$WATCHDOG_VERSION" watchdog:latest
-#   docker save watchdog:"$WATCHDOG_VERSION" watchdog:latest -o watchdog.tar
-# ─────────────────────────────────────────────────────────────────────────────
+# DEVELOPER-ONLY SOURCE BUILD (not used during customer installation).
+# export WATCHDOG_VERSION="$(cat VERSION)"
+# docker compose -f docker-compose.build.yaml build
+# Official offline bundles and images are built by the tagged release workflow.
 
 services:
 
   docker-container-watchdog:
     build:
       context: .
+      args:
+        WATCHDOG_VERSION: "$WATCHDOG_VERSION"
     image: watchdog:${WATCHDOG_VERSION:?Set WATCHDOG_VERSION from the VERSION file before building}
     container_name: docker-container-watchdog
     restart: always

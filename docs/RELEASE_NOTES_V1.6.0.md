@@ -14,7 +14,7 @@ This document describes version **1.6.0** and its changes since v1.5.4. Building
 | Release documentation | Clarify merged vs unreleased features and explicit image version/tag process | [PR #8](https://github.com/Radware/CyberController-Container-Alert/pull/8) |
 | Notification consistency | Preserve INFO recovery and WARNING HA Syslog independently of local logging threshold; consistent Syslog priorities and alert fields, explicit HA/reboot event identifiers; retain SNMP format and five var-binds | [PR #10](https://github.com/Radware/CyberController-Container-Alert/pull/10) |
 | Crash/OOM recovery correction | Apply the existing configurable `restart_recovery_stability_seconds` gate to CRASH, OOM and RESTART-LOOP recoveries, even when a policy-`no` container was started manually or by an external agent | [PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9) |
-| Installer source fallback | Source-build mode copies both `lifecycle.py` and `ha_monitor.py` alongside `watchdog.py` and Dockerfile; normal versioned offline archive flow retained | [PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9) |
+| Guided release installation | One installer wizard selects verified GitHub Release image download or an approved local image/archive, preserves existing configuration, and recreates only the watchdog. Source builds remain developer-only. | [PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9) |
 | Customer-facing alert descriptions | Approved factual wording for CRASH, OOM, UNHEALTHY, RESTART-LOOP, RECOVERED, REBOOT-SUMMARY and unknown fallback. Keep HA-FAILOVER advice unchanged. Email/Slack use `Context` rather than `Action`; structured Syslog `action=` remains unchanged for compatibility | [PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9) |
 | Test isolation and reliability | Eliminate live-Docker destructive test execution. Smoke suite requires a verified, labelled, empty Engine on a GitHub-hosted disposable runner, not an arbitrary DOCKER_HOST. Validate fixture exit events, cleanup ownership and absence of leftovers, and lazily resolve Docker socket GID | [PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9) |
 
@@ -44,6 +44,10 @@ The CRASH read-only logs command is intended for authorized diagnostic access. C
 - Historical test evidence is retained: [v1.6.0 final 2026-10-14 acceptance](RELEASE_ACCEPTANCE_V1.6.0_FINAL.md), [earlier live HA-lab findings](RELEASE_VALIDATION_V1.6.0.md), and JSON files in this directory. **That evidence predates the latest notification wording and fail-closed test-runner changes**. A fresh hosted workflow result must be associated with the current PR commit.
 - Earlier nested-engine tests on a shared host generated real watchdog alerts. Destructive acceptance is therefore restricted to disposable hosted CI.
 - Existing lab watchdog images are **not automatically upgraded** by a PR push. The final image must be built from the approved merge commit, identified by image digest, and deployed through the existing versioned release process.
+
+## Image distribution and deployment
+
+The v1.6.0 release publication workflow prepares a version-labelled `watchdog.tar`, `SHA256SUMS`, and a complete offline installation bundle through GitHub Releases. Publishing is triggered only after the approved code is merged to `main` and a matching `v1.6.0` tag is pushed; opening or merging this PR does not publish artifacts. Operators obtain files from `main` or the offline bundle and run the same `bash install.sh` wizard. Production installations no longer build Docker images from source. See [Deployment](../DEPLOYMENT.md) and [Advanced Deployment](DEPLOYMENT_ADVANCED.md).
 
 ## Exclusions, limitations and release gating
 

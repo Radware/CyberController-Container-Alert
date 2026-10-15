@@ -1,0 +1,84 @@
+name: Publish Container Alert release
+
+# Publish only a reviewed, tagged commit already merged into main.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag, version, and main ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          echo "WATCHDOG_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Validate release scripts and Python tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n install.sh uninstall.sh
+          python3 -m pip install docker==7.1.0 requests==2.32.3 PyYAML==6.0.2
+          python3 -m unittest discover -s tests -q
+
+      - name: Build version-labelled release image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --build-arg "WATCHDOG_VERSION=$WATCHDOG_VERSION" \
+            -t "watchdog:$WATCHDOG_VERSION" .
+          image_version="$(docker image inspect "watchdog:$WATCHDOG_VERSION" \
+            --format '{{index .Config.Labels "org.opencontainers.image.version"}}')"
+          test "$image_version" = "$WATCHDOG_VERSION"
+          docker run --rm --network none --entrypoint python3 \
+            "watchdog:$WATCHDOG_VERSION" -c \
+            "import docker, requests, yaml, pysnmp, cryptography, watchdog, lifecycle, ha_monitor"
+
+      - name: Package online and offline downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker save "watchdog:$WATCHDOG_VERSION" -o watchdog.tar
+          if [ "$(stat -c '%s' watchdog.tar)" -ge 2147483648 ]; then
+            echo "Release image exceeds GitHub's 2 GiB asset limit" >&2
+            exit 1
+          fi
+          sha256sum watchdog.tar > SHA256SUMS
+
+          staging="$RUNNER_TEMP/offline/CyberController-Container-Alert"
+          mkdir -p "$staging/docs"
+          cp install.sh uninstall.sh docker-compose.yaml VERSION \
+             .env.example watchdog-config.yaml.example \
+             README.md DEPLOYMENT.md watchdog.tar SHA256SUMS "$staging/"
+          cp docs/DEPLOYMENT_ADVANCED.md "$staging/docs/"
+          tar -czf "container-alert-v$WATCHDOG_VERSION-offline.tar.gz" \
+              -C "$RUNNER_TEMP/offline" CyberController-Container-Alert
+          sha256sum "container-alert-v$WATCHDOG_VERSION-offline.tar.gz" >> SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            watchdog.tar SHA256SUMS \
+            "container-alert-v$WATCHDOG_VERSION-offline.tar.gz" \
+            --verify-tag --title "Container Alert $GITHUB_REF_NAME" \
+            --generate-notes
