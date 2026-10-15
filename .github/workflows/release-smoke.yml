@@ -1,8 +1,16 @@
 name: Release smoke (isolated)
 
-# Only an explicitly dispatched GitHub-hosted worker runs destructive tests.
-# This workflow never connects to CyberController or any shared Docker Engine.
+# Runs only on disposable GitHub-hosted workers; never on operational engines.
+# PR trigger permits validation before release; manual reruns after first merge.
 on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "watchdog.py"
+      - "tests/release-smoke.sh"
+      - ".github/workflows/release-smoke.yml"
+      - "Dockerfile"
   workflow_dispatch:
 
 permissions:
@@ -12,6 +20,7 @@ jobs:
   real-docker:
     name: Real Docker (disposable GitHub runner)
     runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 20
 
     steps:

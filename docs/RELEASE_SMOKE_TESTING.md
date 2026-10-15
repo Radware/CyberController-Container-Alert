@@ -12,8 +12,15 @@ The workflow has no corporate customer credentials, no HA exporter dependency, n
 
 ## Launch
 
+The hosted smoke workflow triggers on in-repository release PR changes targeting
+`main`. The first run can occur before the workflow is merged into the
+default branch. A manual `workflow_dispatch` rerun is available once the
+workflow file exists on the default branch.
+
 1. Review [release PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9) and select its current `release/v1.6.0` branch.
-2. In GitHub Actions select **Release smoke (isolated)** → **Run workflow** and choose that branch. Alternatively an authorized repository maintainer can run:
+2. For the current PR, verify the automatically triggered **Release smoke (isolated)**
+   check. After the workflow is on `main`, an authorized maintainer can
+   also manually rerun it from Actions or use:
 
    ```bash
    gh workflow run release-smoke.yml --ref release/v1.6.0

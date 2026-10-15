@@ -62,7 +62,7 @@ class CustomerAlertTextTests(unittest.TestCase):
                         "host": "example.invalid", "port": 25,
                         "sender": "test@example.invalid",
                         "recipients": ["recipient@example.invalid"]}}
-        with patch("watchdog.smtplib.SMTP") as smtp:
+        with patch("smtplib.SMTP") as smtp:
             watchdog.send_smtp(payload, cfg)
         raw = smtp.return_value.__enter__.return_value.sendmail.call_args.args[2]
         body = BytesParser(policy=default).parsebytes(raw).get_body(

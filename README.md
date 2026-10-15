@@ -390,8 +390,9 @@ No failure injection is required for message formatting or severity checks.
 
 ### Destructive real Docker acceptance — disposable hosted runner ONLY
 
-Run the **Release smoke (isolated)** GitHub Actions workflow on the intended
-release branch (`workflow_dispatch`); it uses an ephemeral GitHub-hosted worker
+Use the **Release smoke (isolated)** GitHub Actions workflow on the intended
+release PR (automatically for in-repository PR changes, or manual rerun once the
+workflow exists on the default branch); it uses an ephemeral GitHub-hosted worker
 with an empty, specially labelled Docker Engine, separate alert state, and a
 temporary UDP Syslog receiver. The smoke runner aborts before creating any
 test resource unless it verifies the dedicated hosted worker, exact localhost
@@ -401,7 +402,7 @@ live-host override.**
 The [smoke-test procedure](docs/RELEASE_SMOKE_TESTING.md) details acceptance
 criteria, evidence capture, cleanup, and use of the workflow. The normal PR CI
 runs only non-destructive Python, shell and build validations; destructive Docker
-scenarios require manual dispatch of the separate hosted workflow.
+scenarios run only in the separate, GitHub-hosted release workflow.
 
 Do not start a test Engine on CyberController or m920q. The previous 2026-10-14
 m920q Docker-in-Docker test inadvertently generated real host watchdog alerts;
