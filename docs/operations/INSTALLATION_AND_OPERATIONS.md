@@ -64,12 +64,21 @@ The filename below uses v1.6.0 as an example. Release assets exist only after th
 
 ### 2.1 Get and verify the release package
 
-**Step 1 — Obtain these two files** from the approved [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases) (or through Radware's authorized offline transfer method):
+**Step 1 — Obtain the release package and checksum.** Use either method to get the **same two files** on the target host:
 
-- `container-alert-v1.6.0.tar.gz` — complete install package, including `watchdog.tar`.
-- `SHA256SUMS` — checksum to verify the downloaded/transferred package.
+**Host has Internet access (simplest):** Run these commands directly on the target host, in your chosen installation directory:
 
-**Step 2 — Copy both files to the target host**, into the same directory. Verify the package and extract it:
+```bash
+VER=1.6.0
+URL="https://github.com/Radware/CyberController-Container-Alert/releases/download/v${VER}"
+curl -fL -O "$URL/container-alert-v${VER}.tar.gz" -O "$URL/SHA256SUMS"
+```
+
+No Git clone, GitHub CLI, browser download, or SCP is needed. `curl` requires HTTPS access to the GitHub Release and its redirected download host.
+
+**Disconnected host:** Obtain `container-alert-v1.6.0.tar.gz` and `SHA256SUMS` from the [approved GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases) on a connected machine, then transfer both to the target host using your authorized method.
+
+**Step 2 — Verify and extract** both files in the same directory:
 
 ```bash
 sha256sum --check SHA256SUMS
