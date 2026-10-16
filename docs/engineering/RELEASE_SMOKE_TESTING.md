@@ -6,7 +6,7 @@
 
 **NEVER run `tests/release-smoke.sh` on CyberController, customer systems, or any shared Docker host.** Do not try to make a live host "safe" by changing its watchdog exclusions, switching off its notifications, labelling dummy containers, or setting a live-host opt-in flag.
 
-Instead run the workflow [Release smoke (isolated)](../.github/workflows/release-smoke.yml). It executes on a **GitHub-hosted disposable runner** and creates a second, empty, short-lived, uniquely labelled Docker-in-Docker Engine. Only that Engine's Docker socket is mounted inside the test observer. The temporary outer Engine is visible to the GitHub runner's Docker daemon, never to any operational host. All test-created resources are disposable and contained within that hosted worker.
+Instead run the workflow [Release smoke (isolated)](../../.github/workflows/release-smoke.yml). It executes on a **GitHub-hosted disposable runner** and creates a second, empty, short-lived, uniquely labelled Docker-in-Docker Engine. Only that Engine's Docker socket is mounted inside the test observer. The temporary outer Engine is visible to the GitHub runner's Docker daemon, never to any operational host. All test-created resources are disposable and contained within that hosted worker.
 
 The workflow has no corporate customer credentials, no HA exporter dependency, no CyberController Docker socket, no external notification destinations, and no network access from the disposable failure fixtures.
 

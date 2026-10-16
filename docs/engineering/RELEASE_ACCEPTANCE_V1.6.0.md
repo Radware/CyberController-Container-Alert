@@ -6,7 +6,7 @@
 > customer-facing message updates. Do **not** rerun their Docker commands on
 > any shared or operational Docker Engine. Earlier nested testing triggered
 > real notifications on its parent host.
-> See [current release notes](RELEASE_NOTES_V1.6.0.md) and
+> See [current release notes](../customer/RELEASE_NOTES_V1.6.0.md) and
 > [safe smoke workflow](RELEASE_SMOKE_TESTING.md).
 
 **Validation date:** October 14, 2026 (UTC)
@@ -100,9 +100,9 @@ Installer source-build and offline archive `docker save`/`docker load` procedure
 
 ## Evidence and replay
 
-- [Final full suite JSON](RELEASE_SMOKE_V1.6.0_ISOLATED_20261014.json) - 15/15 and cleanup evidence
-- [Before-fix real failure reproduction](RELEASE_SMOKE_V1.6.0_PRE_FIX_REPRO_20261014.json)
-- [Real OOM/manual-restart 120.6s proof](RELEASE_SMOKE_V1.6.0_OOM_RESTART_20261014.json)
+- [Final full suite JSON](evidence/RELEASE_SMOKE_V1.6.0_ISOLATED_20261014.json) - 15/15 and cleanup evidence
+- [Before-fix real failure reproduction](evidence/RELEASE_SMOKE_V1.6.0_PRE_FIX_REPRO_20261014.json)
+- [Real OOM/manual-restart 120.6s proof](evidence/RELEASE_SMOKE_V1.6.0_OOM_RESTART_20261014.json)
 - [Earlier HA-lab conditional report](RELEASE_VALIDATION_V1.6.0.md)
-- [Reusable real Docker smoke runner](../tests/release-smoke.sh)
+- [Reusable real Docker smoke runner](../../tests/release-smoke.sh)
 - Historical runtime evidence: temporary smoke-run directories containing test events, Syslog records and observer state were retained during validation.

@@ -1,6 +1,13 @@
+> **Historical design proposal — 2026-10-09.** This is the planning snapshot for
+> the optional HA feature, **not its current release status or installation
+> procedure**. PR #4 was subsequently merged into `main` on 2026-10-14.
+> Later failover/failback acceptance appears in the
+> [release acceptance report](RELEASE_ACCEPTANCE_V1.6.0.md).
+> Unchecked design checkboxes below are kept for traceability, not current release gates.
+
 # Optional CyberController HA Active-Node Alert — Design Proposal
 
-**Status:** Feature under review; manual switchover verified, failback and alert delivery pending
+**Status on 2026-10-09:** Feature under review; failback and delivery validation pending at the time
 **Date:** 2026-10-09
 **Target:** Radware/CyberController-Container-Alert, baseline v1.5.4 (main: a4ddfed)
 **Delivery:** One small implementation PR, with release blocked on two-node QA
@@ -172,4 +179,4 @@ The implementation is ready for review/release when all automated tests and CI p
 
 **Out of scope:** HA orchestration/control, restarting or promoting resources, automatic remediation, logging every Pacemaker transition, live log parsing, new monitoring dashboards/exporters, historical HA event reconstruction, generalized multi-service health monitoring, and remediation of the native Prometheus 9002 vs 9664 mismatch. The latter should be handled as a separate CyberController native monitoring correction.
 
-**Implementation status:** Approved by the user on 2026-10-09 and implemented on the feature branch. Do not merge or release until the two-node acceptance gates in [HA_VALIDATION.md](HA_VALIDATION.md) are satisfied.
+**Implementation status:** Approved by the user on 2026-10-09 and implemented on the feature branch. Do not merge or release until the two-node acceptance gates in [HA_VALIDATION.md](HA_VALIDATION_2026-10-13.md) are satisfied.

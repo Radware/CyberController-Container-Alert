@@ -1,6 +1,6 @@
 # PRODUCTION RUNTIME — use one verified, prebuilt versioned Docker image.
-# bash install.sh obtains it from GitHub Releases, a local image, or watchdog.tar.
-# Normal customer installation does not build source or require docker load.
+# The complete customer release archive includes watchdog.tar and its checksum.
+# install.sh verifies/loads that image; customers do not build source or manually load images.
 # For authorized manual operations: docker compose up -d --no-deps docker-container-watchdog
 
 services:

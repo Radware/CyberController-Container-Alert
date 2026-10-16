@@ -1,6 +1,8 @@
 """Validate single customer release package with a fake image; never use Docker."""
 
 import hashlib
+import posixpath
+import re
 from pathlib import Path
 import subprocess
 import tarfile
@@ -39,10 +41,10 @@ class ReleasePackageTests(unittest.TestCase):
     def test_one_complete_release_package(self):
         files = self.package_files()
         required = ("install.sh", "uninstall.sh", "docker-compose.yaml", "VERSION",
-                    "README.md", "DEPLOYMENT.md", ".env.example",
+                    "README.md", ".env.example",
                     "watchdog-config.yaml.example", "watchdog.tar", "SHA256SUMS",
-                    "docs/DEPLOYMENT_ADVANCED.md", "docs/DEVELOPMENT.md",
-                    f"docs/RELEASE_NOTES_V{VERSION}.md")
+                    "docs/customer/INSTALLATION_AND_OPERATIONS.md",
+                    f"docs/customer/RELEASE_NOTES_V{VERSION}.md")
         for name in required:
             self.assertIn(PREFIX + name, files)
         self.assertEqual(files[PREFIX + "VERSION"].decode().strip(), VERSION)
@@ -55,6 +57,24 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertNotIn(PREFIX + "Dockerfile", files)
         self.assertNotIn(PREFIX + ".env", files)
         self.assertNotIn(PREFIX + "watchdog-config.yaml", files)
+        self.assertFalse(any(path.startswith(PREFIX + "docs/engineering/") for path in files))
+        self.assertNotIn(PREFIX + "docs/DEVELOPMENT.md", files)
+
+    def test_every_local_customer_link_is_packaged(self):
+        files = self.package_files()
+        links = re.compile(r"\\]\\(([^)#]+)?(?:#[a-zA-Z0-9\\-]+)?\\)")
+        for name, content in files.items():
+            if not name.endswith(".md"):
+                continue
+            for match in links.finditer(content.decode("utf-8")):
+                relative = match.group(1)
+                if not relative or relative.startswith(("http:", "https:", "mailto:")):
+                    continue
+                target = posixpath.normpath(
+                    posixpath.join(posixpath.dirname(name), relative)
+                )
+                with self.subTest(markdown=name, target=target):
+                    self.assertIn(target, files)
 
     def test_image_checksum_inside_package(self):
         files = self.package_files()

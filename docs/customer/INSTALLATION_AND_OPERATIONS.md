@@ -1,4 +1,4 @@
-# CyberController Container Watchdog — Deployment Guide
+# Container Alert — Customer Installation and Operations
 
 This guide covers **installation, configuration, day-to-day operations, upgrades, rollback, and troubleshooting**. One complete, versioned release package and one `install.sh` wizard work on hosts with or without Internet access. The installer deploys only `docker-container-watchdog`; it never restarts CyberController application containers.
 
@@ -23,7 +23,10 @@ This guide covers **installation, configuration, day-to-day operations, upgrades
    - [Rollback](#54-rollback)
    - [Uninstall](#55-uninstall)
 6. [Troubleshooting](#6-troubleshooting)
-7. [Advanced references and support](#7-advanced-references-and-support)
+   - [Missing recovery notifications](#61-missing-recovery-notifications)
+   - [Read-only logs and probe diagnostics](#62-read-only-logs-and-probe-diagnostics)
+7. [SNMP trap integration](#7-snmp-trap-integration)
+8. [References and support](#8-references-and-support)
 
 ## 1. Prerequisites
 
@@ -208,7 +211,7 @@ syslog:
 
 When enabling Syslog **alongside** existing channels, add `syslog` to the existing list rather than replacing the list as shown in this single-channel example. Restart the watchdog after a YAML-only change.
 
-For SMTP authentication, store the username/password in `.env`; for Slack, store the webhook in `.env`. SNMPv3 passphrases also belong in `.env` and must meet protocol requirements (at least eight characters). See [Advanced Deployment](docs/DEPLOYMENT_ADVANCED.md) for SNMPv3 receiver/engine-ID setup and the supported enterprise trap fields.
+For SMTP authentication, store the username/password in `.env`; for Slack, store the webhook in `.env`. SNMPv3 passphrases also belong in `.env` and must meet protocol requirements (at least eight characters). See [SNMP trap integration](#7-snmp-trap-integration) for SNMPv3 receiver/engine-ID setup and the supported trap OIDs.
 
 ### 4.4 Health checks, exclusions, and HA
 
@@ -246,7 +249,7 @@ The supported per-container probe fields are:
 
 Use the *actual* container name and a supported health endpoint only after validation. Manual `type: exec` checks execute commands inside monitored containers, so they must be approved and carefully reviewed. Do not add exclusions or broad ignore rules merely to silence unexpected alerts.
 
-HA monitoring is **disabled by default**. Enabling it requires an existing supported local exporter on both nodes. The first successful reading establishes a baseline silently. Failover/failback alert delivery is best effort; consult the [HA design and validation guide](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md) for limitations and approved maintenance testing.
+HA monitoring is **disabled by default**. Enabling it requires an existing supported local exporter on both nodes. The first successful reading establishes a baseline silently. Failover/failback alert delivery is best effort; consult the [HA design and validation guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/HA_MONITORING_DESIGN.md) for limitations and approved maintenance testing.
 
 ### 4.5 Environment variables
 
@@ -395,16 +398,67 @@ Do not use `--remove-all` if historical alerts or state must be retained. Uninst
 | Syslog recovery not seen in local WARNING-level logs | Console/file level and forwarded Syslog alert priorities are separate; inspect receiver's structured `watchdog_alert` records |
 | Unexpected unhealthy reports | Compare Docker native HEALTHCHECK, probe type and detection details; do not suppress alerts before authorized review |
 | Excessive restart/crash notifications | Correlate incident and Docker event evidence; do not raise thresholds/exclude containers solely to quiet alerts |
-| HA change notification missing | Both watchdogs, local HA exporter, quorum/metrics, notification receivers and saved baseline; see advanced HA guide |
+| HA change notification missing | Check both watchdogs, local HA exporter, quorum/metrics, notification receivers and saved baseline; see [HA settings](#44-health-checks-exclusions-and-ha) |
 
-For authorization or assistance obtaining the offline release, contact the appropriate Radware support channel. Never change production CyberController service settings solely in response to a watchdog alert.
+### 6.1 Missing recovery notifications
 
-## 7. Advanced references and support
+- Confirm `alert_on_recovery: true` and that an incident previously generated an alert. A never-alarmed container has no recovery notification to send.
+- For Docker-native health, inspect status using `docker inspect <container> --format '{{json .State.Health}}'`; `starting` is not `healthy`.
+- For HTTP/TCP/`/proc` probes, review cached probe evidence. Crash/OOM/restart-loop recovery requires the configured stable-running interval. Do not change thresholds to force recovery.
 
-- [README](README.md) — product behavior, failure types, architecture and version history.
-- [Advanced Deployment](docs/DEPLOYMENT_ADVANCED.md) — developer image builds, release publication, security, SNMPv3 receiver setup.
-- [HA alert design and validation](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md) — HA prerequisites, validation, limitations.
-- [Release smoke testing](docs/RELEASE_SMOKE_TESTING.md) — isolated **developer/CI-only** acceptance tests. Never run destructive scenarios on an operational Docker host.
-- [Example watchdog YAML](watchdog-config.yaml.example) and [example environment variables](.env.example) — full annotated configuration templates.
+### 6.2 Read-only logs and probe diagnostics
 
-For offline-image access or product-specific guidance, use your designated Radware support contact (the previous deployment guide listed `northamericare@radware.com`).
+From the installation directory:
+
+```bash
+tail -f watchdog/watchdog.log
+grep 'watchdog_alert' watchdog/watchdog.log
+grep -E 'ERROR|CRITICAL' watchdog/watchdog.log
+grep -E 'auto-discover|falling back' watchdog/watchdog.log
+grep 'CRITICAL' watchdog/watchdog.log watchdog/watchdog.log.1
+docker compose logs --tail 100 docker-container-watchdog
+```
+
+Logs rotate at approximately 10 MB with five backups. Retain `watchdog/` and
+incident state; do not delete alert history simply to suppress notifications.
+
+For authorization or assistance obtaining the release, contact the appropriate Radware support channel. Never change production CyberController service settings solely in response to a watchdog alert.
+
+## 7. SNMP trap integration
+
+The watchdog supports SNMP v1/v2c/v3 and uses the existing Radware
+Container Alert enterprise notification OID. An NMS operator can configure
+a receiver using this reference without modifying CyberController services.
+
+The configured `snmp_trap.version` accepts v1, v2c, or v3. For SNMPv3, the watchdog logs a stable engine ID derived from the hostname (look for `SNMP engine ID: 0x...`). Register the engine ID and the USM user at the receiving NMS; `v3_local_engine_id` can pin this identity when necessary.
+
+Example receiver-side USM registration (adapt for the actual engine ID and secret values through the authorized NMS process):
+
+```text
+createUser -e 0x<engine-id> watchdog-user SHA "auth-passphrase" AES "priv-passphrase"
+```
+
+Both auth/privacy keys must contain at least eight characters. A privacy key requires an authentication key; SNMPv3 has no privacy-only mode. Supported authentication names include `MD5`, `SHA`, `SHA256`, `SHA384` and `SHA512`. Privacy supports `AES`, `AES192` and `AES256`; `DES` is weak and not recommended.
+
+**Radware Container Alert trap OID:** `1.3.6.1.4.1.89.110.0.1`. The five existing var-binds are:
+
+| OID | Object | Value |
+|---|---|---|
+| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Alerting host |
+| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Summary |
+| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` / `ha-failover` |
+| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Detection detail |
+
+HA events reuse this MIB. They use `cwFailureType=ha-failover` and `cwContainerName=(HA cluster)`; old/new active-node names appear in summary/detail. NMS rules should match the event type, not assume every alert is a failing Docker container.
+
+## 8. References and support
+
+- [Project overview](../../README.md) — product behavior, alert categories and version history.
+- [Release notes](RELEASE_NOTES_V1.6.0.md) — changes, compatibility and limitations for v1.6.0.
+- [HA monitoring](#44-health-checks-exclusions-and-ha) — operator prerequisites and expected behavior.
+
+- [Example watchdog YAML](../../watchdog-config.yaml.example) and [example environment variables](../../.env.example) — full annotated configuration templates.
+
+For release access, installation assistance or product-specific guidance,
+use your organization's designated Radware support contact.

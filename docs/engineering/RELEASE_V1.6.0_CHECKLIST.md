@@ -1,6 +1,6 @@
 # Container Alert v1.6.0 — Final Release Checklist
 
-**This checklist applies only to v1.6.0.** For every subsequent release, use the permanent [Development and Release Guide](DEVELOPMENT.md) and create a corresponding version-specific approval checklist only if needed.
+**This checklist applies only to v1.6.0.** For every subsequent release, use the permanent [Development and Release Guide](DEVELOPMENT_AND_RELEASE.md) and create a corresponding version-specific approval checklist only if needed.
 
 **Status on October 16, 2026:** `main` still contains v1.5.4; `release/v1.6.0` contains `VERSION=1.6.0` and is reviewed through [PR #9](https://github.com/Radware/CyberController-Container-Alert/pull/9), which is open/unmerged. The v1.6.0 GitHub Release has **not** been published by this work.
 
@@ -8,7 +8,7 @@
 
 - [ ] Final engineering review of PR #9: alert/incident lifecycle, notifications, HA behavior, security and image packaging.
 - [ ] Normal GitHub CI **and** [Release smoke (isolated)](RELEASE_SMOKE_TESTING.md) both pass against the **latest PR head SHA**. The smoke is a disposable GitHub-hosted test; never run it against an operational Docker host.
-- [ ] Document all changes since v1.5.4 in [release notes](RELEASE_NOTES_V1.6.0.md). Verify the README history includes `1.6.0`.
+- [ ] Document all changes since v1.5.4 in [release notes](../customer/RELEASE_NOTES_V1.6.0.md). Verify the README history includes `1.6.0`.
 - [ ] Confirm exact supported customer message text, severity mappings, and downstream Syslog/SNMP compatibility.
 - [ ] Confirm there are no private lab hostnames, IP addresses, personal information or credentials in the **published installer archive**, documentation and release notes.
 - [ ] Approve distributing the Docker image and complete release package through this **public** GitHub repository.
@@ -39,7 +39,7 @@ After **all** approvals above:
    git push origin v1.6.0
    ```
 
-4. Confirm the tagged [release workflow](../.github/workflows/release-package.yml) passed:
+4. Confirm the tagged [release workflow](../../.github/workflows/release-package.yml) passed:
 
    ```bash
    gh run list -R Radware/CyberController-Container-Alert --workflow release-package.yml --limit 5
@@ -59,6 +59,6 @@ After **all** approvals above:
    cat unpacked/CyberController-Container-Alert/VERSION
    ```
 
-6. Record tag, commit SHA, workflow link, package hash and final image digest. Inform operators that the *same* complete package works on connected and disconnected hosts, as described in [Deployment](../DEPLOYMENT.md).
+6. Record tag, commit SHA, workflow link, package hash and final image digest. Inform operators that the *same* complete package works on connected and disconnected hosts, as described in [Deployment](../customer/INSTALLATION_AND_OPERATIONS.md).
 
 **Stop if a release gate fails.** Don't distribute a draft, incomplete or unapproved release. Do not run installation, Docker failure injection or HA failover tests on production systems as part of this checklist.

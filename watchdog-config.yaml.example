@@ -69,13 +69,13 @@ syslog:
 smtp:
   enabled: true                      # set to true to enable
   auth: false
-  host: smtp.radware.com
+  host: smtp.example.com
   port: 587
-  sender: noc-alerts@radware.com
+  sender: alerts@example.com
   username_env: SMTP_USERNAME        # env var: SMTP username or app token (Mailtrap, Gmail app password, etc.)
   recipients:
-    - ops-team@radware.com
-    - oncall@radware.com
+    - ops@example.com
+    - oncall@example.com
   tls: true
   password_env: SMTP_PASSWORD        # env var: SMTP password or app token
 

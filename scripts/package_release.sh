@@ -28,12 +28,12 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 dir="$work/CyberController-Container-Alert"
-mkdir -p "$dir/docs"
+mkdir -p "$dir/docs/customer"
 for f in install.sh uninstall.sh docker-compose.yaml VERSION \
-         .env.example watchdog-config.yaml.example README.md DEPLOYMENT.md; do
+         .env.example watchdog-config.yaml.example README.md; do
     cp "$repo/$f" "$dir/$f"
 done
-cp "$repo"/docs/*.md "$dir/docs/"
+cp "$repo"/docs/customer/*.md "$dir/docs/customer/"  # only customer guides ship
 
 cp "$image" "$dir/watchdog.tar"
 (cd "$dir" && sha256sum watchdog.tar > SHA256SUMS)

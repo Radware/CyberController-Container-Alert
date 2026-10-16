@@ -6,10 +6,10 @@
 > customer-facing message updates. Do **not** rerun their Docker commands on
 > any shared or operational Docker Engine. Earlier nested testing triggered
 > real notifications on its parent host.
-> See [current release notes](RELEASE_NOTES_V1.6.0.md) and
+> See [current release notes](../customer/RELEASE_NOTES_V1.6.0.md) and
 > [safe smoke workflow](RELEASE_SMOKE_TESTING.md).
 
-> **Historical baseline (pre-fix).** This page records the original HA-lab smoke-test failures. They were subsequently investigated using a separate real Docker Engine on a dedicated development host, and a minimal recovery fix passed the complete [final release acceptance report](RELEASE_ACCEPTANCE_V1.6.0_FINAL.md). Retain this document as evidence of the original findings, not the current release verdict.
+> **Historical baseline (pre-fix).** This page records the original HA-lab smoke-test failures. They were subsequently investigated using a separate real Docker Engine on a dedicated development host, and a minimal recovery fix passed the complete [final release acceptance report](RELEASE_ACCEPTANCE_V1.6.0.md). Retain this document as evidence of the original findings, not the current release verdict.
 
 **Date:** October 14, 2026 (UTC)
 **Repository:** `Radware/CyberController-Container-Alert`
@@ -25,7 +25,7 @@
 - A separate resource-limited v1.6.0 observer used its own Docker volume/state, 2-second Docker polling, real 5-restart threshold, and **real 120-second** recovery requirement. SMTP disabled only on the observer; Syslog sent to the **existing** DFC UDP/514 receiver. Production-style main watchdog and cluster were not reconfigured.
 - Used uniquely prefixed, labeled disposable containers, restricted to 0.2 CPU and 64–128 MiB each, with `--network none`. Verified actual Docker state, events, watchdog structured alert records, and DFC `/var/log/syslog` deliveries.
 - No host packages, new Docker networks, Pacemaker operations, or host service modifications. Cleanup removed all smoke-owned containers and volumes. Original watchdog stayed healthy.
-- Runner: [`tests/release-smoke.sh`](../tests/release-smoke.sh). It saves `report.json`, `report.md`, `watchdog.log`, `docker-events-live.jsonl`, and `dfc-syslog.txt` to `/tmp/container-alert-smoke-<run-id>/` inside the authorized RDC client.
+- Runner: [`tests/release-smoke.sh`](../../tests/release-smoke.sh). It saves `report.json`, `report.md`, `watchdog.log`, `docker-events-live.jsonl`, and `dfc-syslog.txt` to `/tmp/container-alert-smoke-<run-id>/` inside the authorized RDC client.
 
 ## 1. Automated, packaging, and release checks
 
@@ -110,6 +110,8 @@ The DFC Syslog pipeline itself had **100% message-count correspondence in the fi
 
 - Lab RDC container: `/tmp/container-alert-smoke-261014214436754/`
 - Raw files: `report.json`, `report.md`, `docker-events-live.jsonl`, `watchdog.log`, `dfc-syslog.txt`, and `observer-state.json`.
-- Source-controlled runner: [`tests/release-smoke.sh`](../tests/release-smoke.sh). Use `bash release-smoke.sh` from the authorized lab admin environment; its `/tmp` filesystem is mounted `noexec`.
+- Source-controlled runner: [`tests/release-smoke.sh`](../../tests/release-smoke.sh). The historical lab smoke command must **not be repeated**; current destructive
+acceptance is permitted only through the
+[disposable GitHub-hosted workflow](RELEASE_SMOKE_TESTING.md).
 
-Machine-readable final run: [`RELEASE_SMOKE_V1.6.0_20261014.json`](RELEASE_SMOKE_V1.6.0_20261014.json).
+Machine-readable final run: [`RELEASE_SMOKE_V1.6.0_20261014.json`](evidence/RELEASE_SMOKE_V1.6.0_20261014.json).

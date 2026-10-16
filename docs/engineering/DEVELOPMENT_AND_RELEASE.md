@@ -1,6 +1,6 @@
 # Container Alert — Development and Release Guide
 
-**Reusable for every release.** This guide goes from changing source code to publishing and verifying a customer installation package. For the specific approval status of v1.6.0, see [its release checklist](RELEASE_V1.6.0_CHECKLIST.md). Customers follow [Deployment](../DEPLOYMENT.md).
+**Reusable for every release.** This guide goes from changing source code to publishing and verifying a customer installation package. For the specific approval status of v1.6.0, see [its release checklist](RELEASE_V1.6.0_CHECKLIST.md). Customers follow [Deployment](../customer/INSTALLATION_AND_OPERATIONS.md).
 
 ## Table of contents
 
@@ -11,6 +11,7 @@
 5. [Verify the published package](#5-verify-the-published-package)
 6. [Customer delivery and rollback](#6-customer-delivery-and-rollback)
 7. [Safety and best practices](#7-safety-and-best-practices)
+8. [Developer-only builds and monitoring notes](#8-developer-only-builds-and-monitoring-notes)
 
 ## 1. What we publish
 
@@ -65,7 +66,7 @@ gh pr view <PR_NUMBER> -R Radware/CyberController-Container-Alert
 gh pr checks <PR_NUMBER> -R Radware/CyberController-Container-Alert
 ```
 
-Normal GitHub CI runs unit/static/build checks. Only the [hosted isolated smoke workflow](../.github/workflows/release-smoke.yml) may perform destructive real-Docker acceptance. For release-critical changes it must pass at the latest reviewed PR head. Code review and approval are still required when checks pass.
+Normal GitHub CI runs unit/static/build checks. Only the [hosted isolated smoke workflow](../../.github/workflows/release-smoke.yml) may perform destructive real-Docker acceptance. For release-critical changes it must pass at the latest reviewed PR head. Code review and approval are still required when checks pass.
 
 ## 3. Prepare the next version
 
@@ -83,12 +84,12 @@ Update the following to match the chosen version:
 
 1. `VERSION` — set the new number (the command above does this).
 2. `README.md` — add the matching version-history row; CI checks this.
-3. `docs/RELEASE_NOTES_V<VERSION>.md` — create the matching version-specific release notes, including all changes since the previous published release, operational impact, limitations and test evidence.
+3. `docs/customer/RELEASE_NOTES_V<VERSION>.md` — create the matching version-specific release notes, including all changes since the previous published release, operational impact, limitations and test evidence.
 4. Deployment and examples if operator procedures/settings changed; keep private lab/customer identifiers and secrets out.
 5. Tests and hosted smoke approval for the release PR.
 
 ```bash
-git add VERSION README.md "docs/RELEASE_NOTES_V$NEXT_VER.md"
+git add VERSION README.md "docs/customer/RELEASE_NOTES_V$NEXT_VER.md"
 git commit -m "release: prepare v$NEXT_VER"
 git push -u origin "release/v$NEXT_VER"
 gh pr create --base main --head "release/v$NEXT_VER" --title "Release v$NEXT_VER" --fill
@@ -124,7 +125,7 @@ git tag -a "v$VER" -m "Container Alert v$VER"
 git push origin "v$VER"
 ```
 
-The tag triggers [Publish Container Alert release](../.github/workflows/release-package.yml). Its GitHub-hosted runner checks version/ancestry, runs tests, builds the prebuilt image, creates the package and checksum, uploads both assets as a **draft release**, checks the assets, then publishes. PR merges do not automatically create customer packages.
+The tag triggers [Publish Container Alert release](../../.github/workflows/release-package.yml). Its GitHub-hosted runner checks version/ancestry, runs tests, builds the prebuilt image, creates the package and checksum, uploads both assets as a **draft release**, checks the assets, then publishes. PR merges do not automatically create customer packages.
 
 ## 5. Verify the published package
 
@@ -157,7 +158,7 @@ If the workflow fails or the release is incomplete, do not distribute it. Inspec
 
 Operators obtain `container-alert-v<VERSION>.tar.gz` and `SHA256SUMS` from the release or approved internal transfer. They verify, extract, and run `bash install.sh`. The archive works equally well on connected and disconnected hosts. It doesn't include active `.env`, `watchdog-config.yaml` or persistent `watchdog/`, so upgrades preserve customer settings and history and recreate **only** the watchdog service.
 
-YAML-only changes require a watchdog restart; `.env`/Compose changes require recreating that service. Python changes require a new tested and published image. Rollback means selecting the last approved image and configuration; follow [Deployment — Rollback](../DEPLOYMENT.md#54-rollback).
+YAML-only changes require a watchdog restart; `.env`/Compose changes require recreating that service. Python changes require a new tested and published image. Rollback means selecting the last approved image and configuration; follow [Deployment — Rollback](../customer/INSTALLATION_AND_OPERATIONS.md#54-rollback).
 
 ## 7. Safety and best practices
 
@@ -168,3 +169,38 @@ YAML-only changes require a watchdog restart; `.env`/Compose changes require rec
 - Require code review and explicit public-distribution approval before tagging. Image builds use prebuilt, versioned artifacts rather than compiling on customer systems.
 
 References: [GitHub Flow](https://docs.github.com/en/get-started/using-github/github-flow), [Managing Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository), [About releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
+
+
+## 8. Developer-only builds and monitoring notes
+
+### Local image build (never a customer installation)
+
+For authorized development:
+
+```bash
+export WATCHDOG_VERSION="$(cat VERSION)"
+docker compose -f docker-compose.build.yaml build
+```
+
+The Dockerfile packages `watchdog.py`, `lifecycle.py`, and `ha_monitor.py`
+inside the image. A restart alone does **not** apply Python source edits.
+Production deployment requires a published, prebuilt release package.
+
+### Narrow CyberController event exceptions
+
+
+The intended MariaDB HA syntax-check helper carries the explicit label `com.radware.cybercontroller.role=mariadb-ha-syntax-check`. The configured `ignored_container_events` policy ignores only the designated temporary helper `die` event; normal service container failures remain monitored.
+
+A narrow compatibility fallback exists for dynamic MariaDB dump helpers: it applies only when the helper image, non-primary container name, Docker `AutoRemove` status, expected SQL dump file mount and exit status 137 **all** match. This is not a general rule to suppress MariaDB failures. Any change to monitoring exceptions belongs to Radware R&D/authorized operations, not routine customer alert handling.
+
+
+These exceptions are not blanket MariaDB or OOM alert suppression. Changes
+to monitoring exceptions require R&D review and regression validation.
+
+### Historical design and validation
+
+The [HA design](HA_MONITORING_DESIGN.md) and [dated HA snapshot](HA_VALIDATION_2026-10-13.md)
+preserve earlier evidence. The [release acceptance](RELEASE_ACCEPTANCE_V1.6.0.md)
+and [earlier failures](RELEASE_VALIDATION_V1.6.0.md) are historical reports,
+not current installation instructions or release approval. Use the
+[release checklist](RELEASE_V1.6.0_CHECKLIST.md) and actual GitHub checks.

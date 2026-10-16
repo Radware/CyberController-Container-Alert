@@ -1,7 +1,14 @@
+> **Historical validation snapshot — 2026-10-13.** PR #4 was subsequently
+> merged into `main` on 2026-10-14, and later HA failover/failback
+> acceptance is recorded in the
+> [v1.6.0 release acceptance report](RELEASE_ACCEPTANCE_V1.6.0.md).
+> The pending gates below are preserved as historical findings, **not** the
+> current status of PR #4.
+
 # Optional HA active-node alert — validation status
 
 **Branch:** feature/optional-ha-failover-alert
-**Status:** Draft PR #4; tested in the two-node lab, not approved for merge
+**Status at the time:** Draft PR #4; two-node lab tested, pending merge
 **Updated:** 2026-10-13
 
 ## Automated tests and build
