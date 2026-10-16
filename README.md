@@ -195,7 +195,7 @@ A YAML-only change takes effect after restarting the watchdog. A changed `.env` 
 | SNMP Trap | `snmp_trap` | NMS destination, SNMP version; SNMPv3 keys in `.env` |
 | Slack | `slack` | Webhook URL stored in `.env` |
 
-At least one channel must be selected in the installer; multiple channels may be enabled together. **See [Deployment — Notification Channels](docs/operations/INSTALLATION_AND_OPERATIONS.md#43-notification-channels) for all configuration fields and examples.** The [advanced reference](docs/operations/INSTALLATION_AND_OPERATIONS.md#7-snmp-trap-integration) retains SNMPv3 receiver setup and the Radware trap OID/var-bind definitions.
+At least one channel must be selected in the installer; multiple channels may be enabled together. **See [Deployment — Notification Channels](docs/operations/INSTALLATION_AND_OPERATIONS.md#43-notification-channels) for all configuration fields and examples.** The [SNMP trap receiver details](docs/operations/INSTALLATION_AND_OPERATIONS.md#snmp-traps) retains SNMPv3 receiver setup and the Radware trap OID/var-bind definitions.
 
 ---
 

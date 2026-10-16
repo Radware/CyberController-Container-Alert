@@ -13,6 +13,10 @@ This guide covers **installation, configuration, day-to-day operations, upgrades
    - [Configuration files and editing](#41-configuration-files-and-editing)
    - [Watchdog monitoring settings](#42-watchdog-monitoring-settings)
    - [Notification channels](#43-notification-channels)
+     - [Syslog](#syslog)
+     - [SMTP (email)](#smtp-email)
+     - [Slack](#slack)
+     - [SNMP traps](#snmp-traps)
    - [Health checks, exclusions, and HA](#44-health-checks-exclusions-and-ha)
    - [Environment variables](#45-environment-variables)
    - [Apply configuration changes](#46-apply-configuration-changes)
@@ -25,8 +29,7 @@ This guide covers **installation, configuration, day-to-day operations, upgrades
 6. [Troubleshooting](#6-troubleshooting)
    - [Missing recovery notifications](#61-missing-recovery-notifications)
    - [Read-only logs and probe diagnostics](#62-read-only-logs-and-probe-diagnostics)
-7. [SNMP trap integration](#7-snmp-trap-integration)
-8. [References and support](#8-references-and-support)
+7. [References and support](#7-references-and-support)
 
 ## 1. Prerequisites
 
@@ -172,7 +175,7 @@ Changes to exclusions, thresholds, probe methods or suppression rules can mask r
 
 ### 4.3 Notification channels
 
-For any channel, its identifier must be present in `alert_channels` **and** its configuration must be enabled. Enabling a channel doesn't automatically prove that its destination received an alert.
+The installer records the selected delivery channels and their settings. **Slack, SMTP, and SNMP traps** use both `alert_channels` and their channel's `enabled` setting (Slack defaults to enabled if omitted). **Syslog** instead forwards through the logging subsystem when `syslog.enabled: true`; listing it in `alert_channels` alone does not activate forwarding. All channels require a reachable receiver, and secret-based channels require credentials in `.env`.
 
 | Channel | YAML field | Purpose |
 |---|---|---|
@@ -195,12 +198,13 @@ For any channel, its identifier must be present in `alert_channels` **and** its 
 | SNMPv3 | `v3_auth_key_env`, `v3_priv_key_env` | Names of passphrase variables in `.env`; do not embed secrets in YAML |
 | SNMPv3 | `v3_local_engine_id` | Optional fixed sender engine ID used by receiving NMS registration |
 
-Example: changing the Syslog destination **after installation**:
+#### Syslog
+
+Set `syslog.enabled: true` and provide the receiver host, port, protocol and facility. Syslog forwards structured alert records (including INFO recoveries) independently of the local console/file log threshold. The installer may list `syslog` in `alert_channels` for consistency, but the actual forwarding switch is `syslog.enabled`.
+
+Example receiver settings after installation:
 
 ```yaml
-alert_channels:
-  - syslog
-
 syslog:
   enabled: true
   host: syslog.example.com
@@ -209,9 +213,43 @@ syslog:
   facility: local0
 ```
 
-When enabling Syslog **alongside** existing channels, add `syslog` to the existing list rather than replacing the list as shown in this single-channel example. Restart the watchdog after a YAML-only change.
+Restart the watchdog after an approved YAML-only change. Confirm receipt at the configured Syslog receiver.
 
-For SMTP authentication, store the username/password in `.env`; for Slack, store the webhook in `.env`. SNMPv3 passphrases also belong in `.env` and must meet protocol requirements (at least eight characters). See [SNMP trap integration](#7-snmp-trap-integration) for SNMPv3 receiver/engine-ID setup and the supported trap OIDs.
+#### SMTP (email)
+
+Include `smtp` in `alert_channels` and set `smtp.enabled: true`. Configure the mail host, port, sender, recipients and `smtp.tls` in YAML. With `tls: true`, the watchdog uses SMTP STARTTLS. Use `smtp.auth: false` only for an approved unauthenticated relay. If authentication is enabled, store `SMTP_USERNAME` and `SMTP_PASSWORD` in `.env` (the YAML fields `username_env` and `password_env` reference those variable names).
+
+#### Slack
+
+Include `slack` in `alert_channels` and set `slack.enabled: true` (or omit `enabled`, which defaults to true for compatibility). Store the incoming webhook URL in `.env` as `SLACK_WEBHOOK_URL`; the YAML `slack.webhook_url_env` names that variable. Do not embed the webhook URL in YAML or commit it to the repository.
+
+#### SNMP traps
+
+Include `snmp_trap` in `alert_channels`, set `snmp_trap.enabled: true`, and configure the NMS receiver host, UDP port (normally 162) and SNMP version. SNMPv1/v2c use the configured community string; SNMPv3 credentials are referenced from `.env`. The additional details below are **receiver-side SNMP integration**, not a separate watchdog feature.
+
+The configured `snmp_trap.version` accepts v1, v2c, or v3. For SNMPv3, the watchdog logs a stable engine ID derived from the hostname (look for `SNMP engine ID: 0x...`). Register the engine ID and the USM user at the receiving NMS; `v3_local_engine_id` can pin this identity when necessary.
+
+Example receiver-side USM registration (adapt for the actual engine ID and secret values through the authorized NMS process):
+
+```text
+createUser -e 0x<engine-id> watchdog-user SHA "auth-passphrase" AES "priv-passphrase"
+```
+
+Both auth/privacy keys must contain at least eight characters. A privacy key requires an authentication key; SNMPv3 has no privacy-only mode. Supported authentication names include `MD5`, `SHA`, `SHA256`, `SHA384` and `SHA512`. Privacy supports `AES`, `AES192` and `AES256`; `DES` is weak and not recommended.
+
+**Radware Container Alert trap OID:** `1.3.6.1.4.1.89.110.0.1`. The five existing var-binds are:
+
+| OID | Object | Value |
+|---|---|---|
+| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Alerting host |
+| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Summary |
+| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
+| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` / `ha-failover` |
+| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Detection detail |
+
+HA events reuse this MIB. They use `cwFailureType=ha-failover` and `cwContainerName=(HA cluster)`; old/new active-node names appear in summary/detail. NMS rules should match the event type, not assume every alert is a failing Docker container.
+
+For a YAML-only channel change, restart the watchdog. For changed `.env` secrets, recreate **only** the watchdog as described in [Apply configuration changes](#46-apply-configuration-changes). Do not restart any monitored application container to verify channel delivery.
 
 ### 4.4 Health checks, exclusions, and HA
 
@@ -424,35 +462,7 @@ incident state; do not delete alert history simply to suppress notifications.
 
 For authorization or assistance obtaining the release, contact the appropriate Radware support channel. Never change production CyberController service settings solely in response to a watchdog alert.
 
-## 7. SNMP trap integration
-
-The watchdog supports SNMP v1/v2c/v3 and uses the existing Radware
-Container Alert enterprise notification OID. An NMS operator can configure
-a receiver using this reference without modifying CyberController services.
-
-The configured `snmp_trap.version` accepts v1, v2c, or v3. For SNMPv3, the watchdog logs a stable engine ID derived from the hostname (look for `SNMP engine ID: 0x...`). Register the engine ID and the USM user at the receiving NMS; `v3_local_engine_id` can pin this identity when necessary.
-
-Example receiver-side USM registration (adapt for the actual engine ID and secret values through the authorized NMS process):
-
-```text
-createUser -e 0x<engine-id> watchdog-user SHA "auth-passphrase" AES "priv-passphrase"
-```
-
-Both auth/privacy keys must contain at least eight characters. A privacy key requires an authentication key; SNMPv3 has no privacy-only mode. Supported authentication names include `MD5`, `SHA`, `SHA256`, `SHA384` and `SHA512`. Privacy supports `AES`, `AES192` and `AES256`; `DES` is weak and not recommended.
-
-**Radware Container Alert trap OID:** `1.3.6.1.4.1.89.110.0.1`. The five existing var-binds are:
-
-| OID | Object | Value |
-|---|---|---|
-| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Alerting host |
-| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Summary |
-| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` / `ha-failover` |
-| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Detection detail |
-
-HA events reuse this MIB. They use `cwFailureType=ha-failover` and `cwContainerName=(HA cluster)`; old/new active-node names appear in summary/detail. NMS rules should match the event type, not assume every alert is a failing Docker container.
-
-## 8. References and support
+## 7. References and support
 
 - [Project overview](../../README.md) — product behavior, alert categories and version history.
 - [Release notes](RELEASE_NOTES_V1.6.0.md) — changes, compatibility and limitations for v1.6.0.
