@@ -16,6 +16,8 @@ on:
       - "docker-compose.build.yaml"
       - "tests/release-smoke.sh"
       - ".github/workflows/release-smoke.yml"
+      - ".github/workflows/release-package.yml"
+      - "scripts/package_release.sh"
       - "Dockerfile"
   workflow_dispatch:
 

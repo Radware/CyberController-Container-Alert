@@ -1,6 +1,6 @@
 # Container Alert — Advanced Deployment Reference
 
-This page supports engineers and release maintainers. For normal installation or upgrades, use the [Deployment Guide](../DEPLOYMENT.md): one interactive installer for online and offline hosts.
+This page supports engineers and release maintainers. For normal installation and upgrades, use the [Deployment Guide](../DEPLOYMENT.md). For branching, CI and release publication, see [Development and Release Cycle](DEVELOPMENT_AND_RELEASE.md).
 
 ## Image distribution and provenance
 
@@ -15,8 +15,11 @@ https://github.com/Radware/CyberController-Container-Alert/releases/tag/v<VERSIO
 Each approved release contains:
 
 - `watchdog.tar` — the prebuilt, version-tagged Docker image.
-- `SHA256SUMS` — SHA-256 hashes for the image archive and offline bundle.
-- `container-alert-v<VERSION>-offline.tar.gz` — an installation folder containing `install.sh`, `VERSION`, Compose, templates, documentation, checksum, and image.
+- `SHA256SUMS` — SHA-256 digests for the image and **both** install packages.
+- `container-alert-v<VERSION>-online.tar.gz` — installer, `VERSION`, Compose, templates and documentation **without the Docker image or Python source**.
+- `container-alert-v<VERSION>-offline.tar.gz` — exactly the same installation files **plus** `watchdog.tar` and its internal image checksum.
+
+The [release packaging script](../scripts/package_release.sh) builds both packages from the same list of files. Only the offline bundle includes the Docker image. Operator configuration (`.env`, `watchdog-config.yaml` and `watchdog/`) is deliberately absent so upgrades don't overwrite settings, secrets or history.
 
 The installer verifies downloaded archive checksum and the image's `org.opencontainers.image.version` label. When an operator explicitly accepts an existing local versioned image, the installer verifies its version label. The operator remains responsible for ensuring the local image came from an approved source. An offline archive with `SHA256SUMS` is independently checksum-checked before load.
 
@@ -24,13 +27,9 @@ Image tags must not be reused for different source code. Build new code under a 
 
 ## Release publication (maintainers)
 
-1. Finish review and merge the release changes into `main`. Do not publish directly from an unmerged release branch.
-2. Confirm the existing PR CI and isolated release smoke workflow passed for the reviewed candidate.
-3. Tag the approved commit as `v<VERSION>` and push the tag. The `Publish Container Alert release` GitHub Actions workflow checks that the tag matches `VERSION` and that the commit is on `main`.
-4. The hosted workflow runs non-destructive tests, builds one version-labelled image, exports `watchdog.tar`, creates the offline bundle/checksums, and publishes the GitHub Release.
-5. Verify the release page assets and checksum before announcing customer availability.
+Use the full [Development and Release Cycle](DEVELOPMENT_AND_RELEASE.md) checklist. In brief: approve and merge the release PR to `main`, confirm CI and isolated smoke on the reviewed SHA, obtain approval for **public** distribution, and only then push the `v<VERSION>` tag. GitHub Actions builds and validates the image, assembles both packages, checks their SHA-256 digests, creates a draft GitHub Release, verifies all four assets, then publishes.
 
-Publication requires repository permission for GitHub Actions to create releases (contents: write), and approval to distribute the image publicly. Until that is approved and the release workflow succeeds, use a controlled offline package instead. No release publication happens merely by opening or merging a PR.
+Tagging does not automatically deploy anything to an operational host. Until the release workflow succeeds, its online/offline assets do not exist for customers. Do not build source on customer systems.
 
 ## Developer-only source build
 

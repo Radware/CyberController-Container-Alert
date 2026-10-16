@@ -19,6 +19,7 @@ jobs:
           bash -n install.sh
           bash -n uninstall.sh
           bash -n tests/release-smoke.sh
+          bash -n scripts/package_release.sh
 
       - name: Validate Python syntax
         run: |
