@@ -6,7 +6,7 @@
 > customer-facing message updates. Do **not** rerun their Docker commands on
 > any shared or operational Docker Engine. Earlier nested testing triggered
 > real notifications on its parent host.
-> See [current release notes](../customer/RELEASE_NOTES_V1.6.0.md) and
+> See [current release notes](../operations/RELEASE_NOTES_V1.6.0.md) and
 > [safe smoke workflow](RELEASE_SMOKE_TESTING.md).
 
 > **Historical baseline (pre-fix).** This page records the original HA-lab smoke-test failures. They were subsequently investigated using a separate real Docker Engine on a dedicated development host, and a minimal recovery fix passed the complete [final release acceptance report](RELEASE_ACCEPTANCE_V1.6.0.md). Retain this document as evidence of the original findings, not the current release verdict.

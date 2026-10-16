@@ -51,7 +51,7 @@ class DocumentationTests(unittest.TestCase):
                         self.assertIn(anchor, heading_anchors(target.read_text()))
 
     def test_customer_docs_are_self_contained(self):
-        docs = [ROOT / "README.md", *(ROOT / "docs/customer").glob("*.md")]
+        docs = [ROOT / "README.md", *(ROOT / "docs/operations").glob("*.md")]
         for doc in docs:
             for match in LINK_RE.finditer(doc.read_text()):
                 relative, _ = match.groups()
@@ -59,7 +59,7 @@ class DocumentationTests(unittest.TestCase):
                     continue
                 target = (doc.parent / relative).resolve()
                 self.assertNotIn(
-                    ROOT / "docs/engineering",
+                    ROOT / "docs/dev",
                     target.parents,
                     f"Customer bundle refers to internal engineering file: {doc}",
                 )
@@ -68,8 +68,8 @@ class DocumentationTests(unittest.TestCase):
 
     def test_release_notes_links_work_when_published_as_github_release(self):
         # GitHub Release notes are rendered at the release URL, not at
-        # docs/customer/, so links to other files must be absolute.
-        for notes in (ROOT / "docs/customer").glob("RELEASE_NOTES_V*.md"):
+        # docs/operations/, so links to other files must be absolute.
+        for notes in (ROOT / "docs/operations").glob("RELEASE_NOTES_V*.md"):
             for match in LINK_RE.finditer(notes.read_text()):
                 destination, _ = match.groups()
                 if not destination or destination.startswith("#"):
@@ -82,7 +82,7 @@ class DocumentationTests(unittest.TestCase):
 
     def test_operator_guide_covers_configuration_template_fields(self):
         config = yaml.safe_load((ROOT / "watchdog-config.yaml.example").read_text())
-        guide = (ROOT / "docs/customer/INSTALLATION_AND_OPERATIONS.md").read_text()
+        guide = (ROOT / "docs/operations/INSTALLATION_AND_OPERATIONS.md").read_text()
 
         def keys(item, prefix=""):
             if isinstance(item, dict):

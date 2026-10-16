@@ -69,8 +69,8 @@ jobs:
         run: |
           set -euo pipefail
           notes=(--generate-notes)
-          if [ -f "docs/customer/RELEASE_NOTES_V$WATCHDOG_VERSION.md" ]; then
-            notes=(--notes-file "docs/customer/RELEASE_NOTES_V$WATCHDOG_VERSION.md")
+          if [ -f "docs/operations/RELEASE_NOTES_V$WATCHDOG_VERSION.md" ]; then
+            notes=(--notes-file "docs/operations/RELEASE_NOTES_V$WATCHDOG_VERSION.md")
           fi
 
           # Check both assets before making this public release visible.

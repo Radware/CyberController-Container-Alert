@@ -249,7 +249,7 @@ The supported per-container probe fields are:
 
 Use the *actual* container name and a supported health endpoint only after validation. Manual `type: exec` checks execute commands inside monitored containers, so they must be approved and carefully reviewed. Do not add exclusions or broad ignore rules merely to silence unexpected alerts.
 
-HA monitoring is **disabled by default**. Enabling it requires an existing supported local exporter on both nodes. The first successful reading establishes a baseline silently. Failover/failback alert delivery is best effort; consult the [HA design and validation guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/HA_MONITORING_DESIGN.md) for limitations and approved maintenance testing.
+HA monitoring is **disabled by default**. Enabling it requires an existing supported local exporter on both nodes. The first successful reading establishes a baseline silently. Failover/failback alert delivery is best effort; consult the [HA design and validation guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/HA_MONITORING_DESIGN.md) for limitations and approved maintenance testing.
 
 ### 4.5 Environment variables
 

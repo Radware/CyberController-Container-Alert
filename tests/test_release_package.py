@@ -43,8 +43,8 @@ class ReleasePackageTests(unittest.TestCase):
         required = ("install.sh", "uninstall.sh", "docker-compose.yaml", "VERSION",
                     "README.md", ".env.example",
                     "watchdog-config.yaml.example", "watchdog.tar", "SHA256SUMS",
-                    "docs/customer/INSTALLATION_AND_OPERATIONS.md",
-                    f"docs/customer/RELEASE_NOTES_V{VERSION}.md")
+                    "docs/operations/INSTALLATION_AND_OPERATIONS.md",
+                    f"docs/operations/RELEASE_NOTES_V{VERSION}.md")
         for name in required:
             self.assertIn(PREFIX + name, files)
         self.assertEqual(files[PREFIX + "VERSION"].decode().strip(), VERSION)
@@ -57,7 +57,7 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertNotIn(PREFIX + "Dockerfile", files)
         self.assertNotIn(PREFIX + ".env", files)
         self.assertNotIn(PREFIX + "watchdog-config.yaml", files)
-        self.assertFalse(any(path.startswith(PREFIX + "docs/engineering/") for path in files))
+        self.assertFalse(any(path.startswith(PREFIX + "docs/dev/") for path in files))
         self.assertNotIn(PREFIX + "docs/DEVELOPMENT.md", files)
 
     def test_every_local_customer_link_is_packaged(self):

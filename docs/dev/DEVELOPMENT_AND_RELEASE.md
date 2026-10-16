@@ -1,6 +1,6 @@
 # Container Alert — Development and Release Guide
 
-**Reusable for every release.** This guide goes from changing source code to publishing and verifying a customer installation package. For the specific approval status of v1.6.0, see [its release checklist](RELEASE_V1.6.0_CHECKLIST.md). Customers follow [Deployment](../customer/INSTALLATION_AND_OPERATIONS.md).
+**Reusable for every release.** This guide goes from changing source code to publishing and verifying a customer installation package. For the specific approval status of v1.6.0, see [its release checklist](RELEASE_V1.6.0_CHECKLIST.md). Customers follow [Deployment](../operations/INSTALLATION_AND_OPERATIONS.md).
 
 ## Table of contents
 
@@ -84,12 +84,12 @@ Update the following to match the chosen version:
 
 1. `VERSION` — set the new number (the command above does this).
 2. `README.md` — add the matching version-history row; CI checks this.
-3. `docs/customer/RELEASE_NOTES_V<VERSION>.md` — create the matching version-specific release notes, including all changes since the previous published release, operational impact, limitations and test evidence.
+3. `docs/operations/RELEASE_NOTES_V<VERSION>.md` — create the matching version-specific release notes, including all changes since the previous published release, operational impact, limitations and test evidence.
 4. Deployment and examples if operator procedures/settings changed; keep private lab/customer identifiers and secrets out.
 5. Tests and hosted smoke approval for the release PR.
 
 ```bash
-git add VERSION README.md "docs/customer/RELEASE_NOTES_V$NEXT_VER.md"
+git add VERSION README.md "docs/operations/RELEASE_NOTES_V$NEXT_VER.md"
 git commit -m "release: prepare v$NEXT_VER"
 git push -u origin "release/v$NEXT_VER"
 gh pr create --base main --head "release/v$NEXT_VER" --title "Release v$NEXT_VER" --fill
@@ -158,7 +158,7 @@ If the workflow fails or the release is incomplete, do not distribute it. Inspec
 
 Operators obtain `container-alert-v<VERSION>.tar.gz` and `SHA256SUMS` from the release or approved internal transfer. They verify, extract, and run `bash install.sh`. The archive works equally well on connected and disconnected hosts. It doesn't include active `.env`, `watchdog-config.yaml` or persistent `watchdog/`, so upgrades preserve customer settings and history and recreate **only** the watchdog service.
 
-YAML-only changes require a watchdog restart; `.env`/Compose changes require recreating that service. Python changes require a new tested and published image. Rollback means selecting the last approved image and configuration; follow [Deployment — Rollback](../customer/INSTALLATION_AND_OPERATIONS.md#54-rollback).
+YAML-only changes require a watchdog restart; `.env`/Compose changes require recreating that service. Python changes require a new tested and published image. Rollback means selecting the last approved image and configuration; follow [Deployment — Rollback](../operations/INSTALLATION_AND_OPERATIONS.md#54-rollback).
 
 ## 7. Safety and best practices
 

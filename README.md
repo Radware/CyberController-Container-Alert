@@ -2,9 +2,9 @@
 
 The **CyberController Container Watchdog** is a lightweight, autonomous monitoring service that continuously tracks the health of all Docker containers on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**). It also sends a one-time INFO **recovered** alert through the same channels once a previously-alarmed container returns to normal operation.
 
-**Documentation:** [Customer installation and operations](docs/customer/INSTALLATION_AND_OPERATIONS.md) · [v1.6.0 release notes](docs/customer/RELEASE_NOTES_V1.6.0.md).
+**Documentation:** [Customer installation and operations](docs/operations/INSTALLATION_AND_OPERATIONS.md) · [v1.6.0 release notes](docs/operations/RELEASE_NOTES_V1.6.0.md).
 
-**For maintainers (source repository):** [Development and release workflow](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/DEVELOPMENT_AND_RELEASE.md). Historical design, test reports, and CI procedures live under `docs/engineering/` and are **not included** in customer installation packages.
+**For maintainers (source repository):** [Development and release workflow](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md). Historical design, test reports, and CI procedures live under `docs/dev/` and are **not included** in customer installation packages.
 
 ---
 
@@ -113,7 +113,7 @@ CyberController services have recovered.
 The exporter may use port **9664** even when the built-in CyberController
 Prometheus configuration references **9002**. This optional check reads the
 exporter directly and makes **no changes** to native Prometheus configuration.
-See [customer HA configuration and expected behavior](docs/customer/INSTALLATION_AND_OPERATIONS.md#44-health-checks-exclusions-and-ha).
+See [customer HA configuration and expected behavior](docs/operations/INSTALLATION_AND_OPERATIONS.md#44-health-checks-exclusions-and-ha).
 
 ---
 
@@ -135,8 +135,8 @@ The following is the **source repository** layout, not the customer archive. The
 ├── install.sh                   # Guided installation from complete release package
 ├── uninstall.sh                 # Stop + remove script
 ├── scripts/package_release.sh   # CI release-package assembly (maintainers only)
-├── docs/customer/              # Installation/operations and release notes
-├── docs/engineering/           # Development, release, HA and test evidence
+├── docs/operations/              # Installation/operations and release notes
+├── docs/dev/           # Development, release, HA and test evidence
 ├── VERSION                       # Release version — drives the image tag and installer
 ├── watchdog.tar                 # Prebuilt image only in published package
 └── .env                          # Secrets — NOT committed to git
@@ -156,7 +156,7 @@ The following is the **source repository** layout, not the customer archive. The
 
 ### Container Hardening
 
-When running Compose manually without installer-generated `.env`, the default container user is **root** — no host-specific group setup needed to read `/var/run/docker.sock`. [install.sh](install.sh) instead auto-detects the socket's GID and opts into running the container as **non-root UID/GID 1000** (joined to that group via `group_add`), with no manual input required; manual installs can do the same by setting `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env` (see [Advanced Deployment](docs/customer/INSTALLATION_AND_OPERATIONS.md#41-configuration-files-and-editing)). Either way, the container is constrained by a read-only root filesystem, no extra Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID caps (`cpus: "0.50"`, `pids_limit: 200`, `mem_limit: 256m`), which contain a leak or runaway condition to this container instead of the host. Note that access to `/var/run/docker.sock` is effectively host-root-equivalent for **any** user (root or not): anything that can reach the socket can create privileged containers or bind-mount the host filesystem, so a compromise of the watchdog process is **not** contained by these controls — treat `docker.sock` access as the primary trust boundary when deciding who/what can reach this host.
+When running Compose manually without installer-generated `.env`, the default container user is **root** — no host-specific group setup needed to read `/var/run/docker.sock`. [install.sh](install.sh) instead auto-detects the socket's GID and opts into running the container as **non-root UID/GID 1000** (joined to that group via `group_add`), with no manual input required; manual installs can do the same by setting `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env` (see [Advanced Deployment](docs/operations/INSTALLATION_AND_OPERATIONS.md#41-configuration-files-and-editing)). Either way, the container is constrained by a read-only root filesystem, no extra Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID caps (`cpus: "0.50"`, `pids_limit: 200`, `mem_limit: 256m`), which contain a leak or runaway condition to this container instead of the host. Note that access to `/var/run/docker.sock` is effectively host-root-equivalent for **any** user (root or not): anything that can reach the socket can create privileged containers or bind-mount the host filesystem, so a compromise of the watchdog process is **not** contained by these controls — treat `docker.sock` access as the primary trust boundary when deciding who/what can reach this host.
 
 
 ### Python Dependencies
@@ -180,7 +180,7 @@ cryptography>=42.0
 
 The guided installer creates `watchdog-config.yaml` (monitoring policy, probes, logging and notification endpoints) and `.env` (credentials and runtime identity). The configuration is preserved on an upgrade unless the operator explicitly chooses to reconfigure it.
 
-**For the complete list of settings, defaults, YAML examples, and instructions for applying changes after installation, see [Deployment — Configuration Reference](docs/customer/INSTALLATION_AND_OPERATIONS.md#4-configuration-reference).** The annotated [YAML template](watchdog-config.yaml.example) and [environment template](.env.example) are also available.
+**For the complete list of settings, defaults, YAML examples, and instructions for applying changes after installation, see [Deployment — Configuration Reference](docs/operations/INSTALLATION_AND_OPERATIONS.md#4-configuration-reference).** The annotated [YAML template](watchdog-config.yaml.example) and [environment template](.env.example) are also available.
 
 A YAML-only change takes effect after restarting the watchdog. A changed `.env` value requires recreating **only** the watchdog container. Neither action rebuilds Python code into the image. Thresholds, exclusions, custom exec probes, and monitoring suppressions require authorized review; do not use them merely to silence alerts.
 
@@ -195,7 +195,7 @@ A YAML-only change takes effect after restarting the watchdog. A changed `.env` 
 | SNMP Trap | `snmp_trap` | NMS destination, SNMP version; SNMPv3 keys in `.env` |
 | Slack | `slack` | Webhook URL stored in `.env` |
 
-At least one channel must be selected in the installer; multiple channels may be enabled together. **See [Deployment — Notification Channels](docs/customer/INSTALLATION_AND_OPERATIONS.md#43-notification-channels) for all configuration fields and examples.** The [advanced reference](docs/customer/INSTALLATION_AND_OPERATIONS.md#7-snmp-trap-integration) retains SNMPv3 receiver setup and the Radware trap OID/var-bind definitions.
+At least one channel must be selected in the installer; multiple channels may be enabled together. **See [Deployment — Notification Channels](docs/operations/INSTALLATION_AND_OPERATIONS.md#43-notification-channels) for all configuration fields and examples.** The [advanced reference](docs/operations/INSTALLATION_AND_OPERATIONS.md#7-snmp-trap-integration) retains SNMPv3 receiver setup and the Radware trap OID/var-bind definitions.
 
 ---
 
@@ -214,7 +214,7 @@ bash install.sh
 
 The wizard verifies and loads the included Docker image, asks for the selected notification channels, and deploys **only** the watchdog. **The v1.6.0 release archive becomes downloadable after the release is published.**
 
-Read the full [Deployment Guide](docs/customer/INSTALLATION_AND_OPERATIONS.md) for installation, configuration and maintenance. Developers and release maintainers: use the version-independent [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/DEVELOPMENT_AND_RELEASE.md) and the [v1.6.0 finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/RELEASE_V1.6.0_CHECKLIST.md).
+Read the full [Deployment Guide](docs/operations/INSTALLATION_AND_OPERATIONS.md) for installation, configuration and maintenance. Developers and release maintainers: use the version-independent [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md) and the [v1.6.0 finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_V1.6.0_CHECKLIST.md).
 
 ---
 
@@ -261,13 +261,13 @@ docker logs --tail 50 docker-container-watchdog
 
 Expected: the watchdog is running/healthy and monitoring logs are current. Check the configured notification receiver for any existing alerts. A healthy system does not need to generate a new alert just for verification.
 
-Do not simulate failures on operational hosts. Developers can use the isolated release test procedure in [Release Smoke Testing](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/RELEASE_SMOKE_TESTING.md).
+Do not simulate failures on operational hosts. Developers can use the isolated release test procedure in [Release Smoke Testing](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_SMOKE_TESTING.md).
 
 ## 8. Troubleshooting
 
 For installation failures, alert delivery, missing recovery, probe selection,
 persistent logs, maintenance, upgrades or rollback, use the
-[Customer Installation and Operations Guide](docs/customer/INSTALLATION_AND_OPERATIONS.md#6-troubleshooting).
+[Customer Installation and Operations Guide](docs/operations/INSTALLATION_AND_OPERATIONS.md#6-troubleshooting).
 Use read-only status/log checks on operational hosts, and do not simulate
 failures on application containers.
 
@@ -277,11 +277,11 @@ failures on application containers.
 
 **Version 1.6.0 (2026-10-15):** This section documents v1.6.0 and changes since v1.5.4. Release artifacts are built, tested and published separately; updating the source checkout does not upgrade running containers.
 
-**Release procedure:** Merge reviewed release changes into `main`, then push the approved matching `vX.Y.Z` tag. GitHub Actions builds the image, assembles one complete customer package and its checksum, and publishes the [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases). PR merges do **not** publish automatically. Follow the reusable [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/DEVELOPMENT_AND_RELEASE.md); version-specific approval for v1.6.0 is in its [finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/engineering/RELEASE_V1.6.0_CHECKLIST.md).
+**Release procedure:** Merge reviewed release changes into `main`, then push the approved matching `vX.Y.Z` tag. GitHub Actions builds the image, assembles one complete customer package and its checksum, and publishes the [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases). PR merges do **not** publish automatically. Follow the reusable [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md); version-specific approval for v1.6.0 is in its [finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_V1.6.0_CHECKLIST.md).
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| 1.6.0 | 2026-10-15 | Radware engineering | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, one complete versioned release package and wizard, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/customer/RELEASE_NOTES_V1.6.0.md). |
+| 1.6.0 | 2026-10-15 | Radware engineering | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, one complete versioned release package and wizard, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/operations/RELEASE_NOTES_V1.6.0.md). |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 

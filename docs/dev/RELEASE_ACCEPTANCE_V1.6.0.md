@@ -6,7 +6,7 @@
 > customer-facing message updates. Do **not** rerun their Docker commands on
 > any shared or operational Docker Engine. Earlier nested testing triggered
 > real notifications on its parent host.
-> See [current release notes](../customer/RELEASE_NOTES_V1.6.0.md) and
+> See [current release notes](../operations/RELEASE_NOTES_V1.6.0.md) and
 > [safe smoke workflow](RELEASE_SMOKE_TESTING.md).
 
 **Validation date:** October 14, 2026 (UTC)
