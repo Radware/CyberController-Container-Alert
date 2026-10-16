@@ -64,33 +64,36 @@ The filename below uses v1.6.0 as an example. Release assets exist only after th
 
 ### 2.1 Get and verify the release package
 
-**Step 1 — Obtain the release package and checksum.** Use either method to get the **same two files** on the target host:
+**Step 1 — Choose an approved release version.** Open the [Container Alert Releases page](https://github.com/Radware/CyberController-Container-Alert/releases) to see all published versions. The release marked **Latest** is usually the newest stable version, but use the version approved for this environment; do not install a pre-release unless specifically authorized. For example, the tag `v1.6.0` means you set `VER=1.6.0` (without the `v`). Versions appear on the page only after they are published.
 
-**Host has Internet access (simplest):** Run these commands directly on the target host, in your chosen installation directory:
+**Step 2 — Obtain the release package and checksum.** Use either method to get the **same two files** on the target host:
+
+**Host has Internet access (simplest):** Run on the target host in the intended installation directory:
 
 ```bash
-VER=1.6.0
+VER=1.6.0   # Replace with the approved published version from Step 1
 URL="https://github.com/Radware/CyberController-Container-Alert/releases/download/v${VER}"
 curl -fL -O "$URL/container-alert-v${VER}.tar.gz" -O "$URL/SHA256SUMS"
 ```
 
-No Git clone, GitHub CLI, browser download, or SCP is needed. `curl` requires HTTPS access to the GitHub Release and its redirected download host.
+No Git clone, GitHub CLI, browser download, or SCP is required. `curl` needs HTTPS access to GitHub Releases and its redirected download host.
 
-**Disconnected host:** Obtain `container-alert-v1.6.0.tar.gz` and `SHA256SUMS` from the [approved GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases) on a connected machine, then transfer both to the target host using your authorized method.
+**Disconnected host:** Download `container-alert-v1.6.0.tar.gz` and `SHA256SUMS` (adjust for the selected version) from that release on a connected workstation, then transfer both to the target host using the approved method.
 
-**Step 2 — Verify and extract** both files in the same directory:
+**Step 3 — Verify and extract** the two files from the same directory:
 
 ```bash
+VER=1.6.0   # Use the same version chosen in Step 1
 sha256sum --check SHA256SUMS
-tar -xzf container-alert-v1.6.0.tar.gz
+tar -xzf "container-alert-v${VER}.tar.gz"
 cd CyberController-Container-Alert
 ```
 
-The extracted directory contains `VERSION`, `install.sh`, `docker-compose.yaml`, `watchdog.tar` and its own image checksum. Use the matching filenames for later versions.
+The extracted directory contains `VERSION`, `install.sh`, `docker-compose.yaml`, `watchdog.tar` and its own image checksum.
 
 ### 2.2 Run the installer
 
-**Step 3 — Start the configuration wizard:**
+**Step 4 — Start the configuration wizard:**
 
 ```bash
 bash install.sh
@@ -98,7 +101,7 @@ bash install.sh
 
 The installer automatically verifies the included Docker image checksum and version, loads the image, then asks you to select and configure the notification channels (Syslog, SMTP, SNMP and/or Slack) and alert hostname. On an upgrade, answer **No** to “Reconfigure from scratch?” to preserve existing channel settings. It recreates **only the watchdog**, not other application containers.
 
-**Step 4 — Confirm normal operation:**
+**Step 5 — Confirm normal operation:**
 
 ```bash
 docker ps --filter name=docker-container-watchdog
