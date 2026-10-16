@@ -1,13 +1,13 @@
 # CyberController Container Watchdog — Deployment Guide
 
-This guide covers **installation, configuration, day-to-day operations, upgrades, rollback, and troubleshooting**. The same `install.sh` wizard is used for online and offline installations. It deploys only the `docker-container-watchdog` service; it never restarts CyberController application containers.
+This guide covers **installation, configuration, day-to-day operations, upgrades, rollback, and troubleshooting**. One complete, versioned release package and one `install.sh` wizard work on hosts with or without Internet access. The installer deploys only `docker-container-watchdog`; it never restarts CyberController application containers.
 
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)
 2. [Installation](#2-installation)
-   - [Online installation](#21-online-installation)
-   - [Offline installation](#22-offline-installation)
+   - [Get and verify the release package](#21-get-and-verify-the-release-package)
+   - [Run the installer](#22-run-the-installer)
 3. [Verify the installation](#3-verify-the-installation)
 4. [Configuration reference](#4-configuration-reference)
    - [Configuration files and editing](#41-configuration-files-and-editing)
@@ -33,8 +33,8 @@ This guide covers **installation, configuration, day-to-day operations, upgrades
 | Docker Engine | 20.10+ and a running Docker daemon |
 | Docker Compose | Version 2 plugin (`docker compose`) recommended; `install.sh` also supports standalone `docker-compose` |
 | Host permissions | Root or an operator with Docker access; `sudo` may be required to secure configuration files |
-| Online installation | Git access to this repository **and** HTTPS access to its published GitHub Release image; `curl` is used for the image download |
-| Offline installation | Approved release package copied to the host; Git and Internet are not required |
+| Release package | Approved complete `container-alert-v<VERSION>.tar.gz` with matching `SHA256SUMS`, copied to the host |
+| Network access | **Neither Git nor Internet access is required on the target host**; download from GitHub Releases elsewhere if needed |
 | Alert delivery | Network connectivity to the chosen Syslog, SMTP, SNMP, or Slack destination |
 
 Read-only prerequisite checks:
@@ -52,75 +52,45 @@ Docker socket access is highly privileged even if a container runs as a non-root
 
 ## 2. Installation
 
-Choose **Online** if the host can download the official release image. Choose **Offline** if the host cannot reach GitHub. Both use exactly the same `bash install.sh` wizard. **Neither package includes Python source code, and the customer never builds an image.**
+**One process on every host.** Download the approved versioned package directly, or have an authorized operator transfer the same package to a disconnected CyberController host. The package already contains the prebuilt Docker image, installer, Compose files, configuration templates and documentation. No Git clone, customer-side image download or source build is needed.
 
-The names below show v1.6.0. For newer releases, select the approved version on the [GitHub Releases page](https://github.com/Radware/CyberController-Container-Alert/releases) and use its matching filenames. **The v1.6.0 packages become available only after that version is officially published.**
+The filename below uses v1.6.0 as an example. Release assets exist only after that version has been officially [published on GitHub](https://github.com/Radware/CyberController-Container-Alert/releases).
 
-### 2.1 Online installation
+### 2.1 Get and verify the release package
 
-**Step 1 — Obtain the small online installer package.** From the approved release on the [Releases page](https://github.com/Radware/CyberController-Container-Alert/releases), download these two files to the target host:
+**Step 1 — Obtain these two files** from the approved [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases) (or through Radware's authorized offline transfer method):
 
-- `container-alert-v1.6.0-online.tar.gz` — installer, Compose file, version, templates and documentation (**no Docker image**).
-- `SHA256SUMS` — file integrity checks.
+- `container-alert-v1.6.0.tar.gz` — complete install package, including `watchdog.tar`.
+- `SHA256SUMS` — checksum to verify the downloaded/transferred package.
 
-**Step 2 — Verify and extract.** Run these commands where both files were downloaded:
+**Step 2 — Copy both files to the target host**, into the same directory. Verify the package and extract it:
 
 ```bash
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf container-alert-v1.6.0-online.tar.gz
+sha256sum --check SHA256SUMS
+tar -xzf container-alert-v1.6.0.tar.gz
 cd CyberController-Container-Alert
 ```
 
-**Step 3 — Run the guided installer.**
+The extracted directory contains `VERSION`, `install.sh`, `docker-compose.yaml`, `watchdog.tar` and its own image checksum. Use the matching filenames for later versions.
+
+### 2.2 Run the installer
+
+**Step 3 — Start the configuration wizard:**
 
 ```bash
 bash install.sh
 ```
 
-Answer **Yes** to the GitHub Releases download question. The wizard automatically obtains the matching prebuilt Docker image (`watchdog.tar`), verifies its checksum and version, asks which alert channels to configure (Syslog, SMTP, SNMP and/or Slack), and deploys only the watchdog. No Git clone, source build, or manual `docker load` is needed.
+The installer automatically verifies the included Docker image checksum and version, loads the image, then asks you to select and configure the notification channels (Syslog, SMTP, SNMP and/or Slack) and alert hostname. On an upgrade, answer **No** to “Reconfigure from scratch?” to preserve existing channel settings. It recreates **only the watchdog**, not other application containers.
 
-**Step 4 — Confirm that the watchdog is running.**
+**Step 4 — Confirm normal operation:**
 
 ```bash
 docker ps --filter name=docker-container-watchdog
 docker logs --tail 50 docker-container-watchdog
 ```
 
-The watchdog should be running and report normal monitoring activity. Full read-only verification is in [Section 3](#3-verify-the-installation).
-
-### 2.2 Offline installation
-
-**Step 1 — Obtain the complete offline installer package.** Download the approved release on a connected machine, then transfer both files to the disconnected target host:
-
-- `container-alert-v1.6.0-offline.tar.gz` — the **same installer and configuration files** plus the prebuilt `watchdog.tar` and its checksum.
-- `SHA256SUMS` — file integrity checks for the transferred package.
-
-**Step 2 — Verify and extract.** On the target host, run these commands where both transferred files are located:
-
-```bash
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf container-alert-v1.6.0-offline.tar.gz
-cd CyberController-Container-Alert
-```
-
-**Step 3 — Run the same guided installer.**
-
-```bash
-bash install.sh
-```
-
-Answer **No** to the Internet download question. The wizard selects an approved local versioned image or loads and verifies the included `watchdog.tar`. Configure the alert channels and hostname as prompted. No Git or Internet access is necessary on the target.
-
-**Step 4 — Confirm that the watchdog is running.**
-
-```bash
-docker ps --filter name=docker-container-watchdog
-docker logs --tail 50 docker-container-watchdog
-```
-
-The watchdog should be running. Full read-only verification is in [Section 3](#3-verify-the-installation).
-
-**If image acquisition fails:** the installer does not modify the running watchdog. Obtain the correct published release package before retrying. Do not build source on production hosts.
+Expected: the watchdog is running and logging normal monitoring. For further read-only checks, see [Section 3](#3-verify-the-installation). A failed or incomplete image verification stops installation before touching the running watchdog.
 
 ## 3. Verify the installation
 
@@ -361,40 +331,25 @@ If running as root, omit `sudo`. Keep backup directories access-restricted becau
 
 ### 5.3 Upgrade the watchdog
 
-First use [Section 5.2](#52-backup-and-restore) to back up `.env` and `watchdog-config.yaml`. Retain the `watchdog/` directory containing state and historical alerts.
+Upgrades use **the same complete release package and installer** as first-time installation.
 
-**Online upgrade**
-
-1. Download the newer approved `container-alert-v<VERSION>-online.tar.gz` and `SHA256SUMS` from the [GitHub Releases page](https://github.com/Radware/CyberController-Container-Alert/releases).
-2. Verify the package using `sha256sum --check --ignore-missing SHA256SUMS`.
-3. Extract the package **over the existing installation folder** (from its parent directory), then run the installer:
+1. Back up `.env` and `watchdog-config.yaml` as in [Section 5.2](#52-backup-and-restore). Keep the persistent `watchdog/` directory and earlier approved Docker image available for rollback.
+2. Obtain the **new approved** `container-alert-v<VERSION>.tar.gz` and matching `SHA256SUMS` via GitHub Releases or authorized transfer. Copy both files into the **parent directory of the existing** `CyberController-Container-Alert` installation.
+3. From that parent directory, verify and extract the new package **over the existing installation files**, then run the installer:
 
    ```bash
    cd /path/to/parent-of/CyberController-Container-Alert
-   tar -xzf /path/to/container-alert-v1.6.1-online.tar.gz
+   sha256sum --check SHA256SUMS
+   tar -xzf container-alert-v1.6.1.tar.gz
    cd CyberController-Container-Alert
    bash install.sh
    ```
 
-4. Answer **Yes** to image download and **No** to reconfigure existing settings. The installer updates the pinned image version and recreates **only** the watchdog. Verify using [Section 3](#3-verify-the-installation).
+4. Answer **No** to “Reconfigure from scratch?” to preserve configuration. The installer verifies/loads the new image, updates the pinned version, and recreates **only the watchdog**. Check its health, actual image and recent logs.
 
-**Offline upgrade**
+The filename v1.6.1 above is an **illustrative future version**, not a claim it exists. Replace it with the actual approved release. The archive deliberately excludes active `.env`, `watchdog-config.yaml` and `watchdog/` so upgrades preserve credentials, monitoring policy, historical logs and incident state.
 
-1. Transfer the newer approved offline package and `SHA256SUMS` to the host. Verify the package with `sha256sum --check --ignore-missing SHA256SUMS`.
-2. From the existing installation folder's parent directory, extract the new package over the old installation files:
-
-   ```bash
-   cd /path/to/parent-of/CyberController-Container-Alert
-   tar -xzf /path/to/container-alert-v1.6.1-offline.tar.gz
-   cd CyberController-Container-Alert
-   bash install.sh
-   ```
-
-3. Answer **No** to image download and **No** to reconfiguration. The new archive supplies the approved image. Confirm the running image and watchdog health.
-
-The commands use v1.6.1 **as a future example**, not as a claim that it exists. Use the actual filename and version supplied by Radware. Both packages intentionally exclude active `.env`, `watchdog-config.yaml`, and `watchdog/` files, so extracting an upgrade over the existing directory preserves customer-specific settings, logs and incident state. Keep earlier image tags for rollback.
-
-There is **no automatic updater**. Upgrades occur only when an authorized operator obtains a newer release package and runs the installer. Changing Git source files is not an application upgrade.
+There is **no automatic updater**; upgrading requires an authorized operator to run the installer. Updating Git source code is not an application upgrade.
 
 ### 5.4 Rollback
 
@@ -431,8 +386,8 @@ Do not use `--remove-all` if historical alerts or state must be retained. Uninst
 
 | Observation | What to check |
 |---|---|
-| Installer cannot reach GitHub Releases | Host HTTPS access and the published release matching `VERSION`; use the approved offline archive if disconnected |
-| Local image/archive rejected | Correct `watchdog:<VERSION>` tag, release version label, archive checksum and disk space |
+| Release package missing | Obtain the complete archive and checksum from the approved GitHub Release or Radware transfer method |
+| Included image/archive rejected | Check the complete package checksum, included `watchdog.tar` and internal `SHA256SUMS`, image version label and disk space |
 | Docker or Compose command fails | `docker info`, Docker socket access, `docker compose version` and configured permissions |
 | Only one config file exists | Restore the missing `.env` or `watchdog-config.yaml` backup; installer will not overwrite the surviving file |
 | Watchdog exits or stays unhealthy | `docker inspect` health state and `docker logs --tail 100 docker-container-watchdog` |

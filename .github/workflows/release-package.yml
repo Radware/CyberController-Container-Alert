@@ -50,15 +50,17 @@ jobs:
             "watchdog:$WATCHDOG_VERSION" -c \
             "import docker, requests, yaml, pysnmp, cryptography, watchdog, lifecycle, ha_monitor"
 
-      - name: Package online and offline downloads
+      - name: Assemble and validate single customer package
         shell: bash
         run: |
           set -euo pipefail
           docker save "watchdog:$WATCHDOG_VERSION" -o watchdog.tar
           bash scripts/package_release.sh watchdog.tar dist
           (cd dist && sha256sum --check SHA256SUMS)
-          tar -tzf "dist/container-alert-v$WATCHDOG_VERSION-online.tar.gz" > /dev/null
-          tar -tzf "dist/container-alert-v$WATCHDOG_VERSION-offline.tar.gz" > /dev/null
+          package="dist/container-alert-v$WATCHDOG_VERSION.tar.gz"
+          tar -tzf "$package" | grep -qx 'CyberController-Container-Alert/watchdog.tar'
+          tar -tzf "$package" | grep -qx 'CyberController-Container-Alert/SHA256SUMS'
+          tar -tzf "$package" | grep -qx 'CyberController-Container-Alert/install.sh'
 
       - name: Publish GitHub Release
         env:
@@ -71,17 +73,14 @@ jobs:
             notes=(--notes-file "docs/RELEASE_NOTES_V$WATCHDOG_VERSION.md")
           fi
 
-          # Keep the release private as a draft until all four assets exist.
+          # Check both assets before making this public release visible.
           gh release create "$GITHUB_REF_NAME" \
-            dist/watchdog.tar dist/SHA256SUMS \
-            "dist/container-alert-v$WATCHDOG_VERSION-online.tar.gz" \
-            "dist/container-alert-v$WATCHDOG_VERSION-offline.tar.gz" \
+            dist/SHA256SUMS "dist/container-alert-v$WATCHDOG_VERSION.tar.gz" \
             --verify-tag --draft --title "Container Alert $GITHUB_REF_NAME" \
             "${notes[@]}"
 
-          expected=$(printf '%s\n' SHA256SUMS watchdog.tar \
-            "container-alert-v$WATCHDOG_VERSION-online.tar.gz" \
-            "container-alert-v$WATCHDOG_VERSION-offline.tar.gz" | sort)
+          expected=$(printf '%s\n' SHA256SUMS \
+            "container-alert-v$WATCHDOG_VERSION.tar.gz" | sort)
           actual=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort)
           test "$actual" = "$expected" || { echo "Release assets incomplete" >&2; exit 1; }
           gh release edit "$GITHUB_REF_NAME" --draft=false

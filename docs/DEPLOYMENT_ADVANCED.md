@@ -1,6 +1,6 @@
 # Container Alert — Advanced Deployment Reference
 
-This page supports engineers and release maintainers. For normal installation and upgrades, use the [Deployment Guide](../DEPLOYMENT.md). For branching, CI and release publication, see [Development and Release Cycle](DEVELOPMENT_AND_RELEASE.md).
+This page supports engineers and release maintainers. For normal installation and upgrades, use the [Deployment Guide](../DEPLOYMENT.md). For branching, CI and release publication, see [Development Guide](DEVELOPMENT.md).
 
 ## Image distribution and provenance
 
@@ -12,24 +12,22 @@ Official image delivery uses **GitHub Releases** at:
 https://github.com/Radware/CyberController-Container-Alert/releases/tag/v<VERSION>
 ```
 
-Each approved release contains:
+Each approved release contains **two downloadable assets**:
 
-- `watchdog.tar` — the prebuilt, version-tagged Docker image.
-- `SHA256SUMS` — SHA-256 digests for the image and **both** install packages.
-- `container-alert-v<VERSION>-online.tar.gz` — installer, `VERSION`, Compose, templates and documentation **without the Docker image or Python source**.
-- `container-alert-v<VERSION>-offline.tar.gz` — exactly the same installation files **plus** `watchdog.tar` and its internal image checksum.
+- `container-alert-v<VERSION>.tar.gz` — complete installer, `VERSION`, Compose, templates, documentation, the prebuilt `watchdog.tar` image, and its internal `SHA256SUMS`.
+- `SHA256SUMS` — checksum of the entire packaged archive, checked before extraction.
 
-The [release packaging script](../scripts/package_release.sh) builds both packages from the same list of files. Only the offline bundle includes the Docker image. Operator configuration (`.env`, `watchdog-config.yaml` and `watchdog/`) is deliberately absent so upgrades don't overwrite settings, secrets or history.
+The [release packaging script](../scripts/package_release.sh) produces the same complete package for connected and disconnected customer hosts. No app Python source or active operator configuration (`.env`, `watchdog-config.yaml` or `watchdog/`) is included.
 
-The installer verifies downloaded archive checksum and the image's `org.opencontainers.image.version` label. When an operator explicitly accepts an existing local versioned image, the installer verifies its version label. The operator remains responsible for ensuring the local image came from an approved source. An offline archive with `SHA256SUMS` is independently checksum-checked before load.
+The operator first checks the package checksum, then extracts the archive and runs `bash install.sh`. The installer **requires** the included image archive and internal checksum, verifies them and the image's `org.opencontainers.image.version` label, and loads `watchdog:<VERSION>`. No installer-side Git, Internet connection or source build is needed.
 
 Image tags must not be reused for different source code. Build new code under a new version so rollbacks are unambiguous.
 
 ## Release publication (maintainers)
 
-Use the full [Development and Release Cycle](DEVELOPMENT_AND_RELEASE.md) checklist. In brief: approve and merge the release PR to `main`, confirm CI and isolated smoke on the reviewed SHA, obtain approval for **public** distribution, and only then push the `v<VERSION>` tag. GitHub Actions builds and validates the image, assembles both packages, checks their SHA-256 digests, creates a draft GitHub Release, verifies all four assets, then publishes.
+Use the version-independent [Development Guide](DEVELOPMENT.md) and, for v1.6.0, the [finalization checklist](RELEASE_V1.6.0_CHECKLIST.md). Approve and merge the release PR into `main`, check latest CI and isolated smoke results, obtain authorization for public distribution, then push the approved matching `v<VERSION>` tag. The hosted release workflow validates/tests/builds the image, assembles the complete archive and external checksum, uploads both to a draft GitHub Release, verifies the assets, and publishes.
 
-Tagging does not automatically deploy anything to an operational host. Until the release workflow succeeds, its online/offline assets do not exist for customers. Do not build source on customer systems.
+Tagging does not deploy to an operational host. Customer packages do not exist until the tagged release workflow succeeds.
 
 ## Developer-only source build
 

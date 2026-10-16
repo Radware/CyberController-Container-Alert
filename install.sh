@@ -335,26 +335,24 @@ verify_release_image() {
     fi
 }
 
-# Verify archive checksum when supplied (mandatory for online downloads).
+# Verify the image archive checksum shipped in every release package.
 load_release_archive() {
     local archive="$1" sums="$2" expected actual loaded
-    if [ -n "$sums" ]; then
-        if [ ! -r "$sums" ] || ! command -v sha256sum >/dev/null 2>&1; then
-            print_error "Cannot verify the release archive checksum"
-            return 1
-        fi
-        expected=$(awk '$2 == "watchdog.tar" || $2 == "*watchdog.tar" {print $1}' "$sums" | tail -n1)
-        if ! [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]]; then
-            print_error "SHA256SUMS has no valid digest for watchdog.tar"
-            return 1
-        fi
-        actual=$(sha256sum "$archive" | awk '{print $1}') || return 1
-        if [ "$actual" != "$expected" ]; then
-            print_error "Archive checksum mismatch; image not loaded"
-            return 1
-        fi
-        print_success "Archive checksum verified"
+    if [ ! -r "$archive" ] || [ ! -r "$sums" ] || ! command -v sha256sum >/dev/null 2>&1; then
+        print_error "Release image or checksum is missing; image not loaded"
+        return 1
     fi
+    expected=$(awk '$2 == "watchdog.tar" || $2 == "*watchdog.tar" {print $1}' "$sums" | tail -n1)
+    if ! [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]]; then
+        print_error "SHA256SUMS has no valid digest for watchdog.tar"
+        return 1
+    fi
+    actual=$(sha256sum "$archive" | awk '{print $1}') || return 1
+    if [ "$actual" != "$expected" ]; then
+        print_error "Archive checksum mismatch; image not loaded"
+        return 1
+    fi
+    print_success "Archive checksum verified"
     if ! loaded=$(docker load -i "$archive" 2>&1); then
         print_error "Docker could not load the image"
         printf '%s\n' "$loaded"
@@ -371,69 +369,17 @@ load_release_archive() {
     print_success "Loaded and verified $IMAGE_NAME"
 }
 
-download_release_image() {
-    local tempdir base
-    if ! command -v curl >/dev/null 2>&1; then
-        print_warning "curl is not installed"
-        return 1
-    fi
-    tempdir=$(mktemp -d) || return 1
-    base="https://github.com/Radware/CyberController-Container-Alert/releases/download/v$VERSION"
-    print_info "Downloading official release image $IMAGE_NAME"
-    if ! curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 \
-        --output "$tempdir/SHA256SUMS" "$base/SHA256SUMS" || \
-       ! curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 \
-        --output "$tempdir/watchdog.tar" "$base/watchdog.tar"; then
-        rm -rf "$tempdir"
-        print_warning "Release download failed"
-        return 1
-    fi
-    if load_release_archive "$tempdir/watchdog.tar" "$tempdir/SHA256SUMS"; then
-        rm -rf "$tempdir"
-        return 0
-    fi
-    rm -rf "$tempdir"
-    return 1
-}
-
-use_local_image() {
-    if docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
-        if verify_release_image; then
-            if [ "$(_prompt_yn "Use existing local $IMAGE_NAME?" yes)" = true ]; then
-                print_success "Using local verified image $IMAGE_NAME"
-                return 0
-            fi
-        else
-            print_warning "Local image is not a verified release build"
-        fi
-    fi
-    if [ -f "$IMAGE_ARCHIVE" ]; then
-        local sums=""
-        [ ! -f "$INSTALL_DIR/SHA256SUMS" ] || sums="$INSTALL_DIR/SHA256SUMS"
-        print_info "Loading supplied watchdog.tar"
-        load_release_archive "$IMAGE_ARCHIVE" "$sums" && return 0
-        return 1
-    fi
-    print_error "No matching local $IMAGE_NAME or watchdog.tar available"
-    echo "  Obtain the official v$VERSION offline package from Radware."
-    echo "  Copy watchdog.tar to $INSTALL_DIR and rerun bash install.sh."
-    echo "  No running containers were changed."
-    return 1
-}
-
+# One release bundle contains its own approved, version-labelled Docker image.
+# A missing or invalid archive aborts before changing application configuration.
 load_docker_image() {
-    print_section "Select Docker Image"
-    if [ "$(_prompt_yn "Can this host download an image from GitHub Releases?" yes)" = true ]; then
-        if download_release_image; then
-            return 0
-        fi
-        print_warning "Image download unavailable; source builds are not used in production"
-        if [ "$(_prompt_yn "Try a local image or archive instead?" yes)" != true ]; then
-            print_error "Installation cancelled; running containers unchanged"
-            return 1
-        fi
+    print_section "Load Release Image"
+    if [ ! -f "$IMAGE_ARCHIVE" ] || [ ! -f "$INSTALL_DIR/SHA256SUMS" ]; then
+        print_error "Incomplete release package: watchdog.tar and SHA256SUMS are required"
+        echo "  Download and extract the complete container-alert-v$VERSION.tar.gz package."
+        echo "  No running containers have been changed."
+        return 1
     fi
-    use_local_image
+    load_release_archive "$IMAGE_ARCHIVE" "$INSTALL_DIR/SHA256SUMS"
 }
 
 ################################################################################

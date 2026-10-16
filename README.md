@@ -132,12 +132,13 @@ See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
 ├── docker-compose.build.yaml    # Developer-only source build
 ├── Dockerfile                   # Image build definition (python:3.11-slim)
 ├── requirements-watchdog.txt    # Python dependencies (reference; Dockerfile pip-installs inline)
-├── install.sh                   # Guided online/offline installation
+├── install.sh                   # Guided installation from complete release package
 ├── uninstall.sh                 # Stop + remove script
 ├── scripts/package_release.sh   # CI release-package assembly (maintainers only)
-├── docs/DEVELOPMENT_AND_RELEASE.md # Development and v1.6.0 publication checklist
+├── docs/DEVELOPMENT.md         # Version-independent source-to-release workflow
+├── docs/RELEASE_V1.6.0_CHECKLIST.md # v1.6.0-specific release gates
 ├── VERSION                       # Release version — drives the image tag and installer
-├── watchdog.tar                  # Only in offline release package; not tracked by Git
+├── watchdog.tar                 # Included in published release package; not tracked by Git
 └── .env                          # Secrets — NOT committed to git
 ```
 
@@ -199,22 +200,20 @@ At least one channel must be selected in the installer; multiple channels may be
 
 ## 5. Deployment Instructions
 
-**Customers install from a numbered [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases), not a Git clone.** Both release packages use the same `install.sh` wizard. No Python source is shipped to customers.
+Install **one complete versioned package** from an approved [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases), or obtain the same package through authorized offline transfer. No Git clone, separate Docker image download, or source build is required on the customer host.
 
-| Host | Download from the approved release | Wizard choice |
-|---|---|---|
-| **Online** (can reach GitHub Releases) | `container-alert-v1.6.0-online.tar.gz` and `SHA256SUMS` | **Yes** — automatically download the matching prebuilt Docker image |
-| **Offline** | `container-alert-v1.6.0-offline.tar.gz` and `SHA256SUMS` | **No** — load the image included in the transferred package |
-
-Verify the package checksum, extract the archive, enter the `CyberController-Container-Alert` directory and run:
+Download/transfer both `container-alert-v1.6.0.tar.gz` and `SHA256SUMS` (substitute your approved version). From the directory containing those two files:
 
 ```bash
+sha256sum --check SHA256SUMS
+tar -xzf container-alert-v1.6.0.tar.gz
+cd CyberController-Container-Alert
 bash install.sh
 ```
 
-Replace v1.6.0 with the actual approved release. **Release v1.6.0 must be published before those assets become available.** The wizard handles channel configuration and watchdog-only deployment; no Git, image build or manual Docker load is required for a normal installation.
+The wizard verifies and loads the included Docker image, asks for the selected notification channels, and deploys **only** the watchdog. **The v1.6.0 release archive becomes downloadable after the release is published.**
 
-Read the complete [Online/Offline installation and maintenance guide](DEPLOYMENT.md). Developers/release maintainers: [Development and Release Cycle](docs/DEVELOPMENT_AND_RELEASE.md).
+Read the full [Deployment Guide](DEPLOYMENT.md) for installation, configuration and maintenance. Developers and release maintainers: use the version-independent [Development Guide](docs/DEVELOPMENT.md) and the [v1.6.0 finalization checklist](docs/RELEASE_V1.6.0_CHECKLIST.md).
 
 ---
 
@@ -274,7 +273,7 @@ docker compose logs docker-container-watchdog
 Common causes:
 - **Missing `.env` file** — complete the initial installer wizard, or restore it from a previous-installation backup
 - **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
-- **Release image unavailable** — rerun `bash install.sh` and select online download, or supply the approved offline `watchdog.tar` and choose the local-image option (see [Deployment Guide](DEPLOYMENT.md))
+- **Release image/package unavailable** — obtain the complete approved versioned package, verify `SHA256SUMS`, extract it and run `bash install.sh` (see [Deployment Guide](DEPLOYMENT.md))
 
 ### Alert Notifications Not Received
 
@@ -393,11 +392,11 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 
 **Version 1.6.0 (2026-10-15):** This section documents v1.6.0 and changes since v1.5.4. Release artifacts are built, tested and published separately; updating the source checkout does not upgrade running containers.
 
-**Release procedure:** Review/validate the release PR, merge approved code to `main`, then push a matching `vX.Y.Z` Git tag. The hosted [release workflow](.github/workflows/release-package.yml) builds and verifies the image, packages the Online/Offline installers, checks their manifests, and publishes the versioned GitHub Release. `VERSION`, README version history, and versioned [release notes](docs/RELEASE_NOTES_V1.6.0.md) stay aligned. PRs do not publish releases automatically. See the [maintainer release guide](docs/DEVELOPMENT_AND_RELEASE.md) for the full procedure.
+**Release procedure:** Merge reviewed release changes into `main`, then push the approved matching `vX.Y.Z` tag. GitHub Actions builds the image, assembles one complete customer package and its checksum, and publishes the [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases). PR merges do **not** publish automatically. Follow the reusable [Development Guide](docs/DEVELOPMENT.md); version-specific approval for v1.6.0 is in its [finalization checklist](docs/RELEASE_V1.6.0_CHECKLIST.md).
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| 1.6.0 | 2026-10-15 | Radware engineering | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, guided versioned Online/Offline release installation, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). |
+| 1.6.0 | 2026-10-15 | Radware engineering | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, one complete versioned release package and wizard, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/RELEASE_NOTES_V1.6.0.md). |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
