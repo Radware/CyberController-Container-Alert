@@ -144,12 +144,29 @@ class RestartLoopRegressionTests(unittest.TestCase):
         wd._poll_all_containers()
         self.assertEqual([a.failure_type for a in alerts], ["crashed", "recovered"])
 
-    def test_no_restart_policy_keeps_existing_immediate_recovery(self):
+    def test_no_restart_policy_crash_requires_stable_uptime(self):
+        # Real lab: an outside actor restarts Docker policy=no containers.
         container = FakeContainer(policy="no", uptime=3)
         wd, alerts = make_watchdog(container)
         die(wd)
         wd._poll_all_containers()
+        self.assertEqual([a.failure_type for a in alerts], ["crashed"])
+        container.attrs["State"]["StartedAt"] = started_ago(130)
+        wd.state.get(container.name).last_failure_time = time.time() - 130
+        wd._poll_all_containers()
+        wd._poll_all_containers()
         self.assertEqual([a.failure_type for a in alerts], ["crashed", "recovered"])
+
+    def test_no_restart_policy_oom_requires_stable_uptime(self):
+        container = FakeContainer(policy="no", uptime=4)
+        wd, alerts = make_watchdog(container)
+        wd._handle_event({"Action": "oom", "Actor": {"Attributes": {"name": container.name}}})
+        wd._poll_all_containers()
+        self.assertEqual([a.failure_type for a in alerts], ["oom"])
+        container.attrs["State"]["StartedAt"] = started_ago(130)
+        wd.state.get(container.name).last_failure_time = time.time() - 130
+        wd._poll_all_containers()
+        self.assertEqual([a.failure_type for a in alerts], ["oom", "recovered"])
 
     def test_poll_detects_lost_events_from_docker_restart_count(self):
         container = FakeContainer(count=0)

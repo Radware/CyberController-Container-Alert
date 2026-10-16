@@ -4,8 +4,8 @@
 # SECRETS: All passwords and webhook URLs are read from environment
 # variables, never hardcoded here. Set them in your .env file.
 #
-# Copy this file to /opt/radware/storage/scripts/Alert_Container/watchdog-config.yaml
-# and update the values for your environment.
+# Reference template only: install.sh creates watchdog-config.yaml in your
+# chosen installation directory. Edit that active file after installation.
 
 # ── Alert channels ────────────────────────────────────────────────────────────
 # Empty for local testing — alerts are still logged to stdout/file.
@@ -20,7 +20,7 @@ check_interval_seconds:     60    # how often to poll all containers
 cooldown_minutes:            5    # suppress duplicate alerts per container
 restart_threshold:           5    # Docker RestartCount increments within the window trigger alert
 restart_window_minutes:     10    # rolling window for restart counting
-restart_recovery_stability_seconds: 120  # require 2 min continuous uptime before RECOVERED for auto-restarting containers
+restart_recovery_stability_seconds: 120  # require stable Docker uptime before CRASH/OOM/RESTART-LOOP recovery
 unhealthy_cycles_threshold:  3    # consecutive unhealthy cycles before alerting
 alert_on_recovery:        true    # send an INFO "recovered" alert when a container returns to normal
 
@@ -35,9 +35,16 @@ lifecycle_detection:
 excluded_containers: []
   # - my-temp-container
 
+# Narrow, approved exception for Radware-designated temporary syntax checks.
+ignored_container_events:
+  - label:
+      com.radware.cybercontroller.role: mariadb-ha-syntax-check
+    events:
+      - die
+
  
 # ── Logging ───────────────────────────────────────────────────────────────────
-log_level: DEBUG    # DEBUG | INFO | WARNING | ERROR
+log_level: INFO     # DEBUG | INFO | WARNING | ERROR (default INFO)
 log_file: /var/log/watchdog/watchdog.log   # bind-mounted to ./watchdog/watchdog.log on host
 
 # Alert state is persisted here so recovery alerts still fire after the host or
@@ -52,7 +59,7 @@ boot_grace_seconds: 180
 # ── Syslog (remote / central log server) ─────────────────────────────────────
 syslog:
   enabled: true             # set to true to enable
-  host: 155.1.1.4           # IP or hostname of your syslog server
+  host: syslog.example.com  # replace with your syslog server
   port: 514                 # 514 = standard syslog (UDP); 601 = reliable syslog (TCP)
   protocol: udp             # udp (fire-and-forget) or tcp (reliable)
   facility: local0          # syslog facility: local0–local7, daemon, user, etc.
@@ -62,23 +69,23 @@ syslog:
 smtp:
   enabled: true                      # set to true to enable
   auth: false
-  host: smtp.radware.com
+  host: smtp.example.com
   port: 587
-  sender: noc-alerts@radware.com
+  sender: alerts@example.com
   username_env: SMTP_USERNAME        # env var: SMTP username or app token (Mailtrap, Gmail app password, etc.)
   recipients:
-    - ops-team@radware.com
-    - oncall@radware.com
+    - ops@example.com
+    - oncall@example.com
   tls: true
   password_env: SMTP_PASSWORD        # env var: SMTP password or app token
 
 # ── SNMP Traps ────────────────────────────────────────────────────────────────
 # Sends SNMP traps (v1, v2c, or v3) to your NMS/SIEM on every alert.
 # Add "snmp_trap" to alert_channels above to enable.
-# Requires: pip install pysnmp (already in requirements-watchdog.txt)
+# Dependencies are included in the release image; no host pip install.
 snmp_trap:
   enabled: false                     # set to true to enable
-  host: 155.1.1.1                    # IP or hostname of your SNMP trap receiver (NMS)
+  host: nms.example.com  # replace with your NMS receiver
   port: 162                          # UDP port — 162 is the standard SNMP trap port
   version: v2c                       # SNMP version: v1, v2c, or v3
   community: public                  # SNMPv1/v2c community string (ignored for v3)

@@ -1,7 +1,14 @@
+> **Historical validation snapshot — 2026-10-13.** PR #4 was subsequently
+> merged into `main` on 2026-10-14, and later HA failover/failback
+> acceptance is recorded in the
+> [v1.6.0 release acceptance report](RELEASE_ACCEPTANCE_V1.6.0.md).
+> The pending gates below are preserved as historical findings, **not** the
+> current status of PR #4.
+
 # Optional HA active-node alert — validation status
 
 **Branch:** feature/optional-ha-failover-alert
-**Status:** Draft PR #4; tested in the two-node lab, not approved for merge
+**Status at the time:** Draft PR #4; two-node lab tested, pending merge
 **Updated:** 2026-10-13
 
 ## Automated tests and build
@@ -14,19 +21,19 @@
 ## Real two-node environment — user-initiated test (2026-10-10 UTC)
 
 - **Both nodes have HA exporters and watchdog builds running** during the user test, not just the original active node. These installations were done by the user, not by this code review.
-- At about 02:53:46 UTC the user initiated a manual switchover on .242, which moved the promoted HA Operator resource to .241.
-- .242 logged at **02:55:17**: "HA role changed 10.199.0.242 -> 10.199.0.241; new owner will notify."
-- .241 logged at **02:55:37**: one WARNING, "CyberController HA active node changed: 10.199.0.242 -> 10.199.0.241".
-- Both nodes stayed online and .241's promoted HA resources became active. The actual switch was detected correctly, without duplicate HA events observed.
-- **Actual notification delivery still needs verification.** .241 had syslog configured to 127.0.0.1:514; receiving NMS confirmation was not established. .242 used SMTP, but smtp.radware.com did not resolve, so its container failure messages were not emailed.
-- During the planned demotion, the HA Operator explicitly removed vDirect, TED and Assist Service on .242. The watchdog generated separate CRITICAL crash alerts for vDirect and Assist Service. Narrowly scoped suppression is **out of scope** for PR #4 and should have a separate code review.
-- A **reverse failback (.241 -> .242)**, end-to-end receiver confirmation, and a safe surviving-node test after failure of the original active node have not been confirmed.
+- At about 02:53:46 UTC the user initiated a manual switchover on .42, which moved the promoted HA Operator resource to .41.
+- .42 logged at **02:55:17**: "HA role changed 192.0.2.42 -> 192.0.2.41; new owner will notify."
+- .41 logged at **02:55:37**: one WARNING, "CyberController HA active node changed: 192.0.2.42 -> 192.0.2.41".
+- Both nodes stayed online and .41's promoted HA resources became active. The actual switch was detected correctly, without duplicate HA events observed.
+- **Actual notification delivery still needs verification.** .41 had syslog configured to 127.0.0.1:514; receiving NMS confirmation was not established. .42 used SMTP, but smtp.radware.com did not resolve, so its container failure messages were not emailed.
+- During the planned demotion, the HA Operator explicitly removed vDirect, TED and Assist Service on .42. The watchdog generated separate CRITICAL crash alerts for vDirect and Assist Service. Narrowly scoped suppression is **out of scope** for PR #4 and should have a separate code review.
+- A **reverse failback (.41 -> .42)**, end-to-end receiver confirmation, and a safe surviving-node test after failure of the original active node have not been confirmed.
 
 ## Release gates still open
 
 1. CI passes for the current head, with new concurrency/re-enable tests.
-2. Test a controlled **failback** from .241 to .242, verifying a single reverse alert.
-3. Verify the configured receiving systems, not just local watchdog logs; resolve .242 SMTP DNS or configure a working syslog route.
+2. Test a controlled **failback** from .41 to .42, verifying a single reverse alert.
+3. Verify the configured receiving systems, not just local watchdog logs; resolve .42 SMTP DNS or configure a working syslog route.
 4. Validate a supported active-node-loss scenario without deliberately partitioning a cluster where STONITH is disabled.
 5. Confirm targeted CC-version compatibility and ordinary watchdog restart/disabled option behavior.
 
