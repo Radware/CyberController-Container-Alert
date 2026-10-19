@@ -2,6 +2,10 @@
 
 The **CyberController Container Watchdog** is a lightweight, autonomous monitoring service that continuously tracks the health of all Docker containers on the host. It detects failures — including crashes, out-of-memory kills, prolonged unhealthy states, and restart loops — and dispatches real-time alerts through one or more configurable channels (**Slack**, **SMTP**, **SNMP Traps**, or **Syslog**). It also sends a one-time INFO **recovered** alert through the same channels once a previously-alarmed container returns to normal operation.
 
+**Documentation:** [Customer installation and operations](docs/operations/INSTALLATION_AND_OPERATIONS.md) · [v1.6.0 release notes](docs/operations/RELEASE_NOTES_V1.6.0.md).
+
+**For maintainers (source repository):** [Development and release workflow](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md). Historical design, test reports, and CI procedures live under `docs/dev/` and are **not included** in customer installation packages.
+
 ---
 
 ## Table of Contents
@@ -12,27 +16,12 @@ The **CyberController Container Watchdog** is a lightweight, autonomous monitori
    - [Image Size](#image-size)
    - [Python Dependencies](#python-dependencies)
 3. [Configuration](#3-configuration)
-   - [Configuration Keys](#configuration-keys)
-   - [Environment Variables](#environment-variables)
 4. [Supported Alert Channels](#4-supported-alert-channels)
-   - [Slack](#slack)
-   - [Syslog](#syslog)
-   - [SMTP (Email)](#smtp-email)
-   - [SNMP Traps](#snmp-traps)
 5. [Deployment Instructions](#5-deployment-instructions)
 6. [Failure Types & Severities](#6-failure-types--severities)
-7. [Testing](#7-testing)
-   - [OOM Simulation](#oom-simulation)
-   - [Probe Testing](#probe-testing)
-   - [Recovery Alert Test](#recovery-alert-test)
+7. [Verify Watchdog Operation](#7-verify-watchdog-operation)
 8. [Troubleshooting](#8-troubleshooting)
-   - [Service Fails to Start](#service-fails-to-start)
-   - [Alert Notifications Not Received](#alert-notifications-not-received)
-   - [Duplicate and Excessive Alert Notifications](#duplicate-and-excessive-alert-notifications)
-   - [Probe Type Not as Expected](#probe-type-not-as-expected)
-   - [Viewing Logs](#viewing-logs)
-9. [Container Probe Map (This Deployment)](#9-container-probe-map-this-deployment)
-10. [Version History](#10-version-history)
+9. [Version History](#9-version-history)
 
 ---
 
@@ -79,11 +68,11 @@ existing Docker container health checks.
 Enable the following block on **both** HA nodes, after verifying that each
 node has a local Pacemaker HA cluster exporter:
 
-~~~yaml
+```yaml
 ha_monitor:
   enabled: true
   exporter_url: http://127.0.0.1:9664/metrics
-~~~
+```
 
 The watchdog reads HA cluster resource metrics and validates local-node identity,
 cluster quorum, and Pacemaker scrape success. The first valid reading
@@ -124,7 +113,7 @@ CyberController services have recovered.
 The exporter may use port **9664** even when the built-in CyberController
 Prometheus configuration references **9002**. This optional check reads the
 exporter directly and makes **no changes** to native Prometheus configuration.
-See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
+See [customer HA configuration and expected behavior](docs/operations/INSTALLATION_AND_OPERATIONS.md#44-health-checks-exclusions-and-ha).
 
 ---
 
@@ -132,19 +121,24 @@ See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
 
 ### Project Structure
 
+The following is the **source repository** layout, not the customer archive. The published package includes the installer, runtime Compose file, version, templates, customer documentation, and prebuilt `watchdog.tar` — **not** Python source, Dockerfile, or engineering reports.
+
 ```
 .
 ├── watchdog.py                  # Main monitor script
 ├── lifecycle.py                 # Bounded Docker stop/die evidence correlation
-├── watchdog-config.yaml         # All configuration (no secrets)
+├── watchdog-config.yaml.example # Configuration template (active file is generated)
 ├── docker-compose.yaml          # Production / offline runtime (image only)
-├── docker-compose.build.yaml    # Developer / online build
+├── docker-compose.build.yaml    # Developer-only source build
 ├── Dockerfile                   # Image build definition (python:3.11-slim)
 ├── requirements-watchdog.txt    # Python dependencies (reference; Dockerfile pip-installs inline)
-├── install.sh                   # Offline install script
+├── install.sh                   # Guided installation from complete release package
 ├── uninstall.sh                 # Stop + remove script
+├── scripts/package_release.sh   # CI release-package assembly (maintainers only)
+├── docs/operations/              # Installation/operations and release notes
+├── docs/dev/           # Development, release, HA and test evidence
 ├── VERSION                       # Release version — drives the image tag and installer
-├── watchdog.tar                  # Pre-built Docker image (provided, no internet needed)
+├── watchdog.tar                 # Prebuilt image only in published package
 └── .env                          # Secrets — NOT committed to git
 ```
 
@@ -156,13 +150,13 @@ See [design, test plan and release gates](docs/HA_ACTIVE_NODE_ALERT_DESIGN.md).
 |------|------|
 | Docker image (`watchdog:<VERSION>`) | ~180 MB (python:3.11-slim base + dependencies) |
 | Running container (memory) | ~50–80 MB baseline; capped at `mem_limit: 256m` in `docker-compose.yaml` |
-| `watchdog.tar` export | ~170 MB |
+| `watchdog.tar` export | Approximate; inspect the actual published release |
 
-> **Note:** The values above are approximate and may vary depending on the host operating system, Docker version, and installed dependencies. If usage approaches the 256 MB limit (check with `docker stats docker-container-watchdog`), raise `mem_limit`/`mem_reservation` in `docker-compose.yaml` rather than removing the limit — and raise `memswap_limit` to at least the new `mem_limit` in **both** `docker-compose.yaml` and `docker-compose.build.yaml`, since Docker rejects a config where `memswap_limit` is lower than `mem_limit`.
+> **Note:** Size and memory figures above are prior estimates, not guaranteed release specifications. Actual image size varies by build. If resource usage is abnormal, collect Docker health, logs and resource metrics. Do not change resource limits based only on a monitoring alert.
 
 ### Container Hardening
 
-By default the container runs as **root** so `docker compose up` works with zero configuration — no host-specific group setup needed to read `/var/run/docker.sock`. [install.sh](install.sh) instead auto-detects the socket's GID and opts into running the container as **non-root UID/GID 1000** (joined to that group via `group_add`), with no manual input required; manual installs can do the same by setting `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env` (see [DEPLOYMENT.md](DEPLOYMENT.md#22-configure-environment-variables-env)). Either way, the container is constrained by a read-only root filesystem, no extra Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID caps (`cpus: "0.50"`, `pids_limit: 200`, `mem_limit: 256m`), which contain a leak or runaway condition to this container instead of the host. Note that access to `/var/run/docker.sock` is effectively host-root-equivalent for **any** user (root or not): anything that can reach the socket can create privileged containers or bind-mount the host filesystem, so a compromise of the watchdog process is **not** contained by these controls — treat `docker.sock` access as the primary trust boundary when deciding who/what can reach this host.
+When running Compose manually without installer-generated `.env`, the default container user is **root** — no host-specific group setup needed to read `/var/run/docker.sock`. [install.sh](install.sh) instead auto-detects the socket's GID and opts into running the container as **non-root UID/GID 1000** (joined to that group via `group_add`), with no manual input required; manual installs can do the same by setting `WATCHDOG_UID`/`WATCHDOG_GID`/`DOCKER_GID` in `.env` (see [Advanced Deployment](docs/operations/INSTALLATION_AND_OPERATIONS.md#41-configuration-files-and-editing)). Either way, the container is constrained by a read-only root filesystem, no extra Linux capabilities (`cap_drop: ALL`), `no-new-privileges`, and CPU/memory/PID caps (`cpus: "0.50"`, `pids_limit: 200`, `mem_limit: 256m`), which contain a leak or runaway condition to this container instead of the host. Note that access to `/var/run/docker.sock` is effectively host-root-equivalent for **any** user (root or not): anything that can reach the socket can create privileged containers or bind-mount the host filesystem, so a compromise of the watchdog process is **not** contained by these controls — treat `docker.sock` access as the primary trust boundary when deciding who/what can reach this host.
 
 
 ### Python Dependencies
@@ -172,6 +166,7 @@ docker==7.1.0
 requests==2.32.3
 PyYAML==6.0.2
 pysnmp>=6.2
+cryptography>=42.0
 ```
 
 
@@ -183,133 +178,43 @@ pysnmp>=6.2
 
 ## 3. Configuration
 
-All non-secret settings live in `watchdog-config.yaml`. Secrets (webhook URLs, passwords) are stored in `.env` and never committed to version control. Restart the container after editing either file — no image rebuild is needed.
+The guided installer creates `watchdog-config.yaml` (monitoring policy, probes, logging and notification endpoints) and `.env` (credentials and runtime identity). The configuration is preserved on an upgrade unless the operator explicitly chooses to reconfigure it.
 
-### Configuration Keys
+**For the complete list of settings, defaults, YAML examples, and instructions for applying changes after installation, see [Deployment — Configuration Reference](docs/operations/INSTALLATION_AND_OPERATIONS.md#4-configuration-reference).** The annotated [YAML template](watchdog-config.yaml.example) and [environment template](.env.example) are also available.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `alert_channels` | `["slack"]` | Active destinations: `slack`, `smtp`, `snmp_trap` |
-| `check_interval_seconds` | `60` | How often the poll loop runs |
-| `cooldown_minutes` | `5` | Suppress duplicate alerts per container per failure type |
-| `restart_threshold` | `5` | Restart count within window that triggers a restart-loop alert |
-| `restart_window_minutes` | `10` | Rolling window for restart counting |
-| `restart_recovery_stability_seconds` | `120` | Minimum uninterrupted running time before a recovered alert for automatically restarted crash/OOM/restart-loop incidents |
-| `unhealthy_cycles_threshold` | `3` | Consecutive unhealthy cycles before alerting |
-| `alert_on_recovery` | `true` | Send an INFO "recovered" alert once a previously-alarmed container returns to normal |
-| `excluded_containers` | `[]` | Container names to never alert on |
-| `ignored_container_events` | MariaDB syntax-check label rule | Label-based event suppressions for intentional temporary containers |
-| `auto_health_check` | enabled | Probe containers reporting `health=none` by discovering an HTTP/TCP endpoint |
-| `container_health_checks` | `{}` | Per-container probe overrides (`type: http` or `type: exec`) for `health=none` containers; takes precedence over `auto_health_check` |
-| `log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `log_file` | `/var/log/watchdog/watchdog.log` | Bind-mounted to `./watchdog/watchdog.log` on host. Rotates at 10 MB, 5 backups. Set to `null` to disable |
-| `state_file` | `/var/log/watchdog/state.json` | Persists open alerts and the host boot time so recovery and reboot reporting survive a restart. Set to `""` to disable |
-| `boot_grace_seconds` | `180` | After a detected host reboot, hold alerts this long while services start, then send one `reboot-summary`. `0` alerts immediately and sends the summary on the first poll |
-| `runbook_base_url` | — | URL included in every alert |
-
-Preferred suppression: Temporary MariaDB HA syntax-check containers should be created with Docker label `com.radware.cybercontroller.role=mariadb-ha-syntax-check`. The watchdog ignores only configured events for containers carrying that explicit label; normal service containers still alert.
-
-Temporary fallback: until that label exists, dynamic MariaDB dump helper containers are not alerted as crashes only when all identifying signals match together: image `kvision_infra_mariadb`, container name is not `config_kvision-infra-mariadb_1`, Docker `AutoRemove` is `true`, a mount contains `/mnt/cli/tmp/mariadb_dump.sql.gz`, and the exit code is `137`. The primary MariaDB container remains monitored.
-
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `SLACK_WEBHOOK_URL` | Yes (if Slack enabled) | Slack incoming webhook URL |
-| `SMTP_USERNAME` | Yes (if SMTP enabled) | SMTP username or login email used for login |
-| `SMTP_PASSWORD` | Yes (if SMTP enabled) | SMTP account password or api key value |
-| `SNMP_V3_AUTH_KEY` | Yes (if SNMPv3 enabled) | SNMPv3 authentication passphrase — minimum 8 characters (RFC 3414) |
-| `SNMP_V3_PRIV_KEY` | Yes (if SNMPv3 authPriv) | SNMPv3 privacy passphrase — minimum 8 characters; requires auth key also set |
-| `WATCHDOG_CONFIG` | No | Path to config file (default: `/etc/watchdog/watchdog-config.yaml`) |
-| `WATCHDOG_HOST` | No | Hostname shown in alerts (default: system hostname) |
+A YAML-only change takes effect after restarting the watchdog. A changed `.env` value requires recreating **only** the watchdog container. Neither action rebuilds Python code into the image. Thresholds, exclusions, custom exec probes, and monitoring suppressions require authorized review; do not use them merely to silence alerts.
 
 ---
 
 ## 4. Supported Alert Channels
 
-Configure at least one channel and add its identifier to `alert_channels` in `watchdog-config.yaml`. Multiple channels can be active simultaneously.
+| Channel | YAML identifier | Credentials or other setup |
+|---|---|---|
+| Syslog | `syslog` | Syslog destination, port, protocol and facility |
+| SMTP (email) | `smtp` | Mail server, sender, recipients, TLS/auth; credentials in `.env` if applicable |
+| SNMP Trap | `snmp_trap` | NMS destination, SNMP version; SNMPv3 keys in `.env` |
+| Slack | `slack` | Webhook URL stored in `.env` |
 
-### Slack
-
-Add `slack` to `alert_channels` and set `SLACK_WEBHOOK_URL` in `.env`:
-
-```yaml
-slack:
-  enabled: true
-  webhook_url_env: SLACK_WEBHOOK_URL
-```
-
-### Syslog
-
-```yaml
-syslog:
-  enabled: true
-  host: <syslog-server-ip>
-  port: 514
-  protocol: udp       # udp or tcp
-  facility: local0
-```
-
-### SMTP (Email)
-
-Add `smtp` to `alert_channels` to enable.
-
-```yaml
-smtp:
-  enabled: true
-  host: smtp.radware.com
-  port: 587
-  sender: noc-alerts@radware.com
-  username_env: SMTP_USERNAME     # env var: SMTP username or app token
-  recipients:
-    - ops-team@radware.com
-    - oncall@radware.com
-  tls: true
-  password_env: SMTP_PASSWORD        # env var: SMTP password or app token
-```
-
-### SNMP Traps
-
-Add `snmp_trap` to `alert_channels` to enable. Sends SNMP traps (v1, v2c, or v3) to your NMS/SIEM on every alert.
-
-```yaml
-snmp_trap:
-  enabled: true
-  host: 155.1.1.4                          # IP or hostname of your SNMP trap receiver
-  port: 162                                # Standard SNMP trap port
-  version: v2c                             # SNMP version: v1, v2c, or v3
-  community: public                        # SNMPv1/v2c community string (ignored for v3)
-  trap_oid: "1.3.6.1.4.1.89.110.0.1"      # Radware enterprise container-alert notification OID
-  # SNMPv3 only — add SNMP_V3_AUTH_KEY / SNMP_V3_PRIV_KEY to .env
-  # v3_username:        watchdog-user
-  # v3_auth_protocol:   SHA                # MD5 | SHA | SHA256 | SHA384 | SHA512
-  # v3_auth_key_env:    SNMP_V3_AUTH_KEY   # min 8 chars
-  # v3_priv_protocol:   AES                # AES (recommended) | AES192 | AES256 | DES (weak)
-  # v3_priv_key_env:    SNMP_V3_PRIV_KEY   # min 8 chars; requires auth key also set
-  # v3_local_engine_id: ""                 # hex engine ID pinned from first-run log; see DEPLOYMENT.md
-```
-
-Each trap carries five var-binds, all under the Radware enterprise OID arc (`1.3.6.1.4.1.89.110`):
-
-| OID | Object | Value |
-|-----|--------|-------|
-| `1.3.6.1.4.1.89.110.1.1.0` | `cwHost` | Hostname of the alerting node |
-| `1.3.6.1.4.1.89.110.1.2.0` | `cwSummary` | Human-readable alert summary |
-| `1.3.6.1.4.1.89.110.1.3.0` | `cwContainerName` | Container name |
-| `1.3.6.1.4.1.89.110.1.4.0` | `cwFailureType` | `crashed` / `oom` / `unhealthy` / `restart-loop` / `recovered` |
-| `1.3.6.1.4.1.89.110.1.5.0` | `cwProbeDetail` | Probe failure detail |
+At least one channel must be selected in the installer; multiple channels may be enabled together. **See [Deployment — Notification Channels](docs/operations/INSTALLATION_AND_OPERATIONS.md#43-notification-channels) for all configuration fields and examples.** The [SNMP trap receiver details](docs/operations/INSTALLATION_AND_OPERATIONS.md#snmp-traps) retains SNMPv3 receiver setup and the Radware trap OID/var-bind definitions.
 
 ---
 
 ## 5. Deployment Instructions
 
-For full deployment instructions — including alert channel setup, offline installation, developer builds, and troubleshooting — see [DEPLOYMENT.md](DEPLOYMENT.md).
+Install **one complete versioned package** from a published [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases), or transfer the same package from another machine. No Git clone, separate Docker image download, or source build is required on the customer host.
 
-**Quick start (automated):**
+Download/transfer both `container-alert-v1.6.0.tar.gz` and `SHA256SUMS` (substitute the version you selected). From the directory containing those two files:
 
 ```bash
+sha256sum --check SHA256SUMS
+tar -xzf container-alert-v1.6.0.tar.gz
+cd CyberController-Container-Alert
 bash install.sh
 ```
+
+The wizard verifies and loads the included Docker image, asks for the selected notification channels, and deploys **only** the watchdog. **The v1.6.0 release archive becomes downloadable after the release is published.**
+
+Read the full [Deployment Guide](docs/operations/INSTALLATION_AND_OPERATIONS.md) for installation, configuration and maintenance. Developers and release maintainers: use the version-independent [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md) and the [v1.6.0 finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_V1.6.0_CHECKLIST.md).
 
 ---
 
@@ -344,298 +249,39 @@ Every alert includes two probe fields that identify exactly how and why the fail
 
 ---
 
-## 7. Testing
+## 7. Verify Watchdog Operation
 
-The sections below describe optional manual tests that validate the watchdog's detection and alerting paths. Each creates a temporary Docker container and cleans up after itself.
-
-### OOM Simulation
-
-Two options — choose based on whether the host has internet access.
-
-#### Option A — `polinux/stress` *(requires internet access)*
-
-> Pulls `polinux/stress` from Docker Hub.
+On an installed system, use these read-only checks:
 
 ```bash
-# --memory-swap=32m disables swap so the kernel is forced to OOM-kill rather than swap out
-# Note: the polinux/stress entrypoint IS the stress binary — do not repeat "stress" in the args
-docker run -d --name oom-test --memory=32m --memory-swap=32m polinux/stress \
-  --vm 1 --vm-bytes 64M --vm-keep
+docker ps --filter name=docker-container-watchdog
+docker inspect docker-container-watchdog --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'
+docker logs --tail 50 docker-container-watchdog
 ```
 
-```bash
-# Clean up
-docker rm -f oom-test
-docker rmi polinux/stress
-```
+Expected: the watchdog is running/healthy and monitoring logs are current. Check the configured notification receiver for any existing alerts. A healthy system does not need to generate a new alert just for verification.
 
-#### Option B — `watchdog:latest` *(no internet required)*
-
-> Uses the Watchdog image that is already present on the host, avoiding the need to pull the image during deployment.
-
-```bash
-docker run -d --name oom-test --memory=32m --memory-swap=32m watchdog:latest \
-  python3 -c "x = b'\xff' * (64 * 1024 * 1024)"
-```
-
-```bash
-# Clean up — container only (keep the watchdog image)
-docker rm -f oom-test
-```
-
-Docker kills the container with exit code `137` and emits an `oom` event. The watchdog captures memory stats and the last 20 log lines, then dispatches a CRITICAL alert — all within seconds of the kill.
-
-> **If the container exits cleanly (exit code 0) instead of being OOM-killed**, cgroup memory accounting may be disabled on this host. Verify with:
-> ```bash
-> docker info 2>&1 | grep -i "memory limit"
-> ```
-> `WARNING: No memory limit support` means the `--memory` flag is silently ignored. Enable cgroup memory accounting by adding `cgroup_enable=memory swapaccount=1` to `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, then run `sudo update-grub` and reboot.
-
----
-
-### Probe Testing
-
-> **Optional — requires internet access.** These tests pull images from Docker Hub and create temporary containers on the host.
-> Each section includes full cleanup instructions (container + image).
-
-#### HTTP Probe
-
-```bash
-# Start a container where every HTTP path returns 503
-# Note: the full server { } block is required — a bare location { } directive is not valid nginx config
-docker run -d --name http-probe-test \
-  nginx:alpine \
-  sh -c "printf 'server { listen 80; location / { return 503; } }' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
-
-# Verify the container is running:
-docker ps | grep http-probe-test
-
-# Wait one poll cycle (60s), then check watchdog detected it:
-grep "http-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f http-probe-test
-docker rmi nginx:alpine
-```
-
-During auto-discovery the watchdog sends an HTTP GET to `/-/healthy` on port 80. Nginx returns 503, so the watchdog immediately caches that endpoint as failing and reports unhealthy. After `unhealthy_cycles_threshold` consecutive unhealthy cycles an alert fires with Detection value `HTTP probe failed — error response 503 Service Unavailable, URI http://<ip>:80/-/healthy`.
-
----
-
-#### TCP Connect Probe
-
-```bash
-# Expose port 9999 but run nothing on it — TCP connect will be refused
-docker run -d --name tcp-probe-test \
-  --expose 9999 \
-  alpine \
-  sh -c "sleep infinity"
-
-# Watch the watchdog fall through HTTP → TCP and alert:
-grep "tcp-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f tcp-probe-test
-docker rmi alpine
-```
-
-After `unhealthy_cycles_threshold` consecutive failed cycles an alert fires with Detection value `TCP probe failed — connection refused or timed out on <ip>:9999`.
-
----
-
-#### `/proc` Alive Check
-
-```bash
-# No EXPOSE — watchdog falls straight to /proc alive check
-docker run -d --name proc-probe-test \
-  alpine \
-  sleep infinity
-
-# Verify the container is running:
-docker ps | grep proc-probe-test
-
-# After one poll cycle, confirm the watchdog selected /proc as the probe type:
-grep "proc-probe-test" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Clean up
-docker rm -f proc-probe-test
-docker rmi alpine
-```
-
-With no exposed ports, auto-discovery skips HTTP and TCP and falls back to reading `/proc/1/status` inside the container via `exec_run`. Since `sleep` is PID 1 in a live `S` (sleeping) state, no alert fires. The log will show `falling back to /proc alive-check` confirming the probe type was selected. In production, this probe fires when PID 1 enters zombie (`Z`) or stopped (`T`) state.
-
----
-
-### Recovery Alert Test
-
-Validates the INFO `recovered` alert fires once a previously-alarmed container is healthy again. Use any real, already-monitored container — no throwaway container needed.
-
-```bash
-# 1. Force a failure (SIGKILL → non-zero exit code → CRITICAL "crashed" alert)
-docker kill <container-name>
-
-# 2. Confirm the crashed alert was logged/dispatched
-grep "<container-name>" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log | grep CRITICAL
-
-# 3. Bring it back
-docker start <container-name>
-
-# 4. Wait for it to report healthy again, then confirm the recovery alert:
-grep "<container-name>" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log | grep -i recovered
-```
-
-Expected log line: `ALERT [INFO] <container-name> — recovered (channels: [...])`.
-
-- Containers with a Docker `HEALTHCHECK` recover via the `health_status: healthy` **event** — near-instant once Docker reports healthy (subject to the image's own `start_period`/`interval`).
-- Containers on HTTP/TCP/`/proc` active probes recover on the **next poll cycle** (`check_interval_seconds`).
-- No alert fires if `alert_on_recovery: false` is set, or if the container was never in an alarmed state (`state.alerted_for` empty).
-
----
+Do not simulate failures on operational hosts. Developers can use the isolated release test procedure in [Release Smoke Testing](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_SMOKE_TESTING.md).
 
 ## 8. Troubleshooting
 
-### Service Fails to Start
-
-```bash
-docker compose logs docker-container-watchdog
-```
-
-Common causes:
-- **Missing `.env` file** — run `cp .env.example .env` and fill in credentials
-- **Docker socket not accessible** — ensure `/var/run/docker.sock` exists and the container has read access
-- **Image not loaded** — run `docker images watchdog`; if empty, set `WATCHDOG_VERSION=$(cat VERSION)` and build with `WATCHDOG_VERSION="$WATCHDOG_VERSION" docker compose -f docker-compose.build.yaml build` (see [DEPLOYMENT.md](DEPLOYMENT.md) for details)
-
-### Alert Notifications Not Received
-
-1. Check `alert_channels` in `watchdog-config.yaml` — ensure at least one channel is listed and configured
-2. Check watchdog logs for errors:
-   ```bash
-   grep -E "ERROR|CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-   ```
-3. For Slack: verify `SLACK_WEBHOOK_URL` is set in `.env` and test manually:
-   ```bash
-   curl -X POST -H 'Content-type: application/json' \
-     --data '{"text":"Watchdog test"}' "$SLACK_WEBHOOK_URL"
-   ```
-   Expected response: `ok`
-
-**Recovery alert (`recovered`) specifically not received:**
-- Confirm `alert_on_recovery` is not set to `false` in the live `watchdog-config.yaml`.
-- Confirm the container was actually alarmed first — `state.alerted_for` must be non-empty; a container that was never flagged won't generate a recovery alert.
-- For containers with a Docker `HEALTHCHECK`, confirm Docker actually reports `healthy` — `docker inspect <name> --format '{{json .State.Health}}'`. If it's stuck on `starting`, the watchdog is waiting on Docker, not the other way around.
-- For containers on active probes (HTTP/TCP/`/proc`), confirm the poll loop reports `health=healthy` for the container in the log — if it stays `unhealthy`, the probe (often `auto_health_check`) is misjudging the service; add a manual entry under `container_health_checks` instead.
-
-### Duplicate and Excessive Alert Notifications
-
-Increase `cooldown_minutes` in `watchdog-config.yaml` (default: `5` minutes per container per failure type). To silence a noisy container entirely, add it to `excluded_containers`:
-
-```yaml
-excluded_containers:
-  - debug-shell
-  - load-test
-  - my-noisy-container
-```
-
-### Probe Type Not as Expected
-
-Check which probe was cached at startup:
-
-```bash
-grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-```
-
-### Viewing Logs
-
-Log destinations (simultaneous):
-- **stdout** — always on; captured by `docker compose logs`
-- **file** — `./watchdog/watchdog.log` on the host (bind-mounted), rotates at 10 MB, keeps 5 backups
-- **syslog** — remote server if `syslog.enabled: true` in config
-
-```bash
-# Live tail (preferred — host path, no need to exec into the container)
-tail -f /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Last 100 lines
-tail -100 /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Alerts and errors only
-grep -E "ALERT|ERROR|CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Filter by container name
-grep "my-container" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-
-# Search across rotated logs
-grep "CRITICAL" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log \
-             /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log.1
-
-# Via Docker (stdout only)
-docker compose logs -f docker-container-watchdog
-```
+For installation failures, alert delivery, missing recovery, probe selection,
+persistent logs, maintenance, upgrades or rollback, use the
+[Customer Installation and Operations Guide](docs/operations/INSTALLATION_AND_OPERATIONS.md#6-troubleshooting).
+Use read-only status/log checks on operational hosts, and do not simulate
+failures on application containers.
 
 ---
 
-## 9. Container Probe Map (This Deployment)
+## 9. Version History
 
-Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitored passively via events; all others get an active probe auto-discovered on the first poll and cached for the container's lifetime.
+**Version 1.6.0 (2026-10-15):** This section documents v1.6.0 and changes since v1.5.4. Release artifacts are built, tested and published separately; updating the source checkout does not upgrade running containers.
 
-| Container | Probe Type | Endpoint | Why |
-|-----------|-----------|----------|-----|
-| `config_kvision-infra-fluentd_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-dp-inline-config_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-collector_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-configuration-service_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-anomaly-detection-engine_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-data-persist-service_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-rt-alert_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_policy-editor_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-alerts_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-reporter_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-vrm_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-infra-redis_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-health_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-webui_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-tor-feed_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-infra-efk_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-data-polling-mgr_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-formatter_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-data-polling-scheduler_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-infra-cadvisor_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-scheduler_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-vdirect_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-help_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-ted_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_postgres_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-snmp-trap-collector_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-auto-engine_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-lls_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-assist-service_1` | HTTP | `:3005` (path auto-discovered) | No Docker HEALTHCHECK; Node.js service; path cached on first successful response |
-| `config_kvision-infra-rabbitmq_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `config_kvision-ha-operator_1` | HTTP | `:8080` (path auto-discovered) | No Docker HEALTHCHECK; Java HTTP service; path cached on first successful response |
-| `config_kvision-dc-nginx_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-| `process-exporter` | HTTP | `:9256/metrics` | No Docker HEALTHCHECK; Prometheus exporter — `/metrics` returns 200 |
-| `prometheus` | HTTP | `:9090/-/ready` | No Docker HEALTHCHECK; standard Prometheus readiness endpoint |
-| `alertmanager` | HTTP | `:9093/-/healthy` | No Docker HEALTHCHECK; standard Alertmanager health endpoint |
-| `postgres-exporter` | HTTP | `:9187/metrics` | No Docker HEALTHCHECK; Prometheus exporter — `/metrics` returns 200 |
-| `mysql-exporter` | HTTP | `:9104/metrics` | No Docker HEALTHCHECK; Prometheus exporter — `/metrics` returns 200 |
-| `es-exporter` | HTTP | `:9114/metrics` | No Docker HEALTHCHECK; port 7979 HTTP fails; port 9114 serves `/metrics` |
-| `node-exporter` | HTTP | `:9100/metrics` | No Docker HEALTHCHECK; Prometheus exporter — `/metrics` returns 200 |
-| `grafana` | HTTP | `:3000/api/health` | No Docker HEALTHCHECK; Grafana health endpoint returns 200 |
-| `config_kvision-infra-mariadb_1` | Docker HEALTHCHECK | Docker managed | Image has HEALTHCHECK directive |
-
-> **Verify what was actually cached after startup:**
-> ```bash
-> grep -E "auto-discover|falling back" /opt/radware/storage/scripts/Alert_Container/watchdog/watchdog.log
-> ```
-
-## 10. Version History
-
-**Release status (2026-10-14):** `VERSION` remains `1.5.4`. The changes below are merged into `main` but **unreleased**: the running `watchdog:1.5.4` image does not acquire them from `git pull`.
-
-**Release procedure:** After validating a release candidate, increment `VERSION`, add a dated entry here, build and verify `watchdog:<VERSION>`, and package the matching `watchdog.tar` for offline installs. Pin deployment with `WATCHDOG_VERSION` in `.env`; verify upgrade and rollback before tagging the exact released commit (`vX.Y.Z`) and publishing release notes. Do not overwrite an old versioned image with new code. GitHub CI checks PRs but does not publish releases automatically; as of this update, no Git tags or GitHub Releases exist.
+**Release procedure:** Merge reviewed release changes into `main`, then push the matching `vX.Y.Z` tag. GitHub Actions builds the image, assembles one complete customer package and its checksum, and publishes the [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases). PR merges do **not** publish automatically. Follow the reusable [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md); v1.6.0 publication checks are in its [finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_V1.6.0_CHECKLIST.md).
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| Unreleased (post-1.5.4) | 2026-10-14 | Radware engineering | [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6): Docker event ID resolution and bounded missing-container warnings; [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5): authoritative `RestartCount`, deduplicated restart-loop incidents, stable recovery; [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7): planned Docker stop correlation and corrected exit-137 handling; [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4): optional independent HA active-node change alerts. |
+| 1.6.0 | 2026-10-15 | — | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, one complete versioned release package and wizard, revised informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/operations/RELEASE_NOTES_V1.6.0.md). |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
@@ -644,7 +290,7 @@ Probe selection is automatic: containers with a Docker `HEALTHCHECK` are monitor
 | 1.4.0 | 2026-08-17 | Rahul Kumar | Added INFO "recovered" alert |
 | 1.3.3 | 2026-08-05 | Rahul Kumar | Added Auth True/false |
 | 1.3.2 | 2026-07-28 | Rahul Kumar | Fixed SMTP Auth issue |
-| 1.3.1 | 2026-07-21 | Egor Egorov | Updated Readme and Deployment guides |
+| 1.3.1 | 2026-07-21 | — | Updated Readme and Deployment guides |
 | 1.3.0 | 2026-07-16 | Rahul Kumar | Added Upgrade Guide |
 | 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
 | 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |

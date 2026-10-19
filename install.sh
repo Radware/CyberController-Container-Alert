@@ -323,73 +323,63 @@ detect_docker_gid() {
 # Docker Image
 ################################################################################
 
-load_docker_image() {
-    print_section "Loading Docker Image"
-
-    # Always load the packaged archive first. The previous behaviour — skipping
-    # the load whenever any watchdog image already existed — meant an upgrade
-    # kept running the old code, because watchdog.py ships inside the image.
-    if [ -f "$IMAGE_ARCHIVE" ]; then
-        print_info "Loading image from archive: $(basename "$IMAGE_ARCHIVE")"
-        local load_output
-        if ! load_output=$(docker load -i "$IMAGE_ARCHIVE" 2>&1); then
-            print_error "Failed to load ${IMAGE_ARCHIVE}"
-            echo "$load_output"
-            exit 1
-        fi
-        echo "$load_output"
-
-        # The archive itself must carry the release tag. Merely inspecting the
-        # local tag after docker load is insufficient because a stale tag may
-        # have existed before this installer ran.
-        if ! printf '%s\n' "$load_output" | grep -Fxq "Loaded image: ${IMAGE_NAME}"; then
-            print_error "${IMAGE_ARCHIVE} did not load the required tag ${IMAGE_NAME}"
-            echo ""
-            echo "  docker load reported:"
-            printf '    %s\n' "$load_output"
-            echo ""
-            echo "  This package is version ${VERSION} (from ${VERSION_FILE})."
-            echo "  Rebuild the archive with the versioned tag:"
-            echo "    docker build -t ${IMAGE_NAME} ."
-            echo "    docker tag ${IMAGE_NAME} ${IMAGE_LATEST}"
-            echo "    docker save ${IMAGE_NAME} ${IMAGE_LATEST} -o watchdog.tar"
-            exit 1
-        fi
-        if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-            print_error "Required image ${IMAGE_NAME} is not available after docker load"
-            exit 1
-        fi
-    else
-        print_warning "Image archive not found: ${IMAGE_ARCHIVE}"
-
-        # No archive — build from source if the Dockerfile shipped.
-        if [ -f "${INSTALL_DIR}/Dockerfile" ]; then
-            print_info "Building ${IMAGE_NAME} from source — this may take a few minutes..."
-            # Use a clean temp dir so any .dockerignore in INSTALL_DIR is bypassed
-            local tmpdir
-            tmpdir=$(mktemp -d)
-            trap "rm -rf '${tmpdir}'" EXIT
-            cp "${INSTALL_DIR}/Dockerfile"   "${tmpdir}/"
-            cp "${INSTALL_DIR}/watchdog.py"  "${tmpdir}/"
-            if ! docker build -t "${IMAGE_NAME}" "${tmpdir}"; then
-                print_error "Build failed — cannot produce ${IMAGE_NAME}"
-                exit 1
-            fi
-            print_success "Image built: ${IMAGE_NAME}"
-        else
-            print_error "Cannot proceed: ${IMAGE_NAME} is not available"
-            echo ""
-            echo "  watchdog.tar not found and Dockerfile not found."
-            echo "  Copy watchdog.tar into: $(dirname "$IMAGE_ARCHIVE") and re-run."
-            exit 1
-        fi
+# Confirm that an image carries the release version, not just an arbitrary tag.
+verify_release_image() {
+    local reported_version
+    docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 || return 1
+    reported_version=$(docker image inspect "$IMAGE_NAME" \
+        --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null) || return 1
+    if [ "$reported_version" != "$VERSION" ]; then
+        print_warning "$IMAGE_NAME has version label '$reported_version', expected '$VERSION'"
+        return 1
     fi
+}
 
-    # Convenience alias only — docker-compose.yaml deploys ${IMAGE_NAME}.
-    docker tag "$IMAGE_NAME" "$IMAGE_LATEST" &>/dev/null || \
-        print_warning "Could not update the ${IMAGE_LATEST} convenience tag"
+# Verify the image archive checksum shipped in every release package.
+load_release_archive() {
+    local archive="$1" sums="$2" expected actual loaded
+    if [ ! -r "$archive" ] || [ ! -r "$sums" ] || ! command -v sha256sum >/dev/null 2>&1; then
+        print_error "Release image or checksum is missing; image not loaded"
+        return 1
+    fi
+    expected=$(awk '$2 == "watchdog.tar" || $2 == "*watchdog.tar" {print $1}' "$sums" | tail -n1)
+    if ! [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]]; then
+        print_error "SHA256SUMS has no valid digest for watchdog.tar"
+        return 1
+    fi
+    actual=$(sha256sum "$archive" | awk '{print $1}') || return 1
+    if [ "$actual" != "$expected" ]; then
+        print_error "Archive checksum mismatch; image not loaded"
+        return 1
+    fi
+    print_success "Archive checksum verified"
+    if ! loaded=$(docker load -i "$archive" 2>&1); then
+        print_error "Docker could not load the image"
+        printf '%s\n' "$loaded"
+        return 1
+    fi
+    if ! printf '%s\n' "$loaded" | grep -Fxq "Loaded image: $IMAGE_NAME"; then
+        print_error "Archive does not contain the expected tag $IMAGE_NAME"
+        return 1
+    fi
+    if ! verify_release_image; then
+        print_error "Loaded image does not match release version $VERSION"
+        return 1
+    fi
+    print_success "Loaded and verified $IMAGE_NAME"
+}
 
-    print_success "Image ready: ${IMAGE_NAME}"
+# One release bundle contains its version-labelled Docker image.
+# A missing or invalid archive aborts before changing application configuration.
+load_docker_image() {
+    print_section "Load Release Image"
+    if [ ! -f "$IMAGE_ARCHIVE" ] || [ ! -f "$INSTALL_DIR/SHA256SUMS" ]; then
+        print_error "Incomplete release package: watchdog.tar and SHA256SUMS are required"
+        echo "  Download and extract the complete container-alert-v$VERSION.tar.gz package."
+        echo "  No running containers have been changed."
+        return 1
+    fi
+    load_release_archive "$IMAGE_ARCHIVE" "$INSTALL_DIR/SHA256SUMS"
 }
 
 ################################################################################
@@ -450,8 +440,9 @@ configure_all() {
         [ -f "$ENV_FILE" ]    || missing+=" .env"
         [ -f "$CONFIG_FILE" ] || missing+=" watchdog-config.yaml"
         print_warning "Incomplete configuration — missing:${missing}"
-        print_warning "The wizard regenerates both files — re-enter your settings when prompted"
-        echo ""
+        print_error "Restore the missing configuration file from backup, then rerun."
+        print_info "Existing configuration was not changed."
+        return 1
     # Offer to reconfigure if files already exist
     elif [ -f "$ENV_FILE" ] && [ -f "$CONFIG_FILE" ]; then
         print_info "Existing configuration detected: .env watchdog-config.yaml"
@@ -488,6 +479,16 @@ configure_all() {
             harden_config_permissions "$CONFIG_FILE" || exit 1
             return 0
         fi
+        # Preserve both existing files before explicitly requested reconfiguration.
+        local backup_dir
+        backup_dir="$INSTALL_DIR/backup/$(date -u +%Y%m%dT%H%M%SZ)"
+        if ! _run_priv mkdir -p "$backup_dir" || ! _run_priv chmod 700 "$backup_dir" || \
+           ! _run_priv cp -p "$ENV_FILE" "$backup_dir/.env" || \
+           ! _run_priv cp -p "$CONFIG_FILE" "$backup_dir/watchdog-config.yaml"; then
+            print_error "Could not back up existing configuration; aborting reconfiguration"
+            return 1
+        fi
+        print_success "Existing configuration backed up in: $backup_dir"
         echo ""
     fi
 
@@ -536,16 +537,16 @@ configure_all() {
     fi
 
     # ── SMTP ──────────────────────────────────────────────────────────────────
-    local SMTP_HOST="smtp.radware.com" SMTP_PORT="587"
-    local SMTP_SENDER="noc-alerts@radware.com" SMTP_RECIPIENTS="ops-team@radware.com"
+    local SMTP_HOST="smtp.example.com" SMTP_PORT="587"
+    local SMTP_SENDER="sender@example.com" SMTP_RECIPIENTS="alerts@example.com"
     local SMTP_TLS="true" SMTP_AUTH="true" SMTP_USERNAME="" SMTP_PASSWORD="" SMTP_ENABLED="false"
     if _in_array "smtp" "${SELECTED_CHANNELS[@]}"; then
         SMTP_ENABLED="true"
         print_info "SMTP (email)"
-        SMTP_HOST=$(_prompt       "Server host"                  "smtp.radware.com")
+        SMTP_HOST=$(_prompt       "Server host"                  "smtp.example.com")
         SMTP_PORT=$(_prompt       "Port"                         "587")
-        SMTP_SENDER=$(_prompt     "Sender address"               "noc-alerts@radware.com")
-        SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "ops-team@radware.com")
+        SMTP_SENDER=$(_prompt     "Sender address"               "sender@example.com")
+        SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "alerts@example.com")
         SMTP_TLS=$(_prompt_yn     "Use TLS?"                     "yes")
         SMTP_AUTH=$(_prompt_yn    "Server requires authentication (login)?" "yes")
         if [ "$SMTP_AUTH" = "true" ]; then
@@ -613,7 +614,7 @@ configure_all() {
     chmod 600 "$ENV_TMP"
     {
         printf "# .env — generated by install.sh on %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
-        printf "# Secrets only. All other settings are in watchdog-config.yaml.\n\n"
+        printf "# Secrets and deployment settings; monitoring policy is in watchdog-config.yaml.\n\n"
         if [ "$SLACK_ENABLED" = "true" ]; then
             printf "# Slack\nSLACK_WEBHOOK_URL=%s\n\n" "$SLACK_WEBHOOK"
         fi
@@ -629,7 +630,7 @@ configure_all() {
                "$WATCHDOG_UID" "$WATCHDOG_GID" "$DOCKER_GID"
         printf "# Deployed release — docker-compose.yaml pins watchdog:\${WATCHDOG_VERSION}\n"
         printf "WATCHDOG_VERSION=%s\n\n" "$VERSION"
-        printf "# Tuning\nLOG_LEVEL=INFO\n"
+
     } > "$ENV_TMP"
     if ! _publish_file "$ENV_TMP" "$ENV_FILE" 600 "$(id -u):$(id -g)"; then
         rm -f "$ENV_TMP"
@@ -651,7 +652,7 @@ configure_all() {
         r=$(echo "$r" | tr -d '[:space:]')
         [ -n "$r" ] && RECIPIENTS_YAML+="    - ${r}"$'\n'
     done
-    [ -z "$RECIPIENTS_YAML" ] && RECIPIENTS_YAML="    - ops-team@radware.com"$'\n'
+    [ -z "$RECIPIENTS_YAML" ] && RECIPIENTS_YAML="    - alerts@example.com"$'\n'
 
     # ── Write watchdog-config.yaml ────────────────────────────────────────────
     local CONFIG_TMP
@@ -672,7 +673,7 @@ configure_all() {
         printf "      com.radware.cybercontroller.role: mariadb-ha-syntax-check\n"
         printf "    events:\n"
         printf "      - die\n"
-        printf "# Preferred: R&D labels temporary MariaDB HA syntax-check containers as above.\n"
+        printf "# Temporary MariaDB HA syntax-check containers should carry the label shown above.\n"
         printf "# Fallback: suppress kvision_infra_mariadb AutoRemove dump helpers exiting 137\n"
         printf "# only when /mnt/cli/tmp/mariadb_dump.sql.gz is mounted; primary MariaDB stays monitored.\n"
         printf "\nrunbook_base_url: \"\"\n"
@@ -747,21 +748,14 @@ start_watchdog() {
         exit 1
     fi
 
-    # Stop and remove existing container if present
-    if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-        print_info "Stopping existing container..."
-        if ! $DC down; then
-            print_error "Failed to stop the existing container — aborting before redeploy"
-            exit 1
-        fi
+    # Validate Compose first and recreate only our service, never the project.
+    if ! $DC config -q; then
+        print_error "Compose configuration invalid; running containers unchanged"
+        exit 1
     fi
-
-    print_info "Starting container with docker compose..."
-    if ! $DC up -d; then
-        print_error "docker compose up failed — the watchdog was not deployed"
-        echo ""
-        echo "  Inspect the failure with:"
-        echo "    $DC -f ${INSTALL_DIR}/docker-compose.yaml logs"
+    print_info "Deploying watchdog container only..."
+    if ! $DC up -d --no-deps --force-recreate docker-container-watchdog; then
+        print_error "Watchdog deployment failed; check its Compose logs"
         exit 1
     fi
     print_success "Watchdog container started"
@@ -804,8 +798,11 @@ verify_deployment() {
     # image left over from a previous version would otherwise look healthy.
     local RUNNING_IMAGE
     RUNNING_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "")
-    if [ "$RUNNING_IMAGE" = "$IMAGE_NAME" ]; then
-        print_success "Container is running the expected image: ${IMAGE_NAME}"
+    local RUNNING_IMAGE_ID EXPECTED_IMAGE_ID
+    RUNNING_IMAGE_ID=$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)
+    EXPECTED_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME" 2>/dev/null || true)
+    if [ "$RUNNING_IMAGE" = "$IMAGE_NAME" ] && [ -n "$EXPECTED_IMAGE_ID" ] && [ "$RUNNING_IMAGE_ID" = "$EXPECTED_IMAGE_ID" ]; then
+        print_success "Container runs the verified image: $IMAGE_NAME"
     else
         print_error "Container is running '${RUNNING_IMAGE:-unknown}', expected '${IMAGE_NAME}'"
         echo ""
@@ -866,13 +863,15 @@ display_usage_instructions() {
 main() {
     print_header
     check_prerequisites
+    load_docker_image || exit 1
     setup_log_directory
-    load_docker_image
-    configure_all
+    configure_all || exit 1
     start_watchdog
     verify_deployment
     display_usage_instructions
 }
 
-main "$@"
-
+# Allow fake-Docker unit tests to source functions without invoking main.
+if [[ "$BASH_SOURCE" == "$0" ]]; then
+    main "$@"
+fi

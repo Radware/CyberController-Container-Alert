@@ -1,15 +1,7 @@
-# ── PRODUCTION / OFFLINE RUNTIME ─────────────────────────────────────────────
-# Uses a pre-built image. No internet access required.
-# The image must be loaded first:
-#   docker load -i watchdog.tar
-#
-# Usage:
-#   cp .env.example .env   # fill in SLACK_WEBHOOK_URL and any other channel secrets
-#   docker compose up -d
-#
-# To build a new image (requires internet):
-#   docker compose -f docker-compose.build.yaml build
-# ─────────────────────────────────────────────────────────────────────────────
+# PRODUCTION RUNTIME — use one verified, prebuilt versioned Docker image.
+# The complete customer release archive includes watchdog.tar and its checksum.
+# install.sh verifies/loads that image; customers do not build source or manually load images.
+# For authorized manual operations: docker compose up -d --no-deps docker-container-watchdog
 
 services:
 

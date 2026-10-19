@@ -31,7 +31,15 @@ from ha_monitor import HARoleTracker, read_ha_observation
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-SYSLOG_FORMAT = "watchdog[%(process)d]: %(levelname)s %(name)s: %(message)s"
+SYSLOG_FORMAT = "watchdog[%(process)d]: %(message)s"
+
+
+class AlertSyslogFilter(logging.Filter):
+    """Forward alert records and actual errors, not routine poll diagnostics."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return bool(getattr(record, "watchdog_alert", False) or record.levelno >= logging.ERROR)
+
 log = logging.getLogger("watchdog")
 
 
@@ -39,6 +47,7 @@ log = logging.getLogger("watchdog")
 def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = None) -> None:
     numeric = getattr(logging, level.upper(), logging.INFO)
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    syslog_active = False
     if log_file:
         log_dir = os.path.dirname(log_file)
         if log_dir:
@@ -48,6 +57,8 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
                 log_file, maxBytes=10 * 1024 * 1024, backupCount=5
             )
         )
+    for handler in handlers:
+        handler.setLevel(numeric)
     if syslog_cfg and syslog_cfg.get("enabled"):
         host = syslog_cfg.get("host", "localhost")
         port = int(syslog_cfg.get("port", 514))
@@ -70,10 +81,15 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
             log.warning("Syslog disabled — cannot reach %s:%d (%s): %s", host, port, proto, exc)
         else:
             syslog_handler.setFormatter(logging.Formatter(SYSLOG_FORMAT))
+            syslog_handler.setLevel(logging.INFO)
+            syslog_handler.addFilter(AlertSyslogFilter())
             handlers.append(syslog_handler)
+            syslog_active = True
             # Use a plain formatter for other handlers, syslog gets its own
             log.info("Syslog handler added: %s:%d (%s)", host, port, proto)
-    logging.basicConfig(level=numeric, format=LOG_FORMAT, handlers=handlers, force=True)
+    # Let INFO recovery alerts reach Syslog even when local logs are WARNING/ERROR.
+    root_level = min(numeric, logging.INFO) if syslog_active else numeric
+    logging.basicConfig(level=root_level, format=LOG_FORMAT, handlers=handlers, force=True)
     # Suppress noisy third-party debug chatter (urllib3 Docker socket calls, etc.)
     for noisy in ("urllib3", "urllib3.connectionpool", "docker", "requests"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
@@ -402,12 +418,14 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
     ha_event = payload.failure_type == "ha-failover"
     ha_fields = [
         {"title": "Event", "value": "HA active-node change", "short": True},
+        {"title": "Severity", "value": payload.severity, "short": True},
         {"title": "Previous active", "value": payload.ha_previous_node, "short": True},
         {"title": "New active", "value": payload.ha_new_node, "short": True},
         {"title": "Host", "value": payload.host, "short": True},
         {"title": "Time (UTC)", "value": payload.timestamp, "short": True},
         *probe_field,
-        {"title": "Action", "value": payload.recommended_action, "short": False},
+        {"title": "Context", "value": payload.recommended_action, "short": False},
+        {"title": "Runbook", "value": payload.runbook_url, "short": False},
     ]
     body = {
         "attachments": [{
@@ -422,7 +440,7 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
                 *exit_field,
                 *probe_type_field,
                 *probe_field,
-                {"title": "Action",    "value": payload.recommended_action, "short": False},
+                {"title": "Context",    "value": payload.recommended_action, "short": False},
                 {"title": "Runbook",   "value": payload.runbook_url,    "short": False},
             ],
             "footer": ("Source: HA cluster exporter" if ha_event
@@ -439,19 +457,48 @@ def send_slack(payload: AlertPayload, cfg: dict) -> None:
 
 
 
+def _syslog_field(value: object, limit: int = 512) -> str:
+    """Single-line, bounded, quote-safe key/value field for SIEM parsing."""
+    value = str(value).replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+    value = value[:limit] + ("..." if len(value) > limit else "")
+    return '"' + value.replace('"', '\\"') + '"'
+
+
+def format_syslog_alert(payload: AlertPayload) -> str:
+    """Same incident facts as human-facing notifications; bounded for UDP syslog."""
+    details = {
+        "event": "watchdog_alert",
+        "severity": payload.severity,
+        "failure_type": payload.failure_type,
+        "time_utc": payload.timestamp,
+        "host": payload.host,
+        "probe_type": payload.probe_type,
+        "detection": payload.probe_detail,
+        "action": payload.recommended_action,
+        "runbook": payload.runbook_url,
+    }
+    if payload.failure_type not in ("ha-failover", "reboot-summary"):
+        details["container"] = payload.container_name
+        details["container_id"] = payload.container_id
+    if payload.exit_code is not None:
+        details["exit_code"] = payload.exit_code
+    if payload.failure_type == "ha-failover":
+        details["previous_active"] = payload.ha_previous_node
+        details["new_active"] = payload.ha_new_node
+    return " ".join(f"{key}={_syslog_field(value, 250 if key in ('detection', 'action') else 120)}"
+                    for key, value in details.items() if value not in ("", "N/A"))
+
+
+def _alert_log_level(severity: str) -> int:
+    return {"CRITICAL": logging.CRITICAL, "HIGH": logging.ERROR,
+            "WARNING": logging.WARNING, "INFO": logging.INFO}.get(severity, logging.WARNING)
+
+
 def dispatch_alert(payload: AlertPayload, cfg: dict) -> None:
     """Send alert to all configured channels."""
     channels = cfg.get("alert_channels", ["slack"])
-    log_fn = log.info if payload.failure_type == "recovered" else log.warning
-    if payload.failure_type == "ha-failover":
-        log_fn("ALERT %s (channels: %s) — %s",
-               payload.subject(), channels, payload.probe_detail)
-    else:
-        log_fn(
-            "ALERT [%s] %s — %s (channels: %s)",
-            payload.severity, payload.container_name,
-            payload.failure_type, channels,
-        )
+    log.log(_alert_log_level(payload.severity), format_syslog_alert(payload),
+            extra={"watchdog_alert": True})
     if "slack"  in channels: send_slack(payload, cfg)
     if "smtp"   in channels: send_smtp(payload, cfg)
     if "snmp_trap"  in channels: send_snmp_trap(payload, cfg)
@@ -520,18 +567,23 @@ def send_smtp(payload: AlertPayload, cfg: dict) -> None:
                 f"Previous active: {payload.ha_previous_node}\n"
                 f"New active: {payload.ha_new_node}\n"
                 f"Host: {payload.host}\n"
+                f"Severity: {payload.severity}\n"
                 f"Observed (UTC): {payload.timestamp}\n"
-                f"Evidence: {payload.probe_detail}\n\n"
-                f"Action: {payload.recommended_action}")
+                f"Evidence: {payload.probe_detail}\n"
+                f"Context: {payload.recommended_action}\n"
+                f"Runbook: {payload.runbook_url}")
     else:
         body = f"""Container: {payload.container_name}
 Host: {payload.host}
 Status: {payload.failure_type}
 Severity: {payload.severity}
 Time: {payload.timestamp}
+Container ID: {payload.container_id}
 Exit Code: {payload.exit_code if payload.exit_code is not None else 'N/A'}
-
-{payload.recommended_action}"""
+Probe Type: {payload.probe_type or 'N/A'}
+Detection: {payload.probe_detail or 'N/A'}
+Context: {payload.recommended_action}
+Runbook: {payload.runbook_url or 'N/A'}"""
     
     # Build an RFC-compliant MIME message.  smtplib.sendmail(str) tries to
     # encode the whole message as ASCII, which breaks on Unicode text such as
@@ -1030,31 +1082,32 @@ def send_snmp_trap(payload: AlertPayload, cfg: dict) -> None:
 ACTIONS = {
     "crashed": (
         "CRITICAL",
-        "Check exit code and logs. Run: docker logs <name> --tail 50. "
-        "Exit 137 means SIGKILL, not necessarily OOM. Check Docker stop/oom events and OOMKilled.",
+        "Docker reported an unexpected container termination. "
+        "Run: docker logs <name> --tail 50. "
+        "The exit code and detection details provide additional context.",
     ),
     "oom": (
         "CRITICAL",
-        "Container was OOM-killed. Increase memory limit in docker-compose.yaml "
-        "or investigate memory leak. Run: docker stats <name>.",
+        "Docker reported that the container was terminated due to an out-of-memory condition.",
     ),
     "unhealthy": (
         "HIGH",
-        "Container is running but health probe is failing. "
-        "Check the application inside the container. Run: docker inspect <name>.",
+        "The container is running, but a monitoring health check is failing.",
     ),
     "restart-loop": (
         "HIGH",
-        "Container is repeatedly restarting. Inspect docker logs and the "
-        "restart policy; fix application crash, OOM, or dependency failure.",
+        "The container has restarted repeatedly within the configured monitoring window. "
+        "This pattern may be associated with application errors, resource pressure, "
+        "or unavailable dependencies. The underlying cause has not been determined.",
     ),
     "recovered": (
         "INFO",
-        "Container is back to normal operation. No action required.",
+        "The previously reported alert condition has cleared according to the available monitoring checks.",
     ),
     "reboot-summary": (
         "INFO",
-        "Post-reboot status summary. No action required unless containers are listed as still failing.",
+        "Monitoring has resumed following a host reboot. The reported summary includes "
+        "container status, recovered incidents, and any conditions that remain unresolved.",
     ),
 }
 
@@ -1085,19 +1138,17 @@ def get_docker_health_log(container) -> str:
 
 
 def get_memory_stats(container) -> str:
+    """Best-effort post-event sample, not memory usage at the time of the OOM."""
     try:
-        stats = container.stats(stream=False)
-        mem   = stats.get("memory_stats", {})
-        usage = mem.get("usage", 0)
-        limit = mem.get("limit", 0)
-        peak  = mem.get("max_usage", 0)
-        def _mb(b: int) -> str:
-            return f"{b / 1024 / 1024:.1f} MB"
-        return (
-            f"memory usage={_mb(usage)}  limit={_mb(limit)}  peak={_mb(peak)}"
-        )
-    except Exception as exc:
-        return f"(memory stats unavailable: {exc})"
+        mem = container.stats(stream=False).get("memory_stats") or {}
+        parts = []
+        for key, label in (("usage", "usage"), ("limit", "limit"), ("max_usage", "peak")):
+            value = mem.get(key)
+            if type(value) is int and value > 0:
+                parts.append(f"{label}={value / 1024 / 1024:.1f} MB")
+        return ("post-event memory snapshot: " + ", ".join(parts)) if parts else ""
+    except Exception:
+        return ""
 
 
 def get_container_id(container) -> str:
@@ -1239,7 +1290,7 @@ def build_payload(
     extra_context: str = "",
     probe_detail: str = "",
 ) -> AlertPayload:
-    severity, action = ACTIONS.get(failure_type, ("WARNING", "Investigate container."))
+    severity, action = ACTIONS.get(failure_type, ("WARNING", "A container monitoring event was reported. The failure type and available detection details provide additional context."))
     log_tail = get_log_tail(container)
     if extra_context:
         log_tail = f"{extra_context}\n\n{log_tail}"
@@ -1523,17 +1574,16 @@ class Watchdog:
 
     # ── Recovery alert ─────────────────────────────────────────────────────────
     def _maybe_alert_recovery(self, container, state: ContainerState) -> None:
-        """Resolve once stable; a brief RUNNING state is not loop recovery."""
-        automatic = has_automatic_restart_policy(container)
+        """Resolve real failures only after sustained Docker uptime."""
         started = container_started_timestamp(container)
         now = time.time()
         with state.lock:
             previous = state.alerted_for
             if not previous or previous == "recovered":
                 return
-            # Once a restart-loop was reported, changing Docker's restart
-            # policy must not bypass the stability period.
-            if previous == "restart-loop" or (automatic and previous in ("crashed", "oom")):
+            # Even a policy=no container may be restarted by an external actor.
+            # Never mark a crash, OOM, or loop recovered after a brief RUNNING poll.
+            if previous in ("restart-loop", "crashed", "oom"):
                 stability = self._restart_recovery_stability_secs
                 # If we cannot prove continuous uptime, don't clear a real incident.
                 if started is None or now - started < stability:
@@ -1626,7 +1676,7 @@ class Watchdog:
             return
         if death.stopped:
             if death.exit_code == 137:
-                log.warning("%s: Docker-requested stop ended with SIGKILL (137), "
+                log.info("%s: Docker-requested stop ended with SIGKILL (137), "
                             "not proof of OOM", death.name)
             else:
                 log.info("%s: Docker-requested stop (exit %s)", death.name, death.exit_code)
@@ -1789,10 +1839,12 @@ class Watchdog:
                 log.info("%s: OOM during active restart-loop — suppressing per-cycle OOM alert", name)
                 return
             if self._claim_alert(state, failure_type):
+                memory = get_memory_stats(container)
                 payload = build_payload(container, failure_type, self.host,
                                         self.runbook_base,
-                                        extra_context=get_memory_stats(container),
-                                        probe_detail="OOM probe failed - container was OOM-killed by the kernel")
+                                        extra_context=memory,
+                                        probe_detail=("OOM probe failed - container was OOM-killed by the kernel"
+                                                      + (f"; {memory}" if memory else "")))
                 self._dispatch(payload)
 
         elif action == "health_status: unhealthy":
@@ -1832,7 +1884,7 @@ class Watchdog:
             self._ha_tracker.reset_candidate()
             if time.monotonic() - self._ha_error_log_at >= 300:
                 self._ha_error_log_at = time.monotonic()
-                log.warning("HA check unavailable (%s): %s", type(exc).__name__, exc)
+                log.error("HA check unavailable (%s): %s", type(exc).__name__, exc)
             return
 
         changed, change = self._ha_tracker.observe(observation)
@@ -1949,11 +2001,11 @@ class Watchdog:
                     self._dispatch(payload)
 
             if status == "restarting":
-                log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
+                log.debug("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
 
             # Detect stuck containers missed by event stream
             elif status == "running" and health == "unhealthy":
-                log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
+                log.debug("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
                 with state.lock:
                     state.unhealthy_cycles += 1
                     cycles = state.unhealthy_cycles
@@ -1981,7 +2033,7 @@ class Watchdog:
 
                 # Log with watchdog-assessed health (replaces Docker's "none")
                 display_health = health if health != "none" else ("healthy" if is_healthy else "unhealthy")
-                log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, display_health)
+                log.debug("CONTAINER %-30s  status=%-12s  health=%s", name, status, display_health)
 
                 if not is_healthy:
                     with state.lock:
@@ -2010,7 +2062,7 @@ class Watchdog:
                     self._maybe_alert_recovery(container, state)
 
             else:
-                log.info("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
+                log.debug("CONTAINER %-30s  status=%-12s  health=%s", name, status, health)
 
         # During the post-reboot window a restored container may not exist yet —
         # keep its open alert so the recovery still fires once it comes back.
