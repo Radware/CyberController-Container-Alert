@@ -97,9 +97,6 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_KVISION_MARIADB_SYNTAX_CHECK_LABEL = "com.radware.cybercontroller.role"
-_KVISION_MARIADB_SYNTAX_CHECK_ROLE = "mariadb-ha-syntax-check"
-
 DEFAULT_CONFIG = {
     "alert_channels": ["slack"],
     "check_interval_seconds": 60,
@@ -111,14 +108,7 @@ DEFAULT_CONFIG = {
     "unhealthy_cycles_threshold": 3,
     "alert_on_recovery": True,
     "excluded_containers": [],
-    "ignored_container_events": [
-        {
-            "label": {
-                _KVISION_MARIADB_SYNTAX_CHECK_LABEL: _KVISION_MARIADB_SYNTAX_CHECK_ROLE,
-            },
-            "events": ["die"],
-        },
-    ],
+    "ignored_container_events": [],  # opt-in label policy; MariaDB dump helper uses a separate strict predicate
     "log_file": "/var/log/watchdog/watchdog.log",
     "log_level": "INFO",
     # Alert state survives restarts so recovery alerts still fire after a reboot.

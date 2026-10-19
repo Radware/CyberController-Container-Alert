@@ -35,12 +35,12 @@ lifecycle_detection:
 excluded_containers: []
   # - my-temp-container
 
-# Narrow exception for labelled temporary syntax-check containers.
-ignored_container_events:
-  - label:
-      com.radware.cybercontroller.role: mariadb-ha-syntax-check
-    events:
-      - die
+# Optional label-based Docker event exclusions (disabled by default).
+# Use only for verified labels on intentionally excluded temporary containers.
+# The known CyberController MariaDB SQL dump helper is handled automatically
+# by the watchdog's strict image, AutoRemove, mount, and exit-137 checks.
+# No label rule is needed for that helper.
+ignored_container_events: []
 
  
 # ── Logging ───────────────────────────────────────────────────────────────────
