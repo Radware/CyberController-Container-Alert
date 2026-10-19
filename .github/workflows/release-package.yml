@@ -58,9 +58,14 @@ jobs:
           bash scripts/package_release.sh watchdog.tar dist
           (cd dist && sha256sum --check SHA256SUMS)
           package="dist/container-alert-v$WATCHDOG_VERSION.tar.gz"
-          tar -tzf "$package" | grep -qx 'CyberController-Container-Alert/watchdog.tar'
-          tar -tzf "$package" | grep -qx 'CyberController-Container-Alert/SHA256SUMS'
-          tar -tzf "$package" | grep -qx 'CyberController-Container-Alert/install.sh'
+          tar -tzf "$package" > "$RUNNER_TEMP/package-contents.txt"
+          
+          grep -Fxq 'CyberController-Container-Alert/watchdog.tar' \
+            "$RUNNER_TEMP/package-contents.txt"
+          grep -Fxq 'CyberController-Container-Alert/SHA256SUMS' \
+            "$RUNNER_TEMP/package-contents.txt"
+          grep -Fxq 'CyberController-Container-Alert/install.sh' \
+            "$RUNNER_TEMP/package-contents.txt"
 
       - name: Publish GitHub Release
         env:
