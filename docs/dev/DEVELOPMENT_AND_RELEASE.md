@@ -186,6 +186,77 @@ gh run list -R Radware/CyberController-Container-Alert \
 
 `--ref main` selects the **updated workflow definition**; `release_tag` selects the **original tagged commit** for building the Docker image and package. The job checks tag/version consistency and `main` ancestry before publishing. After a successful run, verify the two release assets and both checksums as above. If a draft release was already created, investigate it before retrying to avoid conflicting publication.
 
+### EXCEPTION ONLY — Re-release the same version before first deployment
+
+**Prefer a patch/hotfix release** (for example, `v1.6.1`) through the normal PR, version and tag process. Replacing a **published** release changes the source associated with an existing version and makes old packages/checksums obsolete. This exception is allowed **only when you have confirmed that no one has deployed, redistributed or relied upon the existing release**, and explicitly decided to replace it. A GitHub download count of zero is not sufficient evidence. If anything was distributed or deployment status is uncertain, **stop and use a new patch version**. Do not use this procedure if the release or tag is immutable/protected.
+
+**Not the same as failed-workflow recovery above:** `workflow_dispatch` with `release_tag` rebuilds the *original tagged commit*, so it **cannot** include later installer/application fixes on `main`.
+
+**1. Finalize and validate the corrected source.** Review and test the fix, commit/push it to `main`, and confirm required CI/isolated smoke checks before touching the original release. In a clean checkout:
+
+```bash
+REPO=Radware/CyberController-Container-Alert
+git switch main
+git pull --ff-only origin main
+git status --short               # MUST be empty
+VER="$(cat VERSION)"             # the existing release version
+TAG="v$VER"
+git log -1 --oneline             # new corrected main commit
+git rev-parse "$TAG^{commit}"    # old release commit
+gh release view "$TAG" -R "$REPO"
+```
+
+Confirm `main` contains the correction, `VERSION` is unchanged, and **nothing has been deployed or distributed**.
+
+**2. Back up the published release and its identity before deletion.**
+
+```bash
+BACKUP_DIR="$HOME/container-alert-replaced-$TAG-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$BACKUP_DIR"
+gh release download "$TAG" -R "$REPO" --dir "$BACKUP_DIR"
+(cd "$BACKUP_DIR" && sha256sum --check SHA256SUMS)
+git rev-parse "$TAG^{commit}" > "$BACKUP_DIR/original-commit.txt"
+git rev-parse "$TAG" > "$BACKUP_DIR/original-tag-object.txt"
+gh release view "$TAG" -R "$REPO" --json body --jq .body \
+  > "$BACKUP_DIR/original-release-notes.md"
+```
+
+**3. Exceptionally delete the existing release and remote tag.** This requires GitHub write permission. Proceed **only** if the backup and all prerequisites above succeeded.
+
+```bash
+gh release delete "$TAG" -R "$REPO" --cleanup-tag --yes
+git ls-remote --tags origin "refs/tags/$TAG"   # MUST print nothing
+```
+
+If the remote tag still exists, **stop**. Do **not** force-push over it.
+
+**4. Tag the corrected `main` commit.** Check that both commit hashes match before pushing. The tag push triggers the standard release workflow; **do not** run `workflow_dispatch` as well.
+
+```bash
+git tag -d "$TAG"            # remove the old local tag only
+git tag -a "$TAG" -m "Container Alert $TAG final pre-deployment release"
+git rev-parse "$TAG^{commit}"   # MUST match HEAD
+git rev-parse HEAD
+git push origin "$TAG"
+```
+
+**5. Verify the replacement release.** Inspect the **new** workflow run, then download into a fresh directory to avoid validating stale files:
+
+```bash
+gh run list -R "$REPO" --workflow release-package.yml --limit 5
+# gh run watch <NEW_RUN_ID> -R "$REPO"
+gh release view "$TAG" -R "$REPO"
+CHECK_DIR="$(mktemp -d "/tmp/container-alert-check-$TAG.XXXXXX")"
+gh release download "$TAG" -R "$REPO" --dir "$CHECK_DIR"
+(cd "$CHECK_DIR" && sha256sum --check SHA256SUMS)
+mkdir -p "$CHECK_DIR/extracted"
+tar -xzf "$CHECK_DIR/container-alert-$TAG.tar.gz" -C "$CHECK_DIR/extracted"
+(cd "$CHECK_DIR/extracted/CyberController-Container-Alert" && sha256sum --check SHA256SUMS)
+cat "$CHECK_DIR/extracted/CyberController-Container-Alert/VERSION"
+```
+
+Verify that the new installer and image contents contain the intended fixes, and record the new tag commit, release run and checksums. **Any previously downloaded artifacts are obsolete.** For a release used anywhere, do **not** replace its tag: publish a hotfix with a new version instead.
+
 ## 6. Customer delivery and rollback
 
 Operators obtain `container-alert-v<VERSION>.tar.gz` and `SHA256SUMS` from the release or through file transfer. They verify, extract, and run `bash install.sh`. The archive works equally well on connected and disconnected hosts. It doesn't include active `.env`, `watchdog-config.yaml` or persistent `watchdog/`, so upgrades preserve customer settings and history and recreate **only** the watchdog service.
