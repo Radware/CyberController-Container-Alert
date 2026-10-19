@@ -7,12 +7,13 @@
 | Area | Planned change | Impact |
 |---|---|---|
 | HA monitoring diagnostics | During failover, tolerate up to two consecutive checks with no promoted HA Operator. On the third consecutive such reading, emit a throttled error; conflicting promoted nodes, loss of quorum and exporter failures remain immediate errors. | Reduces expected transient Syslog ERROR noise without hiding sustained or unsafe HA status. No change to HA failover/failback detection, owner-only notifications, or Docker container monitoring. |
+| MariaDB helper configuration clarity | Remove the unverified MariaDB syntax-check Docker label rule from Python defaults, installer-generated configuration and the example template. Retain optional explicit label-based exclusions and the existing narrow built-in dump-helper exception. | Avoids documenting a label not observed on the temporary MariaDB helper; no change to the verified built-in exit-137 suppression. Existing customer YAML remains preserved on upgrades, including older rules. |
 
 **Additional changes:** To be updated as development PRs are integrated.
 
 ## Compatibility and operations
 
-No configuration key, new service, port, endpoint or privilege is required by the initial HA diagnostic change. Default HA polling remains 60 seconds; the existing 2-valid-poll failover confirmation and 5-minute repeated-error rate limit are retained.
+No new service, port, endpoint or privilege is required. Default HA polling remains 60 seconds; the existing 2-valid-poll failover confirmation and 5-minute repeated-error rate limit are retained. Newly generated configs omit the optional `ignored_container_events` key; the reference template defaults it to `[]`. The event-label mechanism is still available for explicit, verified labels. The strict built-in MariaDB dump-helper exception stays enabled and unchanged. Installer upgrades **preserve existing customer YAML**, so they do not automatically remove old label entries.
 
 ## Validation (pending)
 

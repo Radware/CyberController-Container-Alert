@@ -291,13 +291,11 @@ Production deployment requires a published, prebuilt release package.
 
 ### Narrow CyberController event exceptions
 
+The observed CyberController MariaDB SQL dump syntax-check helper is handled by an **application-specific built-in predicate**: the helper image, non-primary container name, Docker `AutoRemove=True` status, expected SQL dump file mount and exit status 137 must **all** match. Normal primary MariaDB and unrelated containers remain monitored. This exception does not require `ignored_container_events` in YAML.
 
-The intended MariaDB HA syntax-check helper carries the explicit label `com.radware.cybercontroller.role=mariadb-ha-syntax-check`. The configured `ignored_container_events` policy ignores only the designated temporary helper `die` event; normal service container failures remain monitored.
+`ignored_container_events` remains a **generic, optional label-based event policy**, but no default MariaDB label is generated. In the October 2026 HA lab run, the expected dump-helper exit reached the built-in predicate instead of matching the previously advertised `com.radware.cybercontroller.role=mariadb-ha-syntax-check` rule. Do not claim that CyberController sets that label without concrete evidence. If a future supported helper does carry a verified label, an operator may deliberately configure a narrow `ignored_container_events` rule.
 
-A narrow compatibility fallback exists for dynamic MariaDB dump helpers: it applies only when the helper image, non-primary container name, Docker `AutoRemove` status, expected SQL dump file mount and exit status 137 **all** match. This is not a general rule to suppress MariaDB failures. Do not alter these narrow exceptions simply to suppress alerts; validate changes with regression tests.
-
-
-These exceptions are not blanket MariaDB or OOM alert suppression. Changes to monitoring exceptions require regression validation.
+Installer upgrades preserve existing customer YAML, including any earlier label rule; they never silently delete or rewrite configured exceptions. These protections are not blanket MariaDB/OOM alert suppression. Validate all predicate and configuration changes with non-destructive regression tests and only hosted isolated Docker acceptance.
 
 ### Historical design and validation
 

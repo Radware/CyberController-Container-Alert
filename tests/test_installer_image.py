@@ -142,7 +142,13 @@ exit 97
 
     def test_keep_existing_configuration_does_not_add_ha(self):
         # Upgrading with the default "keep" answer must preserve active YAML.
-        existing = "\n".join(["syslog:", "  enabled: true", ""])
+        existing = "\n".join([
+            "syslog:", "  enabled: true",
+            "ignored_container_events:",
+            "  - label:",
+            "      com.radware.cybercontroller.role: mariadb-ha-syntax-check",
+            "    events: [die]", "",
+        ])
         (self.root / "watchdog-config.yaml").write_text(existing)
         (self.root / ".env").write_text(
             "\n".join(["DOCKER_GID=999", "WATCHDOG_VERSION=1.5.4", ""])
@@ -170,6 +176,7 @@ exit 97
         self.assertEqual(config["ha_monitor"], {
             "enabled": False, "exporter_url": "http://127.0.0.1:9664/metrics",
         })
+        self.assertNotIn("ignored_container_events", config)
         self.assertEqual(self.calls(), [])
 
     def test_generated_config_can_enable_ha_with_custom_exporter(self):
