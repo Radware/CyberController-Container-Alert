@@ -168,7 +168,23 @@ cat extracted/CyberController-Container-Alert/VERSION
 
 Record the Git tag/commit, CI/smoke URLs, release link, package digest and final image digest. The tagged build may not be byte-identical to the PR build while image bases/dependencies can float; pinning/signing is a separate supply-chain improvement.
 
-If the workflow fails or the release is incomplete, do not distribute it. Inspect the failed workflow and draft release before retrying; **never rewrite an existing published tag**.
+### Recover a release whose tag already exists
+
+If the tag-triggered packaging or publication fails, **do not move, delete or recreate the tag**. Inspect the failed run and any draft release. Fix the workflow on `main`, validate the correction and merge it. Rerunning the old failed job may reuse its defective workflow definition.
+
+To rebuild the **same tagged source commit** using the corrected workflow:
+
+```bash
+VER=1.6.0  # replace with the already-tagged release version
+gh workflow run release-package.yml -R Radware/CyberController-Container-Alert \
+  --ref main -f release_tag="v$VER"
+
+gh run list -R Radware/CyberController-Container-Alert \
+  --workflow release-package.yml --event workflow_dispatch --limit 5
+# Follow the new ID: gh run watch <RUN_ID> -R Radware/CyberController-Container-Alert
+```
+
+`--ref main` selects the **updated workflow definition**; `release_tag` selects the **original tagged commit** for building the Docker image and package. The job checks tag/version consistency and `main` ancestry before publishing. After a successful run, verify the two release assets and both checksums as above. If a draft release was already created, investigate it before retrying to avoid conflicting publication.
 
 ## 6. Customer delivery and rollback
 
