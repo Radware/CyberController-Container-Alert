@@ -129,14 +129,14 @@ The installer creates the active configuration files. Edit them only when needed
 
 ### 4.1 Configuration files and editing
 
-| File | What it contains | Apply changes |
-|---|---|---|
-| `watchdog-config.yaml` | Monitoring, alerts, health checks and HA | Restart watchdog |
-| `.env` | Credentials, hostname and Docker image version | Recreate watchdog |
-| `docker-compose.yaml` | Container runtime settings; generally managed by Radware | Recreate watchdog |
-| `*.example` | Reference templates, not active settings | No effect on the running service |
+| File | What it contains | Apply changes | Command |
+|---|---|---|---|
+| `watchdog-config.yaml` | Monitoring, alerts, health checks and HA | Restart watchdog | `docker compose restart docker-container-watchdog` |
+| `.env` | Credentials, hostname and Docker image version | Recreate watchdog | `docker compose up -d --no-deps --force-recreate docker-container-watchdog` |
+| `docker-compose.yaml` | Container runtime settings; generally managed by Radware | Recreate watchdog | `docker compose up -d --no-deps --force-recreate docker-container-watchdog` |
+| `*.example` | Reference templates, not active settings | No effect on the running service | None |
 
-The installer creates `watchdog-config.yaml` and `.env`. From the installation directory, you can edit `watchdog-config.yaml` or `.env`. Back up first ([Section 5.2](#52-backup-and-restore))
+The installer creates `watchdog-config.yaml` and `.env`. Edit active settings and run the commands above from `/opt/radware/storage/scripts/CyberController-Container-Alert`. Back up first ([Section 5.2](#52-backup-and-restore)). These commands affect only the watchdog container.
 
 ### 4.2 Watchdog monitoring settings
 
