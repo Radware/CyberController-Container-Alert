@@ -27,11 +27,12 @@ import socket
 import yaml
 
 from lifecycle import DockerLifecycleCorrelator
-from ha_monitor import HARoleTracker, read_ha_observation
+from ha_monitor import HARoleTracker, NoPromotedHAOperatorError, read_ha_observation
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 SYSLOG_FORMAT = "watchdog[%(process)d]: %(message)s"
+HA_NO_PROMOTED_ERROR_POLLS = 3  # Ignore short promotion gaps, never indefinite loss.
 
 
 class AlertSyslogFilter(logging.Filter):
@@ -1422,6 +1423,8 @@ class Watchdog:
             self.state.save(self._boot_time)
         self._ha_tracker = HARoleTracker(self.state.get_ha_node())
         self._ha_error_log_at = float("-inf")
+        self._ha_last_error_reason = None
+        self._ha_missing_promoted_polls = 0
 
     # ── State restore ─────────────────────────────────────────────────────────
     def _restore_state(self) -> None:
@@ -1882,11 +1885,28 @@ class Watchdog:
             observation = read_ha_observation(session, url)
         except Exception as exc:
             self._ha_tracker.reset_candidate()
-            if time.monotonic() - self._ha_error_log_at >= 300:
-                self._ha_error_log_at = time.monotonic()
+            if isinstance(exc, NoPromotedHAOperatorError):
+                self._ha_missing_promoted_polls += 1
+                if self._ha_missing_promoted_polls < HA_NO_PROMOTED_ERROR_POLLS:
+                    log.debug("HA promotion pending (%d/%d): %s",
+                              self._ha_missing_promoted_polls,
+                              HA_NO_PROMOTED_ERROR_POLLS, exc)
+                    return
+            else:
+                # Multiple promoters, lost quorum and exporter failures are not
+                # normal promotion gaps; report their first occurrence at once.
+                self._ha_missing_promoted_polls = 0
+
+            reason = (type(exc).__name__, str(exc))
+            now = time.monotonic()
+            if reason != self._ha_last_error_reason or now - self._ha_error_log_at >= 300:
+                self._ha_error_log_at = now
+                self._ha_last_error_reason = reason
                 log.error("HA check unavailable (%s): %s", type(exc).__name__, exc)
             return
 
+        self._ha_missing_promoted_polls = 0
+        self._ha_last_error_reason = None
         changed, change = self._ha_tracker.observe(observation)
         if changed:
             self.state.set_ha_node(self._ha_tracker.confirmed)

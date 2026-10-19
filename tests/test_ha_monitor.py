@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 import watchdog
 from ha_monitor import (
-    HAObservation, HARoleTracker, MAX_METRICS_BYTES,
+    HAObservation, HARoleTracker, MAX_METRICS_BYTES, NoPromotedHAOperatorError,
     parse_ha_metrics, read_ha_observation,
 )
 
@@ -67,6 +67,22 @@ class HAReaderTests(unittest.TestCase):
         for sample in cases:
             with self.subTest(sample=sample[-75:]), self.assertRaises(ValueError):
                 parse_ha_metrics(sample)
+
+    def test_zero_promoted_is_distinct_from_multiple_promoted(self):
+        no_promoted = metrics().replace(
+            'role="promoted",resource="HAOperatorRep-Res"',
+            'role="unpromoted",resource="HAOperatorRep-Res"')
+        with self.assertRaisesRegex(NoPromotedHAOperatorError, "no promoted"):
+            parse_ha_metrics(no_promoted)
+
+        two_promoted = metrics(extras=(
+            f'ha_cluster_pacemaker_resources{{node="{B}",role="promoted",'
+            'resource="HAOperatorRep-Res",status="active"} 1'))
+        with self.assertRaisesRegex(ValueError, "multiple promoted"):
+            parse_ha_metrics(two_promoted)
+        with self.assertRaises(ValueError) as raised:
+            parse_ha_metrics(two_promoted)
+        self.assertNotIsInstance(raised.exception, NoPromotedHAOperatorError)
 
     def test_ignores_non_matching_roles_and_untrusted_other_metric(self):
         sample = metrics(owner=A, local=A, extras=
@@ -147,6 +163,8 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
         w._ha_enabled = True
         w._ha_tracker = HARoleTracker(w.state.get_ha_node())
         w._ha_error_log_at = 0.0
+        w._ha_last_error_reason = None
+        w._ha_missing_promoted_polls = 0
         w._session = Mock()
         w._boot_time = 123
         w._grace_until = 0.0
@@ -187,7 +205,7 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             w = self.create_shell(f"{td}/state.json")
             with patch("watchdog.read_ha_observation", side_effect=TimeoutError("offline")), \
-                 patch("watchdog.time.monotonic", side_effect=[1000, 1000, 1100, 1301, 1301]), \
+                 patch("watchdog.time.monotonic", side_effect=[1000, 1100, 1301]), \
                  patch("watchdog.log.error") as err:
                 w._poll_ha(w._session)
                 w._poll_ha(w._session)
@@ -195,6 +213,94 @@ class WatchdogHAIntegrationTests(unittest.TestCase):
             self.assertEqual(err.call_count, 2)
             self.assertIn("HA check unavailable", err.call_args.args[0])
             w._dispatch.assert_not_called()
+
+    def test_short_no_promoted_gap_is_quiet_and_does_not_change_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = self.create_shell(f"{td}/state.json")
+            w._ha_tracker = HARoleTracker(A)
+            missing = NoPromotedHAOperatorError("no promoted HA Operator observed")
+            with patch("watchdog.read_ha_observation", side_effect=[
+                    missing, missing, HAObservation(A, A)]), \
+                 patch("watchdog.log.error") as err:
+                for _ in range(3):
+                    w._poll_ha(w._session)
+            err.assert_not_called()  # no Syslog ERROR on normal short failover gap
+            w._dispatch.assert_not_called()
+            self.assertEqual(w._ha_tracker.confirmed, A)
+            self.assertEqual(w._ha_missing_promoted_polls, 0)
+
+    def test_persistent_no_promoted_gap_reports_after_three_polls_and_throttles(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = self.create_shell(f"{td}/state.json")
+            w._ha_tracker = HARoleTracker(A)
+            missing = NoPromotedHAOperatorError("no promoted HA Operator observed")
+            with patch("watchdog.read_ha_observation", side_effect=missing), \
+                 patch("watchdog.time.monotonic", side_effect=[1120, 1180, 1421]), \
+                 patch("watchdog.log.error") as err:
+                w._poll_ha(w._session)
+                w._poll_ha(w._session)
+                err.assert_not_called()
+                w._poll_ha(w._session)  # third consecutive no-owner observation
+                self.assertEqual(err.call_count, 1)
+                w._poll_ha(w._session)  # 60s later, throttled
+                self.assertEqual(err.call_count, 1)
+                w._poll_ha(w._session)  # >= 300s later, diagnostic repeated
+            self.assertEqual(err.call_count, 2)
+            self.assertIn("NoPromotedHAOperatorError", err.call_args.args)
+            self.assertEqual(w._ha_tracker.confirmed, A)
+            w._dispatch.assert_not_called()
+
+    def test_good_observation_resets_no_promoted_counter(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = self.create_shell(f"{td}/state.json")
+            w._ha_tracker = HARoleTracker(A)
+            missing = NoPromotedHAOperatorError("no promoted HA Operator observed")
+            with patch("watchdog.read_ha_observation", side_effect=[
+                    missing, HAObservation(A, A), missing, missing]), \
+                 patch("watchdog.log.error") as err:
+                for _ in range(4):
+                    w._poll_ha(w._session)
+            err.assert_not_called()
+            self.assertEqual(w._ha_missing_promoted_polls, 2)
+
+    def test_critical_ha_faults_are_immediate_even_after_transition_gap(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = self.create_shell(f"{td}/state.json")
+            missing = NoPromotedHAOperatorError("no promoted HA Operator observed")
+            faults = [
+                missing, missing,
+                ValueError("multiple promoted HA Operators observed"),
+                TimeoutError("exporter unavailable"),
+                ValueError("Pacemaker scrape failed or cluster has no quorum"),
+            ]
+            with patch("watchdog.read_ha_observation", side_effect=faults), \
+                 patch("watchdog.time.monotonic", return_value=1000), \
+                 patch("watchdog.log.error") as err:
+                for _ in range(2):
+                    w._poll_ha(w._session)
+                err.assert_not_called()
+                w._poll_ha(w._session)
+                self.assertEqual(err.call_count, 1)
+                w._poll_ha(w._session)
+                self.assertEqual(err.call_count, 2)
+                w._poll_ha(w._session)
+                self.assertEqual(err.call_count, 3)
+            self.assertEqual(w._ha_missing_promoted_polls, 0)
+            w._dispatch.assert_not_called()
+
+    def test_failover_after_short_gap_still_requires_two_good_polls(self):
+        with tempfile.TemporaryDirectory() as td:
+            w = self.create_shell(f"{td}/state.json")
+            w._ha_tracker = HARoleTracker(A)
+            missing = NoPromotedHAOperatorError("no promoted HA Operator observed")
+            with patch("watchdog.read_ha_observation", side_effect=[
+                    missing, missing, HAObservation(B, B), HAObservation(B, B)]), \
+                 patch("watchdog.log.error") as err:
+                for _ in range(4):
+                    w._poll_ha(w._session)
+            err.assert_not_called()
+            w._dispatch.assert_called_once()
+            self.assertEqual(w.state.get_ha_node(), B)
 
     def test_failed_exporter_does_not_overwrite_state_or_alert(self):
         with tempfile.TemporaryDirectory() as td:
