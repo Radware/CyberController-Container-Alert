@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text().strip()
@@ -72,10 +74,10 @@ exit 97
                 f"{digest}  watchdog.tar\n"
             )
 
-    def run_function(self, body="load_docker_image"):
+    def run_function(self, body="load_docker_image", input_data=None):
         result = subprocess.run(
             ["bash", "-c", "source ./install.sh; " + body],
-            cwd=self.root, env=self.env,
+            cwd=self.root, env=self.env, input=input_data,
             text=True, capture_output=True, timeout=10,
         )
         result.output = result.stdout + result.stderr
@@ -136,6 +138,55 @@ exit 97
         self.assertNotEqual(out.returncode, 0)
         self.assertEqual((self.root / ".env").read_text(), "SECRET=keep\n")
         self.assertFalse((self.root / "watchdog-config.yaml").exists())
+        self.assertEqual(self.calls(), [])
+
+    def test_keep_existing_configuration_does_not_add_ha(self):
+        # Upgrading with the default "keep" answer must preserve active YAML.
+        existing = "\n".join(["syslog:", "  enabled: true", ""])
+        (self.root / "watchdog-config.yaml").write_text(existing)
+        (self.root / ".env").write_text(
+            "\n".join(["DOCKER_GID=999", "WATCHDOG_VERSION=1.5.4", ""])
+        )
+        body = ('detect_docker_gid() { echo 999; }; '
+                '_publish_file() { cp "$1" "$2"; }; '
+                'harden_config_permissions() { :; }; configure_all')
+        result = self.run_function(body, input_data="\n")
+        self.assertEqual(result.returncode, 0, result.output)
+        self.assertEqual((self.root / "watchdog-config.yaml").read_text(), existing)
+        self.assertIn("WATCHDOG_VERSION=" + VERSION,
+                      (self.root / ".env").read_text())
+        self.assertEqual(self.calls(), [])
+
+    def test_generated_config_includes_optional_ha_disabled(self):
+        # Isolated wizard with fake file ownership / socket GID: no Docker calls.
+        body = ('detect_docker_gid() { echo 999; }; '
+                '_publish_file() { cp "$1" "$2"; }; '
+                'DC=docker; configure_all')
+        result = self.run_function(
+            body, input_data="\n".join(["4", "", "", "", "", "", ""]) + "\n"
+        )
+        self.assertEqual(result.returncode, 0, result.output)
+        config = yaml.safe_load((self.root / "watchdog-config.yaml").read_text())
+        self.assertEqual(config["ha_monitor"], {
+            "enabled": False, "exporter_url": "http://127.0.0.1:9664/metrics",
+        })
+        self.assertEqual(self.calls(), [])
+
+    def test_generated_config_can_enable_ha_with_custom_exporter(self):
+        body = ('detect_docker_gid() { echo 999; }; '
+                '_publish_file() { cp "$1" "$2"; }; '
+                'DC=docker; configure_all')
+        result = self.run_function(
+            body, input_data="\n".join(
+                ["4", "", "", "", "", "yes",
+                 "http://127.0.0.1:9777/metrics", ""]
+            ) + "\n"
+        )
+        self.assertEqual(result.returncode, 0, result.output)
+        config = yaml.safe_load((self.root / "watchdog-config.yaml").read_text())
+        self.assertEqual(config["ha_monitor"], {
+            "enabled": True, "exporter_url": "http://127.0.0.1:9777/metrics",
+        })
         self.assertEqual(self.calls(), [])
 
     def test_recreate_targets_watchdog_only(self):

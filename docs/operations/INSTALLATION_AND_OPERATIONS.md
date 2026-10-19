@@ -248,7 +248,15 @@ container_health_checks:
 
 Fields are `type` (`http` or `exec`), `internal_port` and `path` for HTTP, `command` for exec, and optional `timeout_seconds` (default 5). Exec probes run commands **inside monitored containers**. Check the impact of probe, exclusion and ignore-rule changes before applying them.
 
-For HA alerts, enable `ha_monitor` on both nodes with a working local exporter. Check the configured exporter URL read-only (normally `http://127.0.0.1:9664/metrics`). The first valid reading sets a baseline without sending an alert.
+From v1.6.0, the installer offers an optional HA check (disabled by default) and generates this block. **Existing configurations are preserved on upgrade**; older installations may not have this block. To enable HA, add this block at the top level of `watchdog-config.yaml` on **both HA nodes**:
+
+```yaml
+ha_monitor:
+  enabled: true
+  exporter_url: http://127.0.0.1:9664/metrics
+```
+
+Enable this only for HA deployments. Verify its URL read-only, then restart **only** the watchdog ([Section 4.6](#46-apply-configuration-changes)). The first valid reading sets a baseline without sending an alert.
 
 ### 4.5 Environment variables
 

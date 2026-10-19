@@ -594,6 +594,15 @@ configure_all() {
         echo ""
     fi
 
+    # ── Optional HA monitoring (separate from alert delivery channels) ──────
+    local HA_ENABLED HA_EXPORTER_URL="http://127.0.0.1:9664/metrics"
+    print_info "Optional CyberController HA monitoring"
+    HA_ENABLED=$(_prompt_yn "Enable active-node change alerts? (configure both HA nodes)" "no")
+    if [ "$HA_ENABLED" = "true" ]; then
+        HA_EXPORTER_URL=$(_prompt "Local HA exporter URL" "$HA_EXPORTER_URL")
+    fi
+    echo ""
+
     # ── Hostname shown in alerts ──────────────────────────────────────────────
     print_info "Identity"
     local HOST_DEFAULT WATCHDOG_HOST
@@ -681,6 +690,10 @@ configure_all() {
         printf "log_file: /var/log/watchdog/watchdog.log\n"
         printf "state_file: /var/log/watchdog/state.json\n"
         printf "boot_grace_seconds: 180\n"
+        printf "\n# Optional HA active-node alerts; enable on both HA nodes.\n"
+        printf "ha_monitor:\n"
+        printf "  enabled: %s\n" "$HA_ENABLED"
+        printf "  exporter_url: %s\n" "$HA_EXPORTER_URL"
         printf "\nsyslog:\n"
         printf "  enabled:  %s\n" "$SYSLOG_ENABLED"
         printf "  host:     %s\n" "${SYSLOG_HOST:-127.0.0.1}"
