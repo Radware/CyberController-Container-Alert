@@ -21,6 +21,10 @@ _WANTED = {
 }
 
 
+class NoPromotedHAOperatorError(ValueError):
+    """Valid HA scrape/quorum, but no uniquely promoted owner *yet*."""
+
+
 @dataclass(frozen=True)
 class HAObservation:
     active_node: str
@@ -94,8 +98,12 @@ def parse_ha_metrics(text: str) -> HAObservation:
         raise ValueError("Pacemaker scrape failed or cluster has no quorum")
     if len(local) != 1 or not local[0] or len(local[0]) > 255:
         raise ValueError("cannot identify unique local HA node")
-    if len(promoted) != 1 or not promoted[0] or len(promoted[0]) > 255:
-        raise ValueError("cannot identify unique promoted HA Operator")
+    if not promoted:
+        raise NoPromotedHAOperatorError("no promoted HA Operator observed")
+    if len(promoted) > 1:
+        raise ValueError("multiple promoted HA Operators observed")
+    if not promoted[0] or len(promoted[0]) > 255:
+        raise ValueError("invalid promoted HA Operator node")
     return HAObservation(active_node=promoted[0], local_node=local[0])
 
 

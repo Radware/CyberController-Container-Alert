@@ -258,6 +258,8 @@ ha_monitor:
 
 Enable this only for HA deployments. Verify its URL read-only, then restart **only** the watchdog ([Section 4.6](#46-apply-configuration-changes)). The first valid reading sets a baseline without sending an alert.
 
+Starting in v1.6.1, up to two consecutive HA exporter observations with **no promoted HA Operator** are treated as a possible short failover transition and do not generate Syslog ERROR noise. The third consecutive observation is an ERROR (about two minutes after the first with default 60-second polling). Multiple promoted owners, exporter failures and missing quorum remain immediate errors; the watchdog does not automatically remediate Pacemaker or change application containers.
+
 ### 4.5 Environment variables
 
 The installer manages most `.env` values. SMTP passwords, Slack webhooks and SNMPv3 passphrases belong here, not in YAML. The SNMPv1/v2c community is configured in YAML, so protect that file too.
