@@ -54,6 +54,8 @@ git diff --check
 
 The Python test environment needs the repo's test dependencies (including Docker SDK, Requests, PyYAML). Installer/package tests use fake Docker. **Never** run real failure-injection tests or `tests/release-smoke.sh` on operational/shared Docker hosts.
 
+**YAML parity guard:** `tests/test_installer_image.py` runs the installer with a fake Docker executable, parses its generated YAML and the reference `watchdog-config.yaml.example`, and compares **all active nested configuration key paths in both directions**, plus non-wizard default values. Any future setting added to or removed from either file must be reflected in the other. Wizard-specific destinations and SNMPv3-only conditional settings are intentionally not compared for literal values. Preserve existing configuration on upgrade; never force-regenerate customer YAML as part of a parity fix.
+
 **Step 4 — Commit, push, request review.**
 
 ```bash
