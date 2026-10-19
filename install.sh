@@ -369,7 +369,7 @@ load_release_archive() {
     print_success "Loaded and verified $IMAGE_NAME"
 }
 
-# One release bundle contains its own approved, version-labelled Docker image.
+# One release bundle contains its version-labelled Docker image.
 # A missing or invalid archive aborts before changing application configuration.
 load_docker_image() {
     print_section "Load Release Image"
@@ -537,16 +537,16 @@ configure_all() {
     fi
 
     # ── SMTP ──────────────────────────────────────────────────────────────────
-    local SMTP_HOST="smtp.radware.com" SMTP_PORT="587"
-    local SMTP_SENDER="noc-alerts@radware.com" SMTP_RECIPIENTS="ops-team@radware.com"
+    local SMTP_HOST="smtp.example.com" SMTP_PORT="587"
+    local SMTP_SENDER="sender@example.com" SMTP_RECIPIENTS="alerts@example.com"
     local SMTP_TLS="true" SMTP_AUTH="true" SMTP_USERNAME="" SMTP_PASSWORD="" SMTP_ENABLED="false"
     if _in_array "smtp" "${SELECTED_CHANNELS[@]}"; then
         SMTP_ENABLED="true"
         print_info "SMTP (email)"
-        SMTP_HOST=$(_prompt       "Server host"                  "smtp.radware.com")
+        SMTP_HOST=$(_prompt       "Server host"                  "smtp.example.com")
         SMTP_PORT=$(_prompt       "Port"                         "587")
-        SMTP_SENDER=$(_prompt     "Sender address"               "noc-alerts@radware.com")
-        SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "ops-team@radware.com")
+        SMTP_SENDER=$(_prompt     "Sender address"               "sender@example.com")
+        SMTP_RECIPIENTS=$(_prompt "Recipients (comma-separated)" "alerts@example.com")
         SMTP_TLS=$(_prompt_yn     "Use TLS?"                     "yes")
         SMTP_AUTH=$(_prompt_yn    "Server requires authentication (login)?" "yes")
         if [ "$SMTP_AUTH" = "true" ]; then
@@ -652,7 +652,7 @@ configure_all() {
         r=$(echo "$r" | tr -d '[:space:]')
         [ -n "$r" ] && RECIPIENTS_YAML+="    - ${r}"$'\n'
     done
-    [ -z "$RECIPIENTS_YAML" ] && RECIPIENTS_YAML="    - ops-team@radware.com"$'\n'
+    [ -z "$RECIPIENTS_YAML" ] && RECIPIENTS_YAML="    - alerts@example.com"$'\n'
 
     # ── Write watchdog-config.yaml ────────────────────────────────────────────
     local CONFIG_TMP
@@ -673,7 +673,7 @@ configure_all() {
         printf "      com.radware.cybercontroller.role: mariadb-ha-syntax-check\n"
         printf "    events:\n"
         printf "      - die\n"
-        printf "# Preferred: R&D labels temporary MariaDB HA syntax-check containers as above.\n"
+        printf "# Temporary MariaDB HA syntax-check containers should carry the label shown above.\n"
         printf "# Fallback: suppress kvision_infra_mariadb AutoRemove dump helpers exiting 137\n"
         printf "# only when /mnt/cli/tmp/mariadb_dump.sql.gz is mounted; primary MariaDB stays monitored.\n"
         printf "\nrunbook_base_url: \"\"\n"

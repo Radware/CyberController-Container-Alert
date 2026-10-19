@@ -152,7 +152,7 @@ The following is the **source repository** layout, not the customer archive. The
 | Running container (memory) | ~50–80 MB baseline; capped at `mem_limit: 256m` in `docker-compose.yaml` |
 | `watchdog.tar` export | Approximate; inspect the actual published release |
 
-> **Note:** Size and memory figures above are prior estimates, not guaranteed release specifications. Actual image size varies by build. If resource usage is abnormal, capture Docker health, logs, and usage observations for engineering review before making production resource-limit changes.
+> **Note:** Size and memory figures above are prior estimates, not guaranteed release specifications. Actual image size varies by build. If resource usage is abnormal, collect Docker health, logs and resource metrics. Do not change resource limits based only on a monitoring alert.
 
 ### Container Hardening
 
@@ -201,9 +201,9 @@ At least one channel must be selected in the installer; multiple channels may be
 
 ## 5. Deployment Instructions
 
-Install **one complete versioned package** from an approved [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases), or obtain the same package through authorized offline transfer. No Git clone, separate Docker image download, or source build is required on the customer host.
+Install **one complete versioned package** from a published [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases), or transfer the same package from another machine. No Git clone, separate Docker image download, or source build is required on the customer host.
 
-Download/transfer both `container-alert-v1.6.0.tar.gz` and `SHA256SUMS` (substitute your approved version). From the directory containing those two files:
+Download/transfer both `container-alert-v1.6.0.tar.gz` and `SHA256SUMS` (substitute the version you selected). From the directory containing those two files:
 
 ```bash
 sha256sum --check SHA256SUMS
@@ -277,11 +277,11 @@ failures on application containers.
 
 **Version 1.6.0 (2026-10-15):** This section documents v1.6.0 and changes since v1.5.4. Release artifacts are built, tested and published separately; updating the source checkout does not upgrade running containers.
 
-**Release procedure:** Merge reviewed release changes into `main`, then push the approved matching `vX.Y.Z` tag. GitHub Actions builds the image, assembles one complete customer package and its checksum, and publishes the [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases). PR merges do **not** publish automatically. Follow the reusable [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md); version-specific approval for v1.6.0 is in its [finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_V1.6.0_CHECKLIST.md).
+**Release procedure:** Merge reviewed release changes into `main`, then push the matching `vX.Y.Z` tag. GitHub Actions builds the image, assembles one complete customer package and its checksum, and publishes the [GitHub Release](https://github.com/Radware/CyberController-Container-Alert/releases). PR merges do **not** publish automatically. Follow the reusable [Development Guide](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/DEVELOPMENT_AND_RELEASE.md); v1.6.0 publication checks are in its [finalization checklist](https://github.com/Radware/CyberController-Container-Alert/blob/main/docs/dev/RELEASE_V1.6.0_CHECKLIST.md).
 
 | Version | Date | Author | Changes |
 |---------|------------|--------|---------|
-| 1.6.0 | 2026-10-15 | Radware engineering | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, one complete versioned release package and wizard, approved informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/operations/RELEASE_NOTES_V1.6.0.md). |
+| 1.6.0 | 2026-10-15 | — | Changes since 1.5.4: PRs [#3](https://github.com/Radware/CyberController-Container-Alert/pull/3), [#4](https://github.com/Radware/CyberController-Container-Alert/pull/4), [#5](https://github.com/Radware/CyberController-Container-Alert/pull/5), [#6](https://github.com/Radware/CyberController-Container-Alert/pull/6), [#7](https://github.com/Radware/CyberController-Container-Alert/pull/7), [#8](https://github.com/Radware/CyberController-Container-Alert/pull/8), [#10](https://github.com/Radware/CyberController-Container-Alert/pull/10); corrected restart-loop/recovery lifecycle, planned-stop/exit-137 handling, event ID/name reuse, independent optional HA failover detection, Syslog and notification consistency, one complete versioned release package and wizard, revised informational alert messages, and isolated-only release smoke tests. See [complete v1.6.0 release notes](docs/operations/RELEASE_NOTES_V1.6.0.md). |
 | 1.5.4 | 2026-09-23 | Rahul Kumar | Versioned Docker image (`watchdog:<VERSION>`) driven by the root `VERSION` file; installer loads the packaged `watchdog.tar`, rejects an archive that does not carry the release tag, aborts on Compose failures, and verifies the running image; restart-loop detection now uses Docker `RestartCount` instead of counting poll observations; `container_health_checks` overrides implemented; fixed `.env` migration on root-owned files; `watchdog-config.yaml` made readable by the non-root container user |
 | 1.5.3 | 2026-09-16 | Rahul Kumar | Resource Limits Enforced |
 | 1.5.2 | 2026-08-31 | Rahul Kumar | Updated error message"Suppressing expected Cyber Controller SQL dump syntax-check container termination (exit 137) alert"  | 
@@ -290,7 +290,7 @@ failures on application containers.
 | 1.4.0 | 2026-08-17 | Rahul Kumar | Added INFO "recovered" alert |
 | 1.3.3 | 2026-08-05 | Rahul Kumar | Added Auth True/false |
 | 1.3.2 | 2026-07-28 | Rahul Kumar | Fixed SMTP Auth issue |
-| 1.3.1 | 2026-07-21 | Radware engineering | Updated Readme and Deployment guides |
+| 1.3.1 | 2026-07-21 | — | Updated Readme and Deployment guides |
 | 1.3.0 | 2026-07-16 | Rahul Kumar | Added Upgrade Guide |
 | 1.2.0 | 2026-07-16 | Rahul Kumar | Removed sudo and renamed the container |
 | 1.1.0 | 2026-07-09 | Rahul Kumar | Added SNMPv3 support |

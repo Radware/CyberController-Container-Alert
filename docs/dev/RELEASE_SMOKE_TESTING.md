@@ -4,7 +4,7 @@
 
 ## Safety rule
 
-**NEVER run `tests/release-smoke.sh` on CyberController, customer systems, or any shared Docker host.** Do not try to make a live host "safe" by changing its watchdog exclusions, switching off its notifications, labelling dummy containers, or setting a live-host opt-in flag.
+**NEVER run `tests/release-smoke.sh` on production CyberController, customer production systems, or any shared Docker host.** Do not try to make a live host "safe" by changing its watchdog exclusions, switching off its notifications, labelling dummy containers, or setting a live-host opt-in flag.
 
 Instead run the workflow [Release smoke (isolated)](../../.github/workflows/release-smoke.yml). It executes on a **GitHub-hosted disposable runner** and creates a second, empty, short-lived, uniquely labelled Docker-in-Docker Engine. Only that Engine's Docker socket is mounted inside the test observer. The temporary outer Engine is visible to the GitHub runner's Docker daemon, never to any operational host. All test-created resources are disposable and contained within that hosted worker.
 
@@ -28,7 +28,7 @@ workflow file exists on the default branch.
 
 3. Confirm the workflow's commit SHA matches the release PR head. It builds the watchdog image on the **hosted runner only**, loads it into a freshly created nested Docker Engine, and checks that the image files match the checked-out source.
 4. Download the attached structured evidence artifact (Docker events, alerts, raw UDP receiver packets, state snapshot, run reports). The workflow runs both the full acceptance suite and the additional kernel OOM/manual restart scenario.
-5. All cases must PASS; the final cleanup must report zero test-labelled containers and volumes. Keep the actual workflow URL/commit in the release approval record.
+5. All cases must PASS; the final cleanup must report zero test-labelled containers and volumes. Keep the actual workflow URL/commit in the release verification record.
 
 ## Automatic fail-closed checks
 

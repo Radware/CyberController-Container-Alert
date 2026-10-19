@@ -35,7 +35,7 @@ lifecycle_detection:
 excluded_containers: []
   # - my-temp-container
 
-# Narrow, approved exception for Radware-designated temporary syntax checks.
+# Narrow exception for labelled temporary syntax-check containers.
 ignored_container_events:
   - label:
       com.radware.cybercontroller.role: mariadb-ha-syntax-check
