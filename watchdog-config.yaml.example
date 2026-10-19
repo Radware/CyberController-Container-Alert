@@ -42,7 +42,9 @@ excluded_containers: []
 # No label rule is needed for that helper.
 ignored_container_events: []
 
- 
+# Optional runbook URL included in alert details (leave empty when not configured).
+runbook_base_url: ""
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 log_level: INFO     # DEBUG | INFO | WARNING | ERROR (default INFO)
 log_file: /var/log/watchdog/watchdog.log   # bind-mounted to ./watchdog/watchdog.log on host
