@@ -9,6 +9,7 @@ This guide covers **installation, configuration, day-to-day operations, upgrades
    - [Get and verify the release package](#21-get-and-verify-the-release-package)
    - [Run the installer](#22-run-the-installer)
 3. [Verify the installation](#3-verify-the-installation)
+   - [Optional isolated SMTP end-to-end validation](#31-optional-isolated-smtp-end-to-end-validation)
 4. [Configuration reference](#4-configuration-reference)
    - [Configuration files and editing](#41-configuration-files-and-editing)
    - [Watchdog monitoring settings](#42-watchdog-monitoring-settings)
@@ -112,7 +113,7 @@ The watchdog should be `running` and become `healthy`; the image should be `watc
 | `./watchdog/state.json` | Incident, HA and reboot state; do not edit manually |
 | `grep 'watchdog_alert' watchdog/watchdog.log` | Find existing alert records |
 
-Check that the selected Syslog, SMTP, SNMP or Slack receiver can be reached and inspect any alerts already received. No artificial container failure is needed.
+Check that the selected Syslog, SMTP, SNMP or Slack receiver can be reached and inspect any alerts already received. No artificial failure is needed for the basic checks. Optional real SMTP delivery validation is described in Section 3.1 below.
 
 **Optional HA check:** If `ha_monitor.enabled: true`, check the local exporter on **each HA node**:
 
@@ -121,6 +122,75 @@ curl -fsS http://127.0.0.1:9664/metrics
 ```
 
 Use the configured exporter URL if different. The first successful reading establishes a baseline; it does not send a failover alert. Test a real switchover only during planned HA maintenance.
+
+
+### 3.1 Optional isolated SMTP end-to-end validation
+
+This optional post-install test creates **only a disposable container** to exercise a real Docker `die` event, watchdog CRASH detection, and SMTP dispatch. It never modifies or stops CyberController application containers.
+
+> **PRODUCTION CAUTION:** Run only with approval, after checking free host capacity and notifying the email/on-call recipients. A real **CRITICAL TEST** alert may be sent to **all enabled channels**, not just SMTP. Do not stop, kill, or restart real service containers to test notifications. Wait until the watchdog is healthy and any post-reboot grace period has ended. Do **not** run the test with `--rm`: the watchdog needs time to inspect the stopped container.
+
+**1. Verify configuration (read-only)** from the watchdog installation directory. Confirm `smtp` appears in `alert_channels`, `smtp.enabled: true`, and the recipient is correct. Never print the secret values from `.env`.
+
+```bash
+grep -A6 '^alert_channels:' watchdog-config.yaml
+grep -A12 '^smtp:' watchdog-config.yaml
+docker inspect docker-container-watchdog --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}'
+docker logs --tail 30 docker-container-watchdog
+```
+
+**2. Cause one isolated nonzero exit.** Run all commands in the **same shell**, retaining `NAME` for cleanup. Uses only the installed local watchdog image (no pull), without a network, ports, mounts, or restart policy; resource limits apply only to the disposable container.
+
+```bash
+NAME="ca-smtp-test-$(date +%s)"
+IMG="$(docker inspect --format '{{.Config.Image}}' docker-container-watchdog)"
+docker run -d \
+  --pull=never \
+  --name "$NAME" \
+  --label watchdog.validation=smtp \
+  --network none \
+  --read-only \
+  --no-healthcheck \
+  --restart no \
+  --memory 64m \
+  --cpus 0.10 \
+  --pids-limit 32 \
+  --entrypoint python3 \
+  "$IMG" -c 'import time,sys; time.sleep(10); sys.exit(42)'
+
+docker wait "$NAME"   # Expect 42
+docker inspect "$NAME" --format 'ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}'
+```
+
+Expected: `ExitCode=42 OOMKilled=false`. An unexpected nonzero exit generates a CRITICAL `crashed` alert after the default three-second stop-correlation window.
+
+**3. Verify end-to-end SMTP:** Wait for the correlation window, then check the watchdog log and **recipient mailbox**. Expect a subject containing `[CRITICAL] Container CRASHED` and the exact `ca-smtp-test-...` name, plus exit code 42. At INFO log level successful submission produces `SMTP: alert sent to ... recipient(s)`; the SMTP server accepting a message **does not guarantee mailbox delivery**.
+
+```bash
+sleep 5
+docker logs --since 5m docker-container-watchdog 2>&1 | grep -E "$NAME|SMTP:|watchdog_alert"
+```
+
+If the alert is missing, investigate the watchdog logs, SMTP relay, spam filtering, channel settings, and delivery receipt before considering another test. Avoid repeated CRITICAL notifications.
+
+**4. Mandatory cleanup (also after a failed test):** Remove **only** the named disposable container after collecting evidence. This guard refuses removal unless both the name prefix and test label match.
+
+```bash
+case "$NAME" in
+  ca-smtp-test-*)
+    if [ "$(docker inspect --format '{{index .Config.Labels "watchdog.validation"}}' "$NAME")" = "smtp" ]; then
+      docker rm "$NAME"
+    else
+      echo "Refusing cleanup: test label missing" >&2
+    fi
+    ;;
+  *)
+    echo "Refusing cleanup: unexpected container name" >&2
+    ;;
+esac
+```
+
+> **Cleanup caution:** Never use `docker rm -f`, `docker container prune`, or `docker system prune` for this test. If the shell/variable was lost, use `docker ps -a --filter label=watchdog.validation=smtp`, verify the **exact** container identity, and remove that one test container only. Nothing should be removed from the actual CyberController stack.
 
 
 ## 4. Configuration reference
