@@ -27,11 +27,12 @@ import socket
 import yaml
 
 from lifecycle import DockerLifecycleCorrelator
-from ha_monitor import HARoleTracker, read_ha_observation
+from ha_monitor import HARoleTracker, NoPromotedHAOperatorError, read_ha_observation
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 SYSLOG_FORMAT = "watchdog[%(process)d]: %(message)s"
+HA_NO_PROMOTED_ERROR_POLLS = 3  # Ignore short promotion gaps, never indefinite loss.
 
 
 class AlertSyslogFilter(logging.Filter):
@@ -96,9 +97,6 @@ def setup_logging(level: str, log_file: str | None, syslog_cfg: dict | None = No
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_KVISION_MARIADB_SYNTAX_CHECK_LABEL = "com.radware.cybercontroller.role"
-_KVISION_MARIADB_SYNTAX_CHECK_ROLE = "mariadb-ha-syntax-check"
-
 DEFAULT_CONFIG = {
     "alert_channels": ["slack"],
     "check_interval_seconds": 60,
@@ -110,14 +108,7 @@ DEFAULT_CONFIG = {
     "unhealthy_cycles_threshold": 3,
     "alert_on_recovery": True,
     "excluded_containers": [],
-    "ignored_container_events": [
-        {
-            "label": {
-                _KVISION_MARIADB_SYNTAX_CHECK_LABEL: _KVISION_MARIADB_SYNTAX_CHECK_ROLE,
-            },
-            "events": ["die"],
-        },
-    ],
+    "ignored_container_events": [],  # opt-in label policy; MariaDB dump helper uses a separate strict predicate
     "log_file": "/var/log/watchdog/watchdog.log",
     "log_level": "INFO",
     # Alert state survives restarts so recovery alerts still fire after a reboot.
@@ -1422,6 +1413,8 @@ class Watchdog:
             self.state.save(self._boot_time)
         self._ha_tracker = HARoleTracker(self.state.get_ha_node())
         self._ha_error_log_at = float("-inf")
+        self._ha_last_error_reason = None
+        self._ha_missing_promoted_polls = 0
 
     # ── State restore ─────────────────────────────────────────────────────────
     def _restore_state(self) -> None:
@@ -1882,11 +1875,28 @@ class Watchdog:
             observation = read_ha_observation(session, url)
         except Exception as exc:
             self._ha_tracker.reset_candidate()
-            if time.monotonic() - self._ha_error_log_at >= 300:
-                self._ha_error_log_at = time.monotonic()
+            if isinstance(exc, NoPromotedHAOperatorError):
+                self._ha_missing_promoted_polls += 1
+                if self._ha_missing_promoted_polls < HA_NO_PROMOTED_ERROR_POLLS:
+                    log.debug("HA promotion pending (%d/%d): %s",
+                              self._ha_missing_promoted_polls,
+                              HA_NO_PROMOTED_ERROR_POLLS, exc)
+                    return
+            else:
+                # Multiple promoters, lost quorum and exporter failures are not
+                # normal promotion gaps; report their first occurrence at once.
+                self._ha_missing_promoted_polls = 0
+
+            reason = (type(exc).__name__, str(exc))
+            now = time.monotonic()
+            if reason != self._ha_last_error_reason or now - self._ha_error_log_at >= 300:
+                self._ha_error_log_at = now
+                self._ha_last_error_reason = reason
                 log.error("HA check unavailable (%s): %s", type(exc).__name__, exc)
             return
 
+        self._ha_missing_promoted_polls = 0
+        self._ha_last_error_reason = None
         changed, change = self._ha_tracker.observe(observation)
         if changed:
             self.state.set_ha_node(self._ha_tracker.confirmed)

@@ -11,6 +11,8 @@
 | Run HA polling in a **separate thread and HTTP session** from Docker polling | Slow or blocked Docker API calls must not delay HA observations; HA exporter failures must not interrupt container monitoring |
 | Require **quorum, a successful Pacemaker scrape, one local node and exactly one promoted owner** | Missing or conflicting telemetry is not proof of a role change; fail closed instead of inventing a failover |
 | Require **two consecutive valid observations** of a new active node | Avoid reporting transient/promoted-resource ambiguity while the cluster is transitioning |
+| Allow **two consecutive no-promoted-owner observations** before logging an ERROR on the third | A failover may temporarily have no active/promoted operator. Avoid transient Syslog noise, but do not hide persistent loss of an owner |
+| Report **multiple promoted owners, exporter failures and loss of quorum immediately** | These are not an ordinary empty-promotion gap and must not be silenced by the grace period |
 | **Only the newly active node** emits the alert | Watchdogs run on both nodes; duplicate notifications from old and new active nodes would be misleading |
 | Persist the confirmed active node using the existing state file | Survive watchdog restarts without replaying an old role change or creating a second state store |
 | Reuse the existing notification channels and SNMP MIB | Treat HA as another monitored event without adding a new alert transport or breaking container notifications |
@@ -21,7 +23,7 @@
 2. It reads `ha_cluster_pacemaker_resources{resource="HAOperatorRep-Res",role="promoted",status="active"} == 1` to identify the active owner and `ha_cluster_corosync_member_votes{local="true"}` to identify the local node. The Pacemaker scrape-success and quorum metrics must both be 1.
 3. The **first valid reading** establishes a silent baseline. An active-node change must appear in **two valid consecutive checks** before it is confirmed.
 4. On a confirmed transition A → B, both nodes can update their saved baseline, but **only the watchdog local to B** issues one `WARNING` `ha-failover` event with previous/new node details.
-5. Invalid/unavailable metrics leave the last confirmed baseline unchanged and reset a pending candidate. Exporter errors are logged at most once every five minutes; they never trigger a speculative failover alert.
+5. Invalid/unavailable metrics leave the last confirmed baseline unchanged and reset a pending candidate. A valid Pacemaker scrape with quorum but **zero promoted HA Operator** matches is treated as a possible promotion gap: the first two consecutive observations are DEBUG-only; the third consecutive observation generates an ERROR. At the default 60-second interval, the third observation is about two minutes after the first. A valid observation resets the counter. **Multiple promoted owners**, failed Pacemaker scrape/lost quorum, and exporter transport failures generate an immediate ERROR. Repeated identical diagnostic errors are throttled to at most once every five minutes; a different failure reason is logged immediately. These observations never trigger a speculative failover alert.
 6. HA state is kept separately from container incidents in `watchdog/state.json`. Restart with monitoring enabled restores that state. Running the watchdog with HA monitoring disabled clears its baseline, so a later re-enable starts silently.
 7. During the host reboot grace interval, HA role checks are deferred. HA events are not included in container recovery or reboot-summary logic.
 
